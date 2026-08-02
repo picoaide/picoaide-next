@@ -30,5 +30,5 @@ func (p *LocalProvider) Authenticate(username, password string) (UserInfo, error
 		return UserInfo{}, err
 	}
 	groups, _ := serverstore.UserGroups(p.db, u.ID)
-	return UserInfo{Username: u.Username, DisplayName: u.DisplayName, Email: u.Email, Groups: groups}, nil
+	return UserInfo{Username: u.Username, DisplayName: u.DisplayName, Email: u.Email, Groups: groups, Source: "local"}, nil
 }

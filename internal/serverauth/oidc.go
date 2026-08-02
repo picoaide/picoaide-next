@@ -135,6 +135,7 @@ func (p *OIDCProvider) HandleCallback(code, state string) (UserInfo, error) {
 		DisplayName: claims.Name,
 		Email:       claims.Email,
 		Groups:      claims.Groups,
+		Source:      "external",
 	}, nil
 }
 
