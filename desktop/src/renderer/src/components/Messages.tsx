@@ -1,22 +1,24 @@
 import { useEffect, useRef } from 'react'
 import { ScrollArea } from './ui/scroll-area'
 import { cn } from '../lib/utils'
-import type { ChatMessage } from '../stores/chat'
+import ToolCalls from './ToolCalls'
+import type { ChatMessage, ToolCallView } from '../stores/chat'
 
 interface MessagesProps {
   messages: ChatMessage[]
   streaming: boolean
   streamingText: string
+  toolCalls: ToolCallView[]
   error: string | null
 }
 
-export default function Messages({ messages, streaming, streamingText, error }: MessagesProps) {
+export default function Messages({ messages, streaming, streamingText, toolCalls, error }: MessagesProps) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const nearBottom = useRef(true)
 
   useEffect(() => {
     if (nearBottom.current) bottomRef.current?.scrollIntoView({ block: 'end' })
-  }, [messages, streamingText])
+  }, [messages, streamingText, toolCalls])
 
   if (messages.length === 0 && !streaming && !error) {
     return (
@@ -41,7 +43,15 @@ export default function Messages({ messages, streaming, streamingText, error }: 
           {messages.map((m) => (
             <Bubble key={m.id} role={m.role} content={m.content} isError={m.is_error === 1} />
           ))}
-          {streaming && <Bubble role="assistant" content={streamingText} streaming />}
+          {streaming && (
+            <div className="flex justify-start">
+              <div className="max-w-[80%] whitespace-pre-wrap rounded-lg border bg-card px-3 py-2 text-sm text-card-foreground">
+                {streamingText}
+                <span className="ml-0.5 inline-block w-1.5 animate-pulse bg-foreground" aria-hidden />
+                <ToolCalls calls={toolCalls} />
+              </div>
+            </div>
+          )}
           <div ref={bottomRef} />
         </div>
       </ScrollArea>

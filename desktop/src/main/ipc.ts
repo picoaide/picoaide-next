@@ -1,6 +1,6 @@
 import { ipcMain } from 'electron'
 import { AgentEngine } from './agent/engine'
-import type { StoreLike as EngineStore } from './agent/engine'
+import type { GatedTool, StoreLike as EngineStore } from './agent/engine'
 import type { AgentEvent } from './agent/events'
 import type { LanguageModel } from 'ai'
 import { ApiError, AuthError } from './gateway/auth'
@@ -66,17 +66,21 @@ export interface AgentIpcDeps {
   store: StoreLike
   createModel: () => LanguageModel
   sysPrompt: string
+  // 工具注册表(本地文件/终端/沙盒/屏幕/剪贴板/web/浏览器桥/远程知识库),index.ts 构建;craft 模式时调用
+  getTools: () => Promise<{ tools: Record<string, GatedTool>; highRiskTools: Set<string> }>
   getWindow: () => { webContents: { send(channel: string, payload: unknown): void } } | null
 }
 
 export interface IpcHandlers {
   'picoaide:version': () => string
+  'picoaide:rendererReady': () => void
   'chat:new': (input?: { title?: string; mode?: string }) => number
   'chat:ask': (input: { conversationId: number; content: string }) => Promise<void>
   'chat:cancel': () => void
   'chat:list': () => ConversationRow[]
   'chat:messages': (input: { conversationId: number }) => MessageRow[]
   'chat:delete': (input: { conversationId: number }) => void
+  'agent:confirm': (input: { requestId: string; ok: boolean }) => void
   'auth:login': (input: { serverURL: string; username: string; password: string }) => Promise<{
     session: Session & { persisted: boolean }
     bootstrap: BootstrapConfig
@@ -104,19 +108,46 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
         { model: deps.createModel(), sysPrompt: deps.sysPrompt },
         {
           store: deps.store,
-          emit: (ev: AgentEvent) => deps.getWindow()?.webContents.send('agent:event', ev),
+          emit: emitAgentEvent,
         },
       )
     }
     return engine
   }
+  // confirm_required 事件缓冲:renderer 未就绪(未订阅 agent:event)时暂存,rendererReady 后补发(防弹窗丢失)
+  let rendererReady = false
+  const pending: AgentEvent[] = []
+  const emitAgentEvent = (ev: AgentEvent): void => {
+    if (ev.type === 'confirm_required' && !rendererReady) {
+      pending.push(ev)
+      return
+    }
+    deps.getWindow()?.webContents.send('agent:event', ev)
+  }
+  const flushPending = (): void => {
+    while (pending.length > 0) {
+      const ev = pending.shift()
+      if (ev) deps.getWindow()?.webContents.send('agent:event', ev)
+    }
+  }
   return {
     'picoaide:version': () => VERSION,
+    'picoaide:rendererReady': () => {
+      rendererReady = true
+      flushPending()
+    },
     'chat:new': (input) => deps.store.createConversation(input),
     'chat:ask': async ({ conversationId, content }) => {
-      await getEngine().ask({ conversationId, content })
+      const conv = deps.store.getConversation(conversationId)
+      if (conv?.mode === 'craft') {
+        const { tools, highRiskTools } = await deps.getTools()
+        await getEngine().craft({ conversationId, content, tools, highRiskTools })
+      } else {
+        await getEngine().ask({ conversationId, content })
+      }
     },
     'chat:cancel': () => getEngine().cancel(),
+    'agent:confirm': ({ requestId, ok }) => getEngine().confirm(requestId, ok),
     'chat:list': () => deps.store.listConversations(),
     'chat:messages': ({ conversationId }) => deps.store.listMessages(conversationId),
     'chat:delete': ({ conversationId }) => deps.store.deleteConversation(conversationId),

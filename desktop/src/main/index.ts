@@ -1,5 +1,8 @@
 import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'path'
+import { tool } from 'ai'
+import { z } from 'zod'
+import type { Tool } from 'ai'
 import { registerIpcHandlers, buildHandlers, buildAgentHandlers, buildAuthHandlers } from './ipc'
 import type { AuthIpcDeps, StoreLike } from './ipc'
 import { openDb } from './store/db'
@@ -11,9 +14,18 @@ import {
 import { listMessages, appendMessage } from './store/messages'
 import { addArtifact, listArtifacts } from './store/artifacts'
 import { getSetting, setSetting, getAllSettings } from './store/settings'
-import { dataDir, dbPath } from './paths'
+import { dataDir, dbPath, workspaceDir } from './paths'
 import { installCertificateVerification } from './gateway/tls'
 import { createGatewayModel as makeGatewayModel } from './agent/provider'
+import { createKbTools } from './agent/engine'
+import type { GatedTool } from './agent/engine'
+import { createFileTools, HIGH_RISK_TOOLS as FILES_HIGH_RISK } from './tools/filesystem'
+import { commandExec, needsApprovalFor } from './tools/terminal'
+import { createSandboxTool, getSandbox } from './tools/sandbox'
+import { screenCaptureTool, HIGH_RISK_TOOLS as SCREEN_HIGH_RISK } from './tools/screen'
+import { clipboardReadTool, clipboardWriteTool, HIGH_RISK_TOOLS as CLIPBOARD_HIGH_RISK } from './tools/clipboard'
+import { createWebTools } from './tools/web'
+import { getAllowedDirsFromSettings, resolveAllowedDirs } from './tools/paths'
 import { login, saveSession, loadSession, clearSession } from './gateway/auth'
 import { getBootstrap } from './gateway/bootstrap'
 import { createHealthPoller } from './gateway/health'
@@ -62,6 +74,70 @@ function startPoller(session: Session) {
 function stopPoller() {
   poller?.stop()
   poller = null
+}
+
+// 浏览器桥工具(CDP 插件)可能尚未落地:安全动态导入,文件缺失时静默降级为空注册表
+async function loadBrowserTools(): Promise<{ tools: Record<string, Tool>; highRisk: string[] }> {
+  try {
+    const mod = (await import('./tools/browser')) as {
+      createBrowserTools?: () => Record<string, Tool>
+      browserTools?: () => Record<string, Tool>
+      HIGH_RISK_TOOLS?: string[]
+    }
+    const tools = mod.createBrowserTools?.() ?? mod.browserTools?.() ?? {}
+    return { tools, highRisk: mod.HIGH_RISK_TOOLS ?? [] }
+  } catch {
+    return { tools: {}, highRisk: [] }
+  }
+}
+
+// 工具注册表(架构设计 §3.4):本地文件/终端/沙盒/屏幕/剪贴板/web + 远程知识库 + 浏览器桥
+async function buildToolsRegistry(db: ReturnType<typeof openDb>): Promise<{ tools: Record<string, GatedTool>; highRiskTools: Set<string> }> {
+  const allowedDirs = resolveAllowedDirs(workspaceDir(), getAllowedDirsFromSettings((k) => getSetting(db, k)))
+  const cwd = workspaceDir()
+  const web = getBootstrapCache().web
+  const commandTool: GatedTool = {
+    ...tool({
+      description: '在本地 shell 执行命令(默认超时 60s,输出截断 50KB);高危命令弹窗确认后执行,展示串=执行串',
+      inputSchema: z.object({
+        command: z.string(),
+        timeoutSec: z.number().optional(),
+      }),
+      execute: async ({ command, timeoutSec }) => {
+        const r = await commandExec(command, { cwd, allowedDirs, timeoutSec })
+        return { stdout: r.stdout, stderr: r.stderr, code: r.code, timedOut: r.timedOut ?? false }
+      },
+    }),
+    // 命令审批策略(架构设计 §3.4):白名单命令免审批,其余走引擎门控
+    requiresApproval: (input: unknown) => {
+      const command = (input as { command?: string } | null)?.command
+      return typeof command === 'string' && needsApprovalFor(command, allowedDirs)
+    },
+  }
+  const tools: Record<string, GatedTool> = {
+    ...createFileTools({ allowedDirs, cwd }),
+    command_exec: commandTool,
+    sandbox_exec: createSandboxTool(await getSandbox()),
+    screen_capture: screenCaptureTool,
+    clipboard_read: clipboardReadTool,
+    clipboard_write: clipboardWriteTool,
+    ...createWebTools({ allowPrivate: web?.allow_private ?? false, searchEndpoint: web?.search_endpoint ?? '' }),
+  }
+  const highRiskTools = new Set<string>([
+    ...FILES_HIGH_RISK,
+    ...SCREEN_HIGH_RISK,
+    ...CLIPBOARD_HIGH_RISK,
+  ])
+  const session = getCurrentSession()
+  if (session) {
+    const kb = createKbTools(session)
+    Object.assign(tools, kb.tools)
+    for (const n of kb.highRisk) highRiskTools.add(n)
+  }
+  const browser = await loadBrowserTools()
+  Object.assign(tools, browser.tools)
+  for (const n of browser.highRisk) highRiskTools.add(n)
+  return { tools, highRiskTools }
 }
 
 app.whenReady().then(async () => {
@@ -124,6 +200,7 @@ app.whenReady().then(async () => {
         if (!model) throw new Error('无可用模型')
         return makeGatewayModel(session.serverURL, session.token, model.id)
       },
+      getTools: () => buildToolsRegistry(db),
       getWindow: () => mainWindow,
     }),
   })

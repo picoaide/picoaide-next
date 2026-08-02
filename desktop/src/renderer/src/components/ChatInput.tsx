@@ -8,7 +8,7 @@ import { useChatStore, type Mode } from '../stores/chat'
 const MODES: { id: Mode; label: string; available: boolean }[] = [
   { id: 'ask', label: 'Ask', available: true },
   { id: 'plan', label: 'Plan', available: false },
-  { id: 'craft', label: 'Craft', available: false },
+  { id: 'craft', label: 'Craft', available: true },
 ]
 
 export default function ChatInput() {

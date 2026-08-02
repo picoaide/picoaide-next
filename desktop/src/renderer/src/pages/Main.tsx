@@ -4,6 +4,7 @@ import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import ChatInput from '../components/ChatInput'
 import Messages from '../components/Messages'
+import ConfirmModal from '../components/ConfirmModal'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore } from '../stores/chat'
 import { useConnectionStore } from '../stores/connection'
@@ -17,6 +18,7 @@ export default function Main() {
   const messages = useChatStore((s) => s.messages)
   const streaming = useChatStore((s) => s.streaming)
   const streamingText = useChatStore((s) => s.streamingText)
+  const toolCalls = useChatStore((s) => s.toolCalls)
   const localError = useChatStore((s) => s.localError)
   const connStatus = useConnectionStore((s) => s.status)
   const { newConversation, loadConversations, selectConversation, deleteConversation } = useChatStore.getState()
@@ -91,12 +93,14 @@ export default function Main() {
               messages={messages}
               streaming={streaming}
               streamingText={streamingText}
+              toolCalls={toolCalls}
               error={localError}
             />
           </div>
           <ChatInput />
         </main>
       </div>
+      <ConfirmModal />
     </div>
   )
 }

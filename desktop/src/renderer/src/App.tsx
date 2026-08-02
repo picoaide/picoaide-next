@@ -10,6 +10,8 @@ export default function App() {
 
   useEffect(() => {
     const offAgent = window.picoaide.onAgentEvent((ev) => useChatStore.getState().onAgentEvent(ev))
+    // 订阅就绪后再通知主进程放行缓冲的 confirm_required(防审批弹窗丢失)
+    void window.picoaide.ready()
     const offConn = window.picoaide.onConnectionStatus((status) => {
       if (status === 'trusting_cert') return
       useConnectionStore.getState().setStatus(status)

@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { picoaide } from '../api/picoaide'
 import type { AgentEvent } from '../../../main/agent/events'
 import type { ConversationRow, MessageRow } from '../../../main/ipc'
+import { useApprovalsStore } from './approvals'
 import { useConnectionStore } from './connection'
 
 export type Mode = 'ask' | 'plan' | 'craft'
@@ -12,6 +13,17 @@ export interface ChatMessage {
   content: string
   is_error: number
   tool_name: string
+}
+
+// 工具卡片视图(流式期间由 tool_start/tool_end/tool_error 事件驱动)
+export interface ToolCallView {
+  id: string
+  name: string
+  input: unknown
+  output?: unknown
+  duration_ms?: number
+  error?: string
+  status: 'running' | 'done' | 'error'
 }
 
 function mapMessages(rows: MessageRow[]): ChatMessage[] {
@@ -30,6 +42,7 @@ interface ChatState {
   messages: ChatMessage[]
   streaming: boolean
   streamingText: string
+  toolCalls: ToolCallView[]
   mode: Mode
   localError: string | null
   newConversation: () => Promise<number | null>
@@ -49,13 +62,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   streaming: false,
   streamingText: '',
+  toolCalls: [],
   mode: 'ask',
   localError: null,
 
   newConversation: async () => {
     const id = await picoaide().chatNew({ mode: get().mode })
     const conversations = await picoaide().chatList()
-    set({ conversations, activeId: id, messages: [], streaming: false, streamingText: '', localError: null })
+    set({ conversations, activeId: id, messages: [], streaming: false, streamingText: '', toolCalls: [], localError: null })
     return id
   },
 
@@ -65,13 +79,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   selectConversation: async (id) => {
     const messages = mapMessages(await picoaide().chatMessages(id))
-    set({ activeId: id, messages, streaming: false, streamingText: '', localError: null })
+    set({ activeId: id, messages, streaming: false, streamingText: '', toolCalls: [], localError: null })
   },
 
   deleteConversation: async (id) => {
     await picoaide().chatDelete(id)
     if (get().activeId === id) {
-      set({ activeId: null, messages: [], streaming: false, streamingText: '' })
+      set({ activeId: null, messages: [], streaming: false, streamingText: '', toolCalls: [] })
     }
   },
 
@@ -117,13 +131,52 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case 'text_delta':
         set((s) => ({ streamingText: s.streamingText + ev.data }))
         break
+      case 'tool_start':
+        set((s) => ({
+          toolCalls: [...s.toolCalls.filter((t) => t.id !== ev.data.id), { ...ev.data, status: 'running' }],
+        }))
+        break
+      case 'tool_end':
+        set((s) => ({
+          toolCalls: [
+            ...s.toolCalls.filter((t) => t.id !== ev.data.id),
+            {
+              id: ev.data.id,
+              name: ev.data.name,
+              input: s.toolCalls.find((t) => t.id === ev.data.id)?.input,
+              output: ev.data.output,
+              duration_ms: ev.data.duration_ms,
+              status: 'done',
+            },
+          ],
+        }))
+        break
+      case 'tool_error':
+        set((s) => ({
+          toolCalls: [
+            ...s.toolCalls.filter((t) => t.id !== ev.data.id),
+            {
+              id: ev.data.id,
+              name: ev.data.name,
+              input: s.toolCalls.find((t) => t.id === ev.data.id)?.input,
+              error: ev.data.error,
+              status: 'error',
+            },
+          ],
+        }))
+        break
+      case 'confirm_required':
+        useApprovalsStore.getState().push(ev.data)
+        break
       case 'done':
       case 'canceled':
-        set({ streaming: false, streamingText: '' })
+        set({ streaming: false, streamingText: '', toolCalls: [] })
+        useApprovalsStore.getState().clear()
         void reloadMessages()
         break
       case 'error':
-        set({ streaming: false, streamingText: '', localError: ev.data })
+        set({ streaming: false, streamingText: '', toolCalls: [], localError: ev.data })
+        useApprovalsStore.getState().clear()
         void reloadMessages()
         break
     }

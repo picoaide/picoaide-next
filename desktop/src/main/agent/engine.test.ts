@@ -1,22 +1,36 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { tool } from 'ai'
 import { z } from 'zod'
-import type { LanguageModel, ModelMessage } from 'ai'
-import { AgentEngine, fromModelMessage, toModelMessage } from './engine'
-import type { DBMessage } from './engine'
+import type { LanguageModel, ModelMessage, Tool } from 'ai'
+import { AgentEngine, createKbTools, fromModelMessage, toModelMessage } from './engine'
+import type { AppendMessageInput, DBMessage } from './engine'
 import type { AgentEvent } from './events'
 import { createGatewayModel } from './provider'
+import type { Session } from '../gateway/config'
+import { kbSearch } from '../gateway/remote_mcp'
+
+vi.mock('../gateway/remote_mcp', () => ({
+  kbSearch: vi.fn(async () => 'kb: found'),
+  kbRead: vi.fn(async () => 'kb: doc body'),
+  kbList: vi.fn(async () => 'kb: []'),
+  kbUpload: vi.fn(async () => 'kb: uploaded'),
+}))
 
 class MockProvider {
   specificationVersion = 'v4' as const
   provider = 'mock'
   modelId = 'mock-model'
-  script: 'text' | 'tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang'
+  script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang'
+  toolName: string
   callCount = 0
   prompts: unknown[] = []
 
-  constructor(script: 'text' | 'tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang' = 'text') {
+  constructor(
+    script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang' = 'text',
+    toolName = 'file_delete',
+  ) {
     this.script = script
+    this.toolName = toolName
   }
 
   private hasToolResults(prompt: unknown): boolean {
@@ -36,13 +50,14 @@ class MockProvider {
   }
 
   private contentFor(prompt: unknown) {
-    if (this.hasToolResults(prompt)) return [{ type: 'text', text: 'final answer' }]
-    if (this.script === 'tool-call')
+    if (this.hasToolResults(prompt) && this.script !== 'always-tool-call')
+      return [{ type: 'text', text: 'final answer' }]
+    if (this.script === 'tool-call' || this.script === 'always-tool-call')
       return [
         {
           type: 'tool-call',
           toolCallId: 'call_1',
-          toolName: 'file_delete',
+          toolName: this.toolName,
           input: JSON.stringify({ path: '/home/u/x.doc' }),
         },
       ]
@@ -121,9 +136,11 @@ class MockProvider {
 // 内存版 StoreLike:默认建好 id=1 的会话;测试可覆写方法制造"会话被删"等场景
 function makeStore() {
   const conversations = new Map<number, { id: number; status: string }>()
-  const messages: Array<{ conversationId: number; role: string; content: string }> = []
+  const messages: Array<AppendMessageInput & { id: number }> = []
+  const artifacts: Array<{ conversationId: number; path: string; type: string; size: number }> = []
   let nextId = 1
   const store = {
+    artifacts,
     createConversation: (): number => {
       const id = nextId++
       conversations.set(id, { id, status: 'done' })
@@ -138,10 +155,14 @@ function makeStore() {
       conversations.delete(id)
     },
     listMessages: (conversationId: number): DBMessage[] =>
-      messages.filter((m) => m.conversationId === conversationId),
-    appendMessage: (input: { conversationId: number; role: string; content?: string }): number => {
-      messages.push({ conversationId: input.conversationId, role: input.role, content: input.content ?? '' })
+      (messages.filter((m) => m.conversationId === conversationId) as unknown as DBMessage[]),
+    appendMessage: (input: AppendMessageInput): number => {
+      messages.push({ ...input, id: messages.length + 1 })
       return messages.length
+    },
+    addArtifact: (a: { conversationId: number; path: string; type: string; size: number }): number => {
+      artifacts.push(a)
+      return artifacts.length
     },
   }
   store.createConversation()
@@ -149,11 +170,12 @@ function makeStore() {
 }
 
 function makeEngine(
-  script: 'text' | 'tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang',
+  script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang',
   cfg: Partial<{ maxSteps: number; approvalTimeoutMs: number; retryCount: number }> = {},
   store: ReturnType<typeof makeStore> = makeStore(),
+  toolName = 'file_delete',
 ) {
-  const mock = new MockProvider(script)
+  const mock = new MockProvider(script, toolName)
   const events: AgentEvent[] = []
   const engine = new AgentEngine(
     { model: mock as unknown as LanguageModel, sysPrompt: 'sys', ...cfg },
@@ -208,6 +230,8 @@ const tools = { file_read: fileRead, file_delete: fileDelete, file_wipe: fileWip
 
 afterEach(() => {
   vi.useRealTimers()
+  vi.restoreAllMocks()
+  delete process.env['PICOAI_TEST_AUTO_APPROVE']
   deletedPaths.length = 0
   wipedPaths.length = 0
 })
@@ -328,6 +352,176 @@ describe('AgentEngine craft loop', () => {
     expect(eventsOf(events, 'tool_end')).toHaveLength(1)
     expect(mock.callCount).toBe(1)
     expect(eventsOf(events, 'done')).toHaveLength(1)
+  })
+})
+
+const writeReport = tool({
+  description: 'write a report file',
+  inputSchema: z.object({ path: z.string() }),
+  execute: async () => ({ path: '/workspace/report.md', size: 10 }),
+})
+
+const noPathTool = tool({
+  description: 'returns a result without a path',
+  inputSchema: z.object({}),
+  execute: async () => ({ size: 5 }),
+})
+
+describe('AgentEngine craft (store-backed)', () => {
+  it('runs tool calls across steps, persists assistant+tool rows, and finishes', async () => {
+    const { mock, events, engine, store } = makeEngine('tool-call', {}, makeStore(), 'file_read')
+    await engine.craft({ conversationId: 1, content: 'read the file', tools, highRiskTools: new Set() })
+    expect(mock.callCount).toBe(2)
+    expect(eventsOf(events, 'tool_start')).toHaveLength(1)
+    expect(eventsOf(events, 'tool_end')).toHaveLength(1)
+    const msgs = store.listMessages(1)
+    expect(msgs.map((m) => m.role)).toEqual(['user', 'assistant', 'tool', 'assistant'])
+    const toolRow = msgs.find((m) => m.role === 'tool')
+    expect(toolRow).toMatchObject({
+      content: 'contents of /home/u/x.doc',
+      toolCallId: 'call_1',
+      toolName: 'file_read',
+      isError: false,
+    })
+    expect(store.getConversation(1)?.status).toBe('done')
+    const done = events.find((e) => e.type === 'done')
+    // totalUsage 累计整个多步 run(两轮 10/5)
+    expect(done).toEqual({ type: 'done', data: { usage: { prompt_tokens: 20, completion_tokens: 10 } } })
+  })
+
+  it('marks the conversation running before starting and persists the user message', async () => {
+    const { engine, store } = makeEngine('text')
+    let sawRunning = false
+    store.updateConversationStatus = (id, status) => {
+      if (status === 'running') sawRunning = true
+    }
+    await engine.craft({ conversationId: 1, content: 'hello', tools: {}, highRiskTools: new Set() })
+    expect(sawRunning).toBe(true)
+    expect(store.listMessages(1).map((m) => m.role)).toEqual(['user', 'assistant'])
+  })
+
+  it('emits 达到最大步骤数 error and marks failed when the model keeps calling tools', async () => {
+    const { mock, events, engine, store } = makeEngine('always-tool-call', { maxSteps: 2 }, makeStore(), 'file_read')
+    await engine.craft({ conversationId: 1, content: 'keep going', tools, highRiskTools: new Set() })
+    expect(mock.callCount).toBe(2)
+    expect(eventsOf(events, 'error')).toEqual([{ type: 'error', data: '达到最大步骤数' }])
+    expect(eventsOf(events, 'done')).toHaveLength(0)
+    expect(store.getConversation(1)?.status).toBe('failed')
+  })
+
+  it('persists a rejected tool as an is_error row and lets the agent retry', async () => {
+    const { mock, events, engine, store } = makeEngine('tool-call')
+    const run = engine.craft({ conversationId: 1, content: 'delete it', tools, highRiskTools: new Set(['file_delete']) })
+    await waitFor(() => eventsOf(events, 'confirm_required').length === 1)
+    engine.confirm('call_1', false)
+    await run
+    expect(deletedPaths).toEqual([])
+    expect(mock.callCount).toBe(2)
+    const toolRow = store.listMessages(1).find((m) => m.role === 'tool')
+    expect(toolRow).toMatchObject({ toolName: 'file_delete', isError: true })
+    expect(eventsOf(events, 'tool_error')).toHaveLength(1)
+    expect(eventsOf(events, 'done')).toHaveLength(1)
+    expect(store.getConversation(1)?.status).toBe('done')
+  })
+
+  it('cancel mid-craft emits canceled and marks the conversation failed', async () => {
+    const { events, engine, store } = makeEngine('hang')
+    const run = engine.craft({ conversationId: 1, content: 'hello', tools: {}, highRiskTools: new Set() })
+    await waitFor(() => eventsOf(events, 'text_delta').length > 0)
+    engine.cancel()
+    await run
+    expect(eventsOf(events, 'canceled')).toEqual([{ type: 'canceled', data: { reason: 'user_canceled' } }])
+    expect(store.getConversation(1)?.status).toBe('failed')
+  })
+
+  it('skips DB writes when the conversation is deleted mid-run', async () => {
+    const store = makeStore()
+    store.updateConversationStatus = (id, status) => {
+      if (status === 'running') store.deleteConversation(id)
+    }
+    const { events, engine } = makeEngine('tool-call', {}, store, 'file_read')
+    await engine.craft({ conversationId: 1, content: 'read it', tools, highRiskTools: new Set() })
+    expect(eventsOf(events, 'done')).toHaveLength(1)
+    expect(store.listMessages(1).filter((m) => m.role !== 'user')).toEqual([])
+  })
+
+  it('emits artifact events and persists rows for absolute-path results', async () => {
+    const { events, engine, store } = makeEngine('tool-call', {}, makeStore(), 'write_report')
+    await engine.craft({
+      conversationId: 1,
+      content: 'write it',
+      tools: { write_report: writeReport },
+      highRiskTools: new Set(),
+    })
+    expect(eventsOf(events, 'artifact')).toEqual([
+      { type: 'artifact', data: { path: '/workspace/report.md', type: 'report', size: 10 } },
+    ])
+    expect(store.artifacts).toEqual([{ conversationId: 1, path: '/workspace/report.md', type: 'report', size: 10 }])
+  })
+
+  it('skips artifact registration when the result has no path', async () => {
+    const { events, engine } = makeEngine('tool-call', {}, makeStore(), 'no_path')
+    await engine.craft({ conversationId: 1, content: 'go', tools: { no_path: noPathTool }, highRiskTools: new Set() })
+    expect(eventsOf(events, 'artifact')).toHaveLength(0)
+  })
+
+  it('does not register relative paths as artifacts', async () => {
+    const relPath = tool({
+      description: 'returns a relative path',
+      inputSchema: z.object({}),
+      execute: async () => ({ path: 'relative/report.md', size: 3 }),
+    })
+    const { events, engine } = makeEngine('tool-call', {}, makeStore(), 'rel_path')
+    await engine.craft({ conversationId: 1, content: 'go', tools: { rel_path: relPath }, highRiskTools: new Set() })
+    expect(eventsOf(events, 'artifact')).toHaveLength(0)
+  })
+
+  it('PICOAI_TEST_AUTO_APPROVE=1 auto-approves without emitting confirm_required', async () => {
+    process.env['PICOAI_TEST_AUTO_APPROVE'] = '1'
+    const { events, engine } = makeEngine('tool-call')
+    await engine.craft({ conversationId: 1, content: 'delete it', tools, highRiskTools: new Set(['file_delete']) })
+    expect(eventsOf(events, 'confirm_required')).toHaveLength(0)
+    expect(deletedPaths).toEqual(['/home/u/x.doc'])
+    expect(eventsOf(events, 'tool_end')).toHaveLength(1)
+  })
+
+  it('PICOAI_TEST_AUTO_APPROVE=0 auto-rejects without emitting confirm_required', async () => {
+    process.env['PICOAI_TEST_AUTO_APPROVE'] = '0'
+    const { events, engine } = makeEngine('tool-call')
+    await engine.craft({ conversationId: 1, content: 'delete it', tools, highRiskTools: new Set(['file_delete']) })
+    expect(eventsOf(events, 'confirm_required')).toHaveLength(0)
+    expect(deletedPaths).toEqual([])
+    expect(eventsOf(events, 'tool_error')).toHaveLength(1)
+  })
+
+  it('gates tools via a per-tool requiresApproval predicate even without highRiskTools', async () => {
+    const gated = { ...fileDelete, requiresApproval: () => true } as Tool & { requiresApproval?: () => boolean }
+    const { events, engine } = makeEngine('tool-call')
+    const run = engine.craft({
+      conversationId: 1,
+      content: 'delete it',
+      tools: { file_delete: gated },
+      highRiskTools: new Set(),
+    })
+    await waitFor(() => eventsOf(events, 'confirm_required').length === 1)
+    engine.confirm('call_1', true)
+    await run
+    expect(deletedPaths).toEqual(['/home/u/x.doc'])
+  })
+})
+
+describe('knowledge base tools', () => {
+  it('createKbTools registers kb_search and marks kb_upload high-risk', async () => {
+    const session: Session = { serverURL: 'https://srv.example.com', username: 'u', token: 't' }
+    const { tools, highRisk } = createKbTools(session)
+    expect(tools.kb_search).toBeTruthy()
+    expect(tools.kb_read).toBeTruthy()
+    expect(tools.kb_list).toBeTruthy()
+    expect(tools.kb_upload).toBeTruthy()
+    expect(highRisk).toEqual(['kb_upload'])
+    const out = await (tools.kb_search as Tool).execute!({ query: 'budget' }, {} as never)
+    expect(out).toBe('kb: found')
+    expect(kbSearch).toHaveBeenCalledWith(session, 'budget', undefined, undefined)
   })
 })
 

@@ -34,6 +34,9 @@ const api = {
   chatMessages: (conversationId: number): Promise<MessageRow[]> =>
     ipcRenderer.invoke('chat:messages', { conversationId }),
   chatDelete: (conversationId: number): Promise<void> => ipcRenderer.invoke('chat:delete', { conversationId }),
+  confirm: (requestId: string, ok: boolean): Promise<void> =>
+    ipcRenderer.invoke('agent:confirm', { requestId, ok }),
+  ready: (): Promise<void> => ipcRenderer.invoke('picoaide:rendererReady'),
   onAgentEvent: (cb: (ev: AgentEvent) => void): Unsub => subscribe('agent:event', cb),
   onConnectionStatus: (cb: (status: 'online' | 'offline' | 'auth_expired' | 'trusting_cert') => void): Unsub =>
     subscribe('connection:status', cb),
