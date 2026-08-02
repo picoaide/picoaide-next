@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/bootstrap"
 	"github.com/picoaide/picoaide/internal/knowledge"
 	"github.com/picoaide/picoaide/internal/llmgateway"
 	"github.com/picoaide/picoaide/internal/marketplace"
@@ -69,8 +70,12 @@ func main() {
 
 	serverauth.RegisterAdminRoutes(r, db)
 	llmgateway.RegisterRoutes(r, db)
+	llmgateway.RegisterAdminRoutes(r, db)
 	marketplace.RegisterRoutes(r, db, *dataDir+"/skills-cache")
+	marketplace.RegisterAdminRoutes(r, db)
 	knowledge.RegisterRoutes(r, db)
+	knowledge.RegisterAdminRoutes(r, db)
+	bootstrap.RegisterRoutes(r, db)
 	serverstore.CleanupPendingUsage(db, time.Now().Add(-time.Hour))
 
 	// webadmin static (placeholder until built; replaced in Task 1.16c)

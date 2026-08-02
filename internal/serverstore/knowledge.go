@@ -187,3 +187,24 @@ func ListAuditLogs(db *sql.DB, limit int) ([]KBAuditLog, error) {
 	}
 	return out, rows.Err()
 }
+
+// ListKBDocuments returns documents in a folder ordered by id desc.
+func ListKBDocuments(db *sql.DB, folderID int64) ([]KBDocument, error) {
+	rows, err := db.Query(`SELECT id, folder_id, title, content, content_type, size, source, created_by, created_at
+		FROM kb_documents WHERE folder_id = ? ORDER BY id DESC`, folderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []KBDocument
+	for rows.Next() {
+		var d KBDocument
+		var createdAt string
+		if err := rows.Scan(&d.ID, &d.FolderID, &d.Title, &d.Content, &d.ContentType, &d.Size, &d.Source, &d.CreatedBy, &createdAt); err != nil {
+			return nil, err
+		}
+		d.CreatedAt = parseSQLTime(createdAt)
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}

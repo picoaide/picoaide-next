@@ -25,13 +25,23 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	a := &AdminAPI{DB: db}
 	g := r.Group("/api/admin")
 	g.POST("/login", a.handleLogin)
-	g.POST("/logout", a.adminAuth(), a.handleLogout)
-	g.GET("/users", a.adminAuth(), a.listUsers)
-	g.POST("/users", a.adminAuth(), a.createUser)
-	g.PUT("/users/:id", a.adminAuth(), a.updateUser)
-	g.DELETE("/users/:id", a.adminAuth(), a.deleteUser)
-	g.GET("/usage", a.adminAuth(), a.usage)
+	g.POST("/logout", AdminAuth(db), a.handleLogout)
+	g.GET("/users", AdminAuth(db), a.listUsers)
+	g.POST("/users", AdminAuth(db), a.createUser)
+	g.PUT("/users/:id", AdminAuth(db), a.updateUser)
+	g.DELETE("/users/:id", AdminAuth(db), a.deleteUser)
+	g.GET("/usage", AdminAuth(db), a.usage)
 }
+
+// AdminAuth validates the admin session cookie and (for non-GET) CSRF token.
+// Export the current admin user via serverauth.AdminUser(c).
+func AdminAuth(db *sql.DB) gin.HandlerFunc {
+	a := &AdminAPI{DB: db}
+	return a.adminAuth()
+}
+
+// AdminUser returns the admin user from the AdminAuth context.
+func AdminUser(c *gin.Context) *serverstore.User { return currentAdmin(c) }
 
 // adminAuth validates session cookie and CSRF token for state-changing methods.
 func (a *AdminAPI) adminAuth() gin.HandlerFunc {

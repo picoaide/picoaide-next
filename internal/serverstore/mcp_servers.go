@@ -58,7 +58,8 @@ func AddMCPServer(db *sql.DB, m *MCPServer) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	m.ID, _ = res.LastInsertId()
+	return m.ID, nil
 }
 
 // GetMCPServer returns the plugin by id or ErrNotFound.
@@ -179,4 +180,56 @@ func jsonStringMap(s string) map[string]string {
 		return map[string]string{}
 	}
 	return out
+}
+
+// SetMCPEnabled enables/disables a plugin (下架 = enabled 0, row kept).
+func SetMCPEnabled(db *sql.DB, id int64, enabled bool) error {
+	res, err := db.Exec(`UPDATE mcp_servers SET enabled=?, updated_at=datetime('now','localtime') WHERE id=?`,
+		boolInt(enabled), id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DownloadRow is a credential-fetch audit row joined with names.
+type DownloadRow struct {
+	ID        int64
+	UserID    int64
+	Username  string
+	MCPID     int64
+	MCPName   string
+	CreatedAt time.Time
+}
+
+// ListDownloadsPaged returns credential-download audit rows (newest first).
+func ListDownloadsPaged(db *sql.DB, offset, limit int) ([]DownloadRow, int64, error) {
+	var total int64
+	if err := db.QueryRow("SELECT COUNT(*) FROM mcp_config_downloads").Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := db.Query(`SELECT d.id, d.user_id, u.username, d.mcp_id, m.name, d.created_at
+		FROM mcp_config_downloads d
+		JOIN users u ON u.id = d.user_id
+		JOIN mcp_servers m ON m.id = d.mcp_id
+		ORDER BY d.id DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []DownloadRow
+	for rows.Next() {
+		var r DownloadRow
+		var createdAt string
+		if err := rows.Scan(&r.ID, &r.UserID, &r.Username, &r.MCPID, &r.MCPName, &createdAt); err != nil {
+			return nil, 0, err
+		}
+		r.CreatedAt = parseSQLTime(createdAt)
+		out = append(out, r)
+	}
+	return out, total, rows.Err()
 }

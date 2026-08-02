@@ -40,6 +40,28 @@ func sanitizeWord(w string) string {
 // for recall; hits are deduped, FTS hits first ordered by bm25, LIKE-only
 // hits appended after.
 func Search(db *sql.DB, username string, groups []string, query string, page, pageSize int) ([]SearchResult, int64, error) {
+	folders, err := serverstore.GetAccessibleFolderIDs(db, username, groups)
+	if err != nil {
+		return nil, 0, err
+	}
+	return searchInFolders(db, folders, query, page, pageSize)
+}
+
+// SearchAll searches every folder (admin preview).
+func SearchAll(db *sql.DB, query string, page, pageSize int) ([]SearchResult, int64, error) {
+	folders, err := serverstore.ListKBFolders(db)
+	if err != nil {
+		return nil, 0, err
+	}
+	ids := make([]int64, 0, len(folders)+1)
+	ids = append(ids, 0) // global root
+	for _, f := range folders {
+		ids = append(ids, f.ID)
+	}
+	return searchInFolders(db, ids, query, page, pageSize)
+}
+
+func searchInFolders(db *sql.DB, folders []int64, query string, page, pageSize int) ([]SearchResult, int64, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -48,11 +70,6 @@ func Search(db *sql.DB, username string, groups []string, query string, page, pa
 	}
 	if pageSize > 100 {
 		pageSize = 100
-	}
-
-	folders, err := serverstore.GetAccessibleFolderIDs(db, username, groups)
-	if err != nil {
-		return nil, 0, err
 	}
 
 	var words []string
