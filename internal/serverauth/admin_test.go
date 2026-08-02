@@ -88,6 +88,15 @@ func TestAdminAPIs(t *testing.T) {
 		return map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
 	}
 
+	// /me returns a fresh csrf_token so a reloaded admin SPA can keep writing
+	w, me := doJSON(t, r, "GET", "/api/admin/me", "", map[string]string{"Cookie": "picoaide_session=" + sess})
+	if w.Code != http.StatusOK {
+		t.Fatalf("me: %d %s", w.Code, w.Body.String())
+	}
+	if tok, _ := me["csrf_token"].(string); tok == "" {
+		t.Fatal("me did not return csrf_token")
+	}
+
 	// list users requires auth
 	if w, _ := doJSON(t, r, "GET", "/api/admin/users", "", nil); w.Code != http.StatusUnauthorized {
 		t.Fatalf("users without session: %d", w.Code)

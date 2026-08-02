@@ -108,7 +108,15 @@ func (a *AdminAPI) handleMe(c *gin.Context) {
 		writeError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未登录")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"user": userJSON(u)})
+	// 返回当前会话的 CSRF token:管理页刷新后(内存 token 丢失)可直接续用,无需重新登录
+	sid, _ := c.Get("admin_session")
+	csrf := ""
+	if s, ok := sid.(string); ok {
+		if sess, err := GetAdminSession(a.DB, s); err == nil {
+			csrf = IssueCSRF(sess.CSRFKey, time.Now())
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"user": userJSON(u), "csrf_token": csrf})
 }
 
 func (a *AdminAPI) handleLogout(c *gin.Context) {

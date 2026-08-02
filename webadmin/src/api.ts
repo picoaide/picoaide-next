@@ -60,5 +60,7 @@ export async function logout(): Promise<void> {
 }
 
 export async function me(): Promise<any> {
-  return request('/api/admin/me')
+  const body = await request('/api/admin/me')
+  if (body?.csrf_token) setCsrf(body.csrf_token)
+  return body
 }
