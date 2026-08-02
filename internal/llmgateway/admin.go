@@ -96,6 +96,11 @@ func createProvider(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 		return
 	}
+	// 同步 models 表:provider 的模型清单即客户端可见模型(单一数据源)
+	if err := serverstore.SyncProviderModels(db, p.ID, req.Models); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "模型同步失败")
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(*p, true)})
 }
 
@@ -138,6 +143,11 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 	}
 	if err := serverstore.UpdateGatewayProvider(db, p); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+		return
+	}
+	// 模型清单变更同步到 models 表(单一数据源)
+	if err := serverstore.SyncProviderModels(db, p.ID, p.Models); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "模型同步失败")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(*p, true)})

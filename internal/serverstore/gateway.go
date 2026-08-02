@@ -115,6 +115,27 @@ func DeleteGatewayProvider(db *sql.DB, id int64) error {
 	return tx.Commit()
 }
 
+// SyncProviderModels replaces the models table rows for a provider so it
+// mirrors the provider's models JSON list. This keeps a single source of
+// truth: the provider's model list is the model list the client sees.
+func SyncProviderModels(db *sql.DB, providerID int64, names []string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("DELETE FROM models WHERE provider_id = ?", providerID); err != nil {
+		return err
+	}
+	for _, name := range names {
+		if _, err := tx.Exec(`INSERT INTO models (name, provider_id, display_name) VALUES (?, ?, ?)`,
+			name, providerID, name); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func scanModel(scan interface{ Scan(...any) error }) (*Model, error) {
 	var m Model
 	if err := scan.Scan(&m.ID, &m.Name, &m.ProviderID, &m.DisplayName, &m.DefaultParams); err != nil {
