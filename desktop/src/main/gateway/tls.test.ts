@@ -74,4 +74,43 @@ describe('installCertificateVerification', () => {
     }
     await expect(installCertificateVerification(store, { onUnknownFingerprint: onUnknown })).resolves.toBeUndefined()
   })
+
+  it('pins an unknown fingerprint on first connect, then rejects mismatches', async () => {
+    const { installCertificateVerification, loadFingerprints, sha256Fingerprint } = await loadTls()
+    const store = join(tmp, 'fingerprints.json')
+    const cert1 = randomBytes(64)
+    const cert2 = randomBytes(64)
+    const cert3 = randomBytes(64)
+    const fp1 = sha256Fingerprint(cert1)
+    const fp2 = sha256Fingerprint(cert2)
+    const fp3 = sha256Fingerprint(cert3)
+
+    const results: number[] = []
+    const notified: Array<[string, string]> = []
+    let proc: ((req: any, cb: (n: number) => void) => void) | null = null
+    const fakeSession = {
+      setCertificateVerifyProc: (fn: (req: any, cb: (n: number) => void) => void) => {
+        proc = fn
+      },
+    }
+
+    await installCertificateVerification(store, {
+      onUnknownFingerprint: (host, fp) => notified.push([host, fp]),
+      getSession: () => fakeSession as never,
+    })
+    expect(proc).toBeTruthy()
+
+    // 1st connect: unknown cert → trusted (pinned)
+    proc!({ hostname: 'gw', certificate: { data: cert1 } }, (n) => results.push(n))
+    // 2nd connect: same cert → trusted
+    proc!({ hostname: 'gw', certificate: { data: cert1 } }, (n) => results.push(n))
+    // 3rd connect: different cert (MITM) → rejected
+    proc!({ hostname: 'gw', certificate: { data: cert2 } }, (n) => results.push(n))
+    // 4th connect: other host unknown → trusted+pinned
+    proc!({ hostname: 'other', certificate: { data: cert3 } }, (n) => results.push(n))
+
+    expect(results).toEqual([0, 0, -2, 0])
+    expect(notified).toEqual([['gw', fp1], ['other', fp3]])
+    expect(loadFingerprints(store)).toEqual({ gw: fp1, other: fp3 })
+  })
 })

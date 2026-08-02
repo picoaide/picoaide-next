@@ -47,12 +47,16 @@ export function checkFingerprint(storePath: string, serverHost: string, fingerpr
 
 export interface InstallCertOptions {
   onUnknownFingerprint?: (host: string, fingerprint: string) => void
+  // 测试注入:提供 electron session 替代 require/import(默认自动获取)
+  getSession?: () => unknown
 }
 
 export async function installCertificateVerification(storePath: string, opts: InstallCertOptions = {}): Promise<void> {
   let session: any = null
   try {
-    if (typeof require === 'function') {
+    if (opts.getSession) {
+      session = opts.getSession()
+    } else if (typeof require === 'function') {
       const mod = require('electron') as any
       session = mod?.session?.defaultSession
     }
@@ -84,6 +88,8 @@ export async function installCertificateVerification(storePath: string, opts: In
     } else if (status === 'mismatch') {
       callback(-2)
     } else {
+      // TOFU:首次连接未知指纹 → 记录并信任;此后同指纹 trusted、不同指纹(如 MITM)拒绝
+      saveFingerprint(storePath, host, fingerprint)
       opts.onUnknownFingerprint?.(host, fingerprint)
       callback(0)
     }
