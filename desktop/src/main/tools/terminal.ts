@@ -101,9 +101,15 @@ export function needsApprovalFor(command: string, allowedDirs: string[]): boolea
   for (const raw of command.split(/\s+/)) {
     const arg = stripQuotes(raw.trim())
     if (!arg || arg === '-' || arg.startsWith('-')) continue
-    // ponytail: 通配符/赋值 token 不判路径(天花板:cat *.txt 靠白名单+弹窗展示兜底;
-    // 精确 glob 展开留给未来若出现真实绕过)
-    if (/[*?{}\[\]"'=]/.test(arg)) continue
+    // 赋值 token 不是路径(如 FOO=bar cmd),跳过路径判定
+    if (/['"=]/.test(arg)) continue
+    // glob/brace 展开发生在 shell 侧,静态无法判定展开后的目标路径。
+    // 含路径前缀(/、~、..)的通配符(cat /etc/*、mkdir /root/{a,b})可能越界
+    // → 一律需要审批;纯相对 glob(cat *.md,展开限于 cwd 允许目录)放行。
+    if (/[*?{}\[\]]/.test(arg)) {
+      if (/^([~.]|\.\.)/.test(arg) || arg.includes('/')) return true
+      continue
+    }
     if (!isPathLike(arg)) continue
     if (!isAllowed(expandHome(arg), allowedDirs)) return true
   }

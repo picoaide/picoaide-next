@@ -89,4 +89,13 @@ describe('needsApprovalFor', () => {
     expect(needsApprovalFor("cat '/etc/passwd'", [tmp])).toBe(true)
     expect(needsApprovalFor(`cat '${tmp}/a.md'`, [tmp])).toBe(false)
   })
+
+  it('glob/brace targets cannot bypass the path check', () => {
+    expect(needsApprovalFor('cat /etc/*', [tmp])).toBe(true)
+    expect(needsApprovalFor('cat /etc/*.conf', [tmp])).toBe(true)
+    expect(needsApprovalFor('mkdir /root/{a,b}', [tmp])).toBe(true)
+    expect(needsApprovalFor('cat ../*.md', [tmp])).toBe(true)
+    expect(needsApprovalFor('cat *.md', [tmp])).toBe(false)
+    expect(needsApprovalFor('cat *', [tmp])).toBe(false)
+  })
 })
