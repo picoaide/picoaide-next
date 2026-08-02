@@ -11,6 +11,16 @@ import type { GatedTool } from './engine'
 import type { Session } from '../gateway/config'
 import { kbSearch } from '../gateway/remote_mcp'
 
+// AI SDK v7 在模型 doStream 抛错(测试故意制造的上游故障)时,内部 streamStep 的
+// promise 链会泄漏一次 unhandled rejection(与引擎消费无关,见最小复现)。
+// 这里仅吞掉 MockProvider 抛出的预期错误,不屏蔽其他真实异常。
+const MOCK_ERRORS = new Set(['mock upstream failed', 'local fs error'])
+const guard = (reason: unknown) => {
+  if (reason instanceof Error && MOCK_ERRORS.has(reason.message)) return
+  process.stderr.write(`[unhandledRejection] ${String(reason)}\n`)
+}
+process.on('unhandledRejection', guard)
+
 vi.mock('../gateway/remote_mcp', () => ({
   kbSearch: vi.fn(async () => 'kb: found'),
   kbRead: vi.fn(async () => 'kb: doc body'),

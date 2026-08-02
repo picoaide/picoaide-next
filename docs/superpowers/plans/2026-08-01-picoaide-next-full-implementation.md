@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 全新重写 WorkBuddy 式桌面 AI 办公智能体:Electron+React+TS 桌面客户端(本地跑完整 Agent)+ Go 服务端纯网关(认证/AI 网关/双商城/知识库)。
+**Goal:** 全新重写企业内网桌面 AI 办公智能体:Electron+React+TS 桌面客户端(本地跑完整 Agent)+ Go 服务端纯网关(认证/AI 网关/双商城/知识库)。
 
 **Architecture:** 客户端(Agent 引擎基于 Vercel AI SDK streamText 多步循环,本地工具 + 本地受限沙盒执行 + 本地 MCP/Skill 运行时 + better-sqlite3 会话,消息持久化、中断可重跑恢复;**员工零配置:登录即用,模型/技能/MCP 建议全部由服务端 bootstrap 下发,所有配置由管理员在管理页完成**)经 Bearer token 连服务端;服务端(AI 网关 OpenAI 兼容代理 + LDAP/OIDC/本地认证 + Skill/MCP 商城(建议安装制)+ 知识库远程 MCP + 极简管理页)。零代码迁移,旧仓库 `/data/picoaide` 仅作参考。
 

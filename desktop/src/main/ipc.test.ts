@@ -10,6 +10,16 @@ import type { Session } from './gateway/config'
 import { clearCaches, getBootstrapCache, getCurrentSession } from './session_cache'
 import { registerIpcHandlers } from './ipc'
 
+// AI SDK v7 在模型 doStream 抛错(测试故意制造的上游故障)时,内部 streamStep 的
+// promise 链会泄漏一次 unhandled rejection(与引擎消费无关)。这里仅吞掉
+// FakeProvider 抛出的预期错误('upstream 502 bad gateway'),不屏蔽其他真实异常。
+const MOCK_ERRORS = new Set(['upstream 502 bad gateway'])
+const guard = (reason: unknown) => {
+  if (reason instanceof Error && MOCK_ERRORS.has(reason.message)) return
+  process.stderr.write(`[unhandledRejection] ${String(reason)}\n`)
+}
+process.on('unhandledRejection', guard)
+
 vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn() },
   shell: { showItemInFolder: vi.fn() },
