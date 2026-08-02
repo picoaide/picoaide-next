@@ -1633,24 +1633,24 @@ git commit -m "feat: web fetch and search tools"
 ### Task 3.15: 浏览器插件桥(CDP)
 
 **Files:**
-- Create: `desktop/src/main/cdp_server.ts`、`desktop/src/main/cdp_server.test.ts`、`desktop/src/main/tools/browser.ts`、`desktop/src/main/tools/browser.test.ts`、`browser-extension/manifest.json`、`browser-extension/background.js`、`browser-extension/content.js`、`browser-extension/options.html`、`browser-extension/options.js`、`browser-extension/README.md`
-- Modify: `desktop/src/main/index.ts`(启动/关闭 CDP 服务)、`desktop/src/main/agent/engine.ts`(注册 browser_* 工具)、`desktop/src/renderer/src/pages/Settings.tsx`(端口/token 展示)
+- Create: `desktop/src/main/cdp_server.ts`、`desktop/src/main/cdp_server.test.ts`、`desktop/src/main/tools/browser.ts`、`desktop/src/main/tools/browser.test.ts`、`browser-extension/manifest.json`、`browser-extension/background.js`、`browser-extension/content.js`、`browser-extension/README.md`
+- Modify: `desktop/src/main/index.ts`(启动/关闭 CDP 服务)、`desktop/src/main/agent/engine.ts`(注册 browser_* 工具)、`desktop/src/renderer/src/pages/Settings.tsx`(插件连接状态展示)
 
 - [ ] **Step 1: 写测试(红)**
 
-- `cdp_server.test.ts`:起真实 WebSocket 服务(临时端口)——**无 token 连接拒绝;带 token 连接成功;JSON-RPC 请求/响应往返(browser.tabInfo/browser.getContent 由 mock handler 返回);端口占用时自动 +1**
+- `cdp_server.test.ts`:起真实 WebSocket 服务(临时端口)——**连接即成功(无鉴权,零配置);JSON-RPC 请求/响应往返(browser.tabInfo/browser.getContent 由 mock handler 返回);端口被占用 → 启动报错并提示**
 - `browser.test.ts`:工具注册——`browser_tab_info`/`browser_get_content` 不标记审批;`browser_click`/`browser_type`/`browser_navigate`/`browser_scroll`/`browser_execute_js` 标记 `needsApproval: true`;插件未连接 → 明确错误
 Run: `cd desktop && npx vitest run src/main/cdp_server src/main/tools/browser`
 Expected: FAIL
 
 - [ ] **Step 2: 实现**
 
-`cdp_server.ts`:`startCdpServer()` 监听 `127.0.0.1:<port>`(**默认 9333,占用 +1 递增;仅绑定回环地址**),连接握手校验 `Authorization: Bearer <bridge_token>`(token 随机生成、safeStorage/0600 持久化于 config.json);JSON-RPC 2.0 分派——`browser.tabInfo`/`browser.getContent`/`browser.click`/`browser.type`/`browser.navigate`/`browser.scroll`/`browser.executeScript`,响应 `{id, result|error}`;客户端退出关闭端口
+`cdp_server.ts`:`startCdpServer()` **固定监听 `127.0.0.1:54321`**(仅绑定回环地址;**无鉴权**;端口被占用 → 启动报错"端口 54321 被占用,请关闭占用程序"(设置页可改端口,默认 54321,改动后插件侧同步说明));JSON-RPC 2.0 分派——`browser.tabInfo`/`browser.getContent`/`browser.click`/`browser.type`/`browser.navigate`/`browser.scroll`/`browser.executeScript`,响应 `{id, result|error}`;客户端退出关闭端口
 `tools/browser.ts`:注册 `browser_*` AI SDK 工具,execute 转发 CDP 请求;**操作类与 executeScript 标记 `needsApproval: true`(引擎层审批门控)**,读取类直接可用;插件未连接 → `ToolError('浏览器插件未连接')`
 `index.ts`:应用启动时启动 CDP 服务,退出时关闭
-`Settings.tsx`:端口与 token 展示(供粘贴到插件设置)
-`browser-extension/`(Chrome MV3):`manifest.json`(permissions: `tabs`/`activeTab`/`scripting`)+ background service worker(WebSocket 常连,断线指数退避重连;转发 CDP 命令到 content script)+ content script(点击/输入/滚动/取文本/执行 JS)+ options 页(配置 `127.0.0.1:<port>` + token)+ README(开发者模式加载说明)
-Run: 同上 + 手工:装插件 → 连上 → Craft 让 Agent 读取当前标签页内容/点击/导航
+`Settings.tsx`:插件连接状态(已连接/未连接)+ 端口展示(默认 54321,可改)
+`browser-extension/`(Chrome MV3,**零配置**):`manifest.json`(permissions: `tabs`/`activeTab`/`scripting`)+ background service worker(**默认直连 `ws://127.0.0.1:54321`**,断线指数退避重连;转发 CDP 命令到 content script)+ content script(点击/输入/滚动/取文本/执行 JS)+ README(开发者模式加载说明;**无 options 页,安装即用**)
+Run: 同上 + 手工:装插件(开发者模式加载)→ 客户端启动 → 插件自动连上 → Craft 让 Agent 读取当前标签页内容/点击/导航
 Expected: PASS
 
 - [ ] **Step 3: Commit**
@@ -1879,7 +1879,7 @@ git add CHANGELOG.md && git commit -m "docs: changelog for 0.4.0"
 - **零配置原则** → Task 2.4(bootstrap)、2.7(登录即用)、3.13(设置页仅本地边界)
 - §8 实施阶段 → 全部映射为 Task 1.1-4.6
 
-**待实施时确认的选型**(不影响任务结构,在每个任务内决策并记录):OCR 语言包加载路径(tesseract.js langPath)、MCP TS SDK 版本 API(@modelcontextprotocol/sdk v1 构造签名)、中文 FTS5(unicode61 前缀 vs trigram)、web_search 端点、@ai-sdk/sandbox-just-bash 实际 API 形状、docx/pdf 抽取库、electron-vite 当前版本约定、bootstrap 响应结构字段名、CDP 桥端口默认值/冲突策略、浏览器插件分发方式(开发者模式 vs 组策略)。
+**待实施时确认的选型**(不影响任务结构,在每个任务内决策并记录):OCR 语言包加载路径(tesseract.js langPath)、MCP TS SDK 版本 API(@modelcontextprotocol/sdk v1 构造签名)、中文 FTS5(unicode61 前缀 vs trigram)、web_search 端点、@ai-sdk/sandbox-just-bash 实际 API 形状、docx/pdf 抽取库、electron-vite 当前版本约定、bootstrap 响应结构字段名、浏览器插件分发方式(开发者模式 vs 组策略)。
 
 **类型/签名一致性检查:**
 - `createGatewayModel(serverURL, token, modelID)`(Task 2.3 定义)→ 2.5/3.8 一致引用

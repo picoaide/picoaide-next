@@ -35,7 +35,7 @@
 | D22 | 长任务与恢复 | streamText 多步循环(自管步数上限)+ 消息落库 | 办公任务分钟级,失败主因是 LLM/工具错误而非进程崩溃;消息即状态——中断任务标记 `status=running`,恢复 = 从最后一条用户消息重跑历史,零额外运行时;高危审批在工具 `execute` 内门控(60s 超时拒绝),不依赖 AI SDK 审批 API(版本差异风险) |
 | D23 | UI 组件 | 自研极简 React 组件(纯 CSS) | 聊天/工具卡片/确认弹窗工作量小;ai-elements 要求 Next.js+shadcn+Tailwind 前置,与裸 Vite renderer 不兼容,且处被 shadcn 官方 chat 组件替代轨道 |
 | D24 | 网关接入 | 自研 Go 网关;AI SDK provider baseURL 直连 | 不用 Vercel AI Gateway 云服务;客户端零密钥,计量在服务端 |
-| D25 | 浏览器操作 | 自研浏览器插件桥:客户端主进程监听本地 CDP 端口(127.0.0.1:9333),Chrome/Edge 插件直连 | 免 Playwright 系统依赖;插件以最小权限(MV3)桥接真实浏览器;操作类工具审批兜底 |
+| D25 | 浏览器操作 | 自研浏览器插件桥:客户端主进程**固定监听 127.0.0.1:54321**,Chrome/Edge 插件默认直连该端口,即装即用零配置 | 免 Playwright 系统依赖;插件以最小权限(MV3)桥接真实浏览器;仅回环地址;操作类工具审批兜底 |
 
 ---
 
@@ -86,7 +86,7 @@ PicoAide(旧)是浏览器 Web UI + 服务端沙箱(overlayfs + netns)模式,存�
 │  Electron 主进程 (Node + TS)                                                 │
 │  ├─ Agent 引擎:Vercel AI SDK(streamText + tools 多步循环 + 审批门控)          │
 │  ├─ 本地工具:文件 / 终端 / 浏览器 / 屏幕截图 / OCR(tesseract.js) / 剪贴板     │
-│  ├─ 浏览器插件桥:CDP WebSocket 服务(127.0.0.1:<port>,token 鉴权)              │
+│  ├─ 浏览器插件桥:CDP WebSocket 服务(固定 127.0.0.1:54321,即装即用)               │
 │  ├─ 本地 MCP 运行时:@modelcontextprotocol/sdk Client,本地 spawn(stdio)/直连(http)│
 │  ├─ Skill 运行时:从商城下载,指令注入系统提示 + scripts 本地执行               │
 │  ├─ 会话/记忆:better-sqlite3(WAL 模式)                                       │
@@ -153,7 +153,7 @@ PicoAide(旧)是浏览器 Web UI + 服务端沙箱(overlayfs + netns)模式,存�
 | 截图 | Electron `desktopCapturer` + `nativeImage` | 内置,免依赖 |
 | OCR | tesseract.js(纯 JS/WASM,中文 `chi_sim`,traineddata 本地打包) | 惰性加载 |
 | 剪贴板 | Electron `clipboard` | 内置 |
-| 浏览器控制 | 一期:web_fetch/web_search(HTTP)+ **浏览器插件桥(自研 CDP,本地 WebSocket)**;无需 Playwright 系统依赖 | 客户端启动即监听本地端口,浏览器插件直连 |
+| 浏览器控制 | 一期:web_fetch/web_search(HTTP)+ **浏览器插件桥(自研 CDP,固定 127.0.0.1:54321,即装即用)**;无需 Playwright 系统依赖 | 客户端启动即监听,插件安装即直连 |
 | 文本编码 | iconv-lite(GBK/Big5 解码) | 随文件工具 |
 | 测试 | Vitest(main + renderer) | 最新 |
 
@@ -219,7 +219,7 @@ picoaide-next/
 │   │   ├── main/                 # 主进程(Node)
 │   │   │   ├── index.ts          # app 生命周期、窗口创建、安全策略、协议注册
 │   │   │   ├── ipc.ts            # ipcMain 路由注册(与 preload API 一一对应)
-│   │   │   ├── cdp_server.ts     # 浏览器插件桥:CDP WebSocket 服务(127.0.0.1, token 鉴权)
+│   │   │   ├── cdp_server.ts     # 浏览器插件桥:CDP WebSocket 服务(固定 127.0.0.1:54321,无鉴权)
 │   │   │   ├── agent/
 │   │   │   │   ├── engine.ts     # AgentEngine:streamText 多步循环 + 审批门控
 │   │   │   │   ├── provider.ts   # createOpenAICompatible({baseURL: 自研网关})
@@ -531,21 +531,21 @@ skill-name-v1.2.3.tar.gz
 
 ### 3.8 浏览器插件桥(CDP)
 
-让 Agent 直接操作员工真实浏览器(读取当前页、点击、输入、导航)——**客户端主进程启动即监听本地 CDP 端口,浏览器插件直连该端口**,无需 Playwright 等系统依赖:
+让 Agent 直接操作员工真实浏览器(读取当前页、点击、输入、导航)——**客户端主进程启动即监听固定端口 54321,浏览器插件直连该端口,即装即用、零配置**,无需 Playwright 等系统依赖:
 
 ```
 Electron 主进程                       浏览器(Chrome/Edge)
 ┌───────────────────────┐  WebSocket  ┌────────────────────────┐
-│ cdp-server.ts         │◄───────────►│ 插件 picoaide-bridge    │
-│ 监听 127.0.0.1:<port>  │  JSON-RPC   │  (MV3 扩展,后台常连)    │
-│ token 鉴权(Bearer)     │            │  tabs/activeTab/scripting│
+│ cdp_server.ts         │◄───────────►│ 插件 picoaide-bridge    │
+│ 固定监听 127.0.0.1:54321│  JSON-RPC   │  (MV3 扩展,后台常连)    │
+│ 无鉴权(仅回环地址)      │            │  tabs/activeTab/scripting│
 └───────────────────────┘            └────────────────────────┘
 ```
 
-**服务端(客户端主进程,`cdp-server.ts`)**:
+**服务端(客户端主进程,`cdp_server.ts`)**:
 
-- 应用启动时监听 `127.0.0.1:<port>`(默认 **9333**,被占用则 +1 递增,实际端口在设置页/状态栏展示;**仅绑定回环地址,不对外网开放**)
-- 连接握手:`Authorization: Bearer <bridge_token>`;token 随机生成、持久化于 `config.json`(0600,随客户端安全存储),设置页展示,员工将其粘贴到插件设置页(一次性)
+- 应用启动时监听 **固定端口 `127.0.0.1:54321`**(仅绑定回环地址,不对外网开放);端口被占用时启动报错并提示(少见场景,先关占用程序或改设置页可配端口——改动端口后插件侧需同步,默认保持 54321)
+- **无鉴权**:零配置优先;安全边界 = 仅回环地址 + 本机进程与客户端同信任级(风险见 §5/§9);操作类工具审批仍由引擎侧把关(见下)
 - 协议:JSON-RPC 2.0 over WebSocket,最小 CDP 子集,方法:
   - `browser.tabInfo` → `{url, title}`(当前活动标签)
   - `browser.getContent` → 当前页可读文本(去 script/style)
@@ -555,9 +555,10 @@ Electron 主进程                       浏览器(Chrome/Edge)
 
 **插件(`browser-extension/`,Chrome MV3)**:
 
+- **零配置:插件默认直连 `ws://127.0.0.1:54321`,无任何设置页/配置项**,安装即用
 - 后台 service worker 维持 WebSocket 连接(断线指数退避重连);content script 执行 DOM 操作(点击/输入/滚动/取内容)
-- 权限:`tabs`/`activeTab`/`scripting`(最小集);设置页配置 `127.0.0.1:<port>` 与 token
-- 分发:企业内 `chrome://extensions` 开发者模式加载或组策略下发(README 说明);**客户端零配置不受影响——未装插件时浏览器工具返回"插件未连接"明确错误**
+- 权限:`tabs`/`activeTab`/`scripting`(最小集)
+- 分发:企业内 `chrome://extensions` 开发者模式加载或组策略下发(README 说明);**用户只需:安装插件 + 打开客户端,即可让 Agent 操作浏览器**;未装插件时浏览器工具返回"插件未连接"明确错误
 
 **工具注册(引擎侧,`browser_*`)**:
 
@@ -770,7 +771,7 @@ kb_folders / kb_documents / kb_folder_users / kb_folder_groups / kb_audit_logs
 | 超管引导 | `--bootstrap-admin` 需 env `PICOAI_ADMIN_PASSWORD`(缺失则启动失败,不打印密码到日志) |
 | master key | env `PICOAI_MASTER_KEY` 或 `data/master.key`(0600);**data 目录 0700**;轮换无(列为已知限制) |
 | 高危操作 | 删除/截屏/剪贴板读取/命令审批/kb_upload/浏览器操作类工具 → UI 确认弹窗(60s 超时拒绝,自弹窗可见起算);命令按"白名单+无拼接+路径边界"判定(拒绝控制字符/裸 `$`/find) |
-| 浏览器插件桥 | 仅绑定 127.0.0.1(不对外);连接 Bearer token 鉴权(config.json 0600);操作类/executeScript 工具审批;插件未连接时工具明确报错 |
+| 浏览器插件桥 | 仅绑定回环地址 127.0.0.1:54321(不对外网开放);**无鉴权(零配置)——本机任意进程可连,与客户端同信任级(风险见 §9)**;操作类/executeScript 工具审批;插件未连接时工具明确报错 |
 | 插件工具 | MCP 插件工具按风险启发式强制审批(动词表:delete/remove/write/exec/shell/http/post/put/send/upload/publish/push/sync/purge/clear/truncate/unlink/rm 等,大小写不敏感,**best-effort 仅减噪,安全边界=安装弹窗**);插件安装风险提示;stdio 命令白名单 |
 | 插件凭证 | 仅登录用户可拉取(建议安装制,无授权表);**per-user 限流 + 下载审计**;仅 enabled 可拉;加密传输;客户端仅内存持有(启动重拉) |
 | 文件越界 | 可访问目录白名单(默认工作目录,realpath 校验) |
@@ -880,6 +881,7 @@ kb_folders / kb_documents / kb_folder_users / kb_folder_groups / kb_audit_logs
 | 任意登录员工可拉取全部插件凭证(建议安装制固有) | 中 | 企业内可信环境;凭证按插件粒度最小化;per-user 限流 + 下载审计可追溯;二期可加组可见性 |
 | 本地账号部署下无组映射(知识库组权限不可用) | 低 | 知识库以用户级授权兜底;组管理二期 |
 | 浏览器插件依赖员工手动安装/企业分发 | 中 | 插件安装说明入 README;组策略下发;未装插件时工具明确降级(web_fetch 兜底) |
+| CDP 端口无鉴权(零配置的代价):本机恶意进程可连端口操控浏览器 | 中 | 仅回环地址缩小暴露面;本机进程与客户端同信任级(能读文件者本就能作恶);操作类能力经插件最小权限实现;如安全要求高,升级路径=设置页启用 token(插件同步,默认关闭) |
 
 ---
 
