@@ -35,6 +35,7 @@
 | D22 | 长任务与恢复 | streamText 多步循环(自管步数上限)+ 消息落库 | 办公任务分钟级,失败主因是 LLM/工具错误而非进程崩溃;消息即状态——中断任务标记 `status=running`,恢复 = 从最后一条用户消息重跑历史,零额外运行时;高危审批在工具 `execute` 内门控(60s 超时拒绝),不依赖 AI SDK 审批 API(版本差异风险) |
 | D23 | UI 组件 | 自研极简 React 组件(纯 CSS) | 聊天/工具卡片/确认弹窗工作量小;ai-elements 要求 Next.js+shadcn+Tailwind 前置,与裸 Vite renderer 不兼容,且处被 shadcn 官方 chat 组件替代轨道 |
 | D24 | 网关接入 | 自研 Go 网关;AI SDK provider baseURL 直连 | 不用 Vercel AI Gateway 云服务;客户端零密钥,计量在服务端 |
+| D25 | 浏览器操作 | 自研浏览器插件桥:客户端主进程监听本地 CDP 端口(127.0.0.1:9333),Chrome/Edge 插件直连 | 免 Playwright 系统依赖;插件以最小权限(MV3)桥接真实浏览器;操作类工具审批兜底 |
 
 ---
 
@@ -85,10 +86,13 @@ PicoAide(旧)是浏览器 Web UI + 服务端沙箱(overlayfs + netns)模式,存�
 │  Electron 主进程 (Node + TS)                                                 │
 │  ├─ Agent 引擎:Vercel AI SDK(streamText + tools 多步循环 + 审批门控)          │
 │  ├─ 本地工具:文件 / 终端 / 浏览器 / 屏幕截图 / OCR(tesseract.js) / 剪贴板     │
+│  ├─ 浏览器插件桥:CDP WebSocket 服务(127.0.0.1:<port>,token 鉴权)              │
 │  ├─ 本地 MCP 运行时:@modelcontextprotocol/sdk Client,本地 spawn(stdio)/直连(http)│
 │  ├─ Skill 运行时:从商城下载,指令注入系统提示 + scripts 本地执行               │
 │  ├─ 会话/记忆:better-sqlite3(WAL 模式)                                       │
 │  └─ 服务端连接器:登录/token 管理、AI 网关客户端(SSE 流式)、远程 MCP 客户端    │
+│                                                                              │
+│  ◀── 浏览器插件(Chrome/Edge 扩展,经 CDP 连接本端口):tab 读取/点击/输入/导航   │
 │                                                                              │
 └────────────────────────────┬─────────────────────────────────────────────────┘
                              │ HTTPS(WSS)
@@ -149,7 +153,7 @@ PicoAide(旧)是浏览器 Web UI + 服务端沙箱(overlayfs + netns)模式,存�
 | 截图 | Electron `desktopCapturer` + `nativeImage` | 内置,免依赖 |
 | OCR | tesseract.js(纯 JS/WASM,中文 `chi_sim`,traineddata 本地打包) | 惰性加载 |
 | 剪贴板 | Electron `clipboard` | 内置 |
-| 浏览器控制 | 一期:web_fetch/web_search(HTTP);二期:Playwright CDP | 实施期定 |
+| 浏览器控制 | 一期:web_fetch/web_search(HTTP)+ **浏览器插件桥(自研 CDP,本地 WebSocket)**;无需 Playwright 系统依赖 | 客户端启动即监听本地端口,浏览器插件直连 |
 | 文本编码 | iconv-lite(GBK/Big5 解码) | 随文件工具 |
 | 测试 | Vitest(main + renderer) | 最新 |
 
@@ -215,6 +219,7 @@ picoaide-next/
 │   │   ├── main/                 # 主进程(Node)
 │   │   │   ├── index.ts          # app 生命周期、窗口创建、安全策略、协议注册
 │   │   │   ├── ipc.ts            # ipcMain 路由注册(与 preload API 一一对应)
+│   │   │   ├── cdp_server.ts     # 浏览器插件桥:CDP WebSocket 服务(127.0.0.1, token 鉴权)
 │   │   │   ├── agent/
 │   │   │   │   ├── engine.ts     # AgentEngine:streamText 多步循环 + 审批门控
 │   │   │   │   ├── provider.ts   # createOpenAICompatible({baseURL: 自研网关})
@@ -259,6 +264,7 @@ picoaide-next/
 │   │       └── index.html
 │   ├── tests/                   # E2E/冒烟预留(单测内嵌 src/**/*.test.ts)
 │   └── resources/               # 图标/tesseract 模型/安装资源
+├── browser-extension/            # 浏览器插件(Chrome MV3):manifest + service worker + content script + 设置页
 ├── webadmin/                     # 服务端管理页(独立小 React 应用)
 │   └── src/                      # Login/Users/Gateway/Usage/Marketplace/Knowledge
 ├── docs/
@@ -398,6 +404,8 @@ renderer 经 preload 暴露的 `window.picoaide.onAgentEvent(cb)` 订阅(底层 
 | screen_ocr | 对截图 OCR | 惰性加载模型(本地打包) |
 | clipboard_read / write | 剪贴板 | 读剪贴板属敏感,**读取前审批弹窗** |
 | MCP 插件工具 / skill_exec | 商城插件/技能提供的工具 | 见 3.6/3.7:插件工具按风险启发式强制审批;脚本仅本地沙盒执行 |
+| browser_tab_info / browser_get_content | 读取浏览器当前页(经插件桥) | 见 3.8:读取类直接可用;内容仅回本机 |
+| browser_click / browser_type / browser_navigate / browser_scroll / browser_execute_js | 操作浏览器当前页 | **高危:审批弹窗**(操作类与 executeScript) |
 
 **命令审批策略(防绕过设计)**:判定前**剥离/拒绝全部控制字符(含换行 `\n`、`\r`、`\0`)与裸 `$`(`$(`、`${` 已拒,裸 `$VAR` 也拒)**;含 shell 拼接字符(`;` `&&` `\|\|` `\|` 反引号 `>` `<`)或**首词不在安全白名单**(`ls,cat,pwd,mkdir,cp,mv,echo,head,tail,grep,wc,date,df,du,uname`——**不含 find**,其 `-exec/-delete` 可递归删除)或**路径参数经 realpath 解析后越出可访问目录**(`cat /etc/passwd`、`cat ~/.ssh/id_rsa`)→ 一律审批。
 
@@ -520,6 +528,47 @@ skill-name-v1.2.3.tar.gz
 - **建议安装制**:启动配置下发技能建议清单,员工在设置页自行安装/卸载(与管理页上架解耦,非授权制)
 - 来源信任:仅商城官方渠道;第三方 skill 首次安装弹窗提示风险
 - 技能包自带 `tools/` 工具定义(JSON schema):**本期不实现,二期再注册**(loader 忽略该目录)
+
+### 3.8 浏览器插件桥(CDP)
+
+让 Agent 直接操作员工真实浏览器(读取当前页、点击、输入、导航)——**客户端主进程启动即监听本地 CDP 端口,浏览器插件直连该端口**,无需 Playwright 等系统依赖:
+
+```
+Electron 主进程                       浏览器(Chrome/Edge)
+┌───────────────────────┐  WebSocket  ┌────────────────────────┐
+│ cdp-server.ts         │◄───────────►│ 插件 picoaide-bridge    │
+│ 监听 127.0.0.1:<port>  │  JSON-RPC   │  (MV3 扩展,后台常连)    │
+│ token 鉴权(Bearer)     │            │  tabs/activeTab/scripting│
+└───────────────────────┘            └────────────────────────┘
+```
+
+**服务端(客户端主进程,`cdp-server.ts`)**:
+
+- 应用启动时监听 `127.0.0.1:<port>`(默认 **9333**,被占用则 +1 递增,实际端口在设置页/状态栏展示;**仅绑定回环地址,不对外网开放**)
+- 连接握手:`Authorization: Bearer <bridge_token>`;token 随机生成、持久化于 `config.json`(0600,随客户端安全存储),设置页展示,员工将其粘贴到插件设置页(一次性)
+- 协议:JSON-RPC 2.0 over WebSocket,最小 CDP 子集,方法:
+  - `browser.tabInfo` → `{url, title}`(当前活动标签)
+  - `browser.getContent` → 当前页可读文本(去 script/style)
+  - `browser.click(selector)` / `browser.type(selector, text)` / `browser.navigate(url)` / `browser.scroll(direction)`
+  - `browser.executeScript(code)`(高危)
+- 响应统一 `{id, result | error}`;插件断线自动重连;客户端退出时关闭端口
+
+**插件(`browser-extension/`,Chrome MV3)**:
+
+- 后台 service worker 维持 WebSocket 连接(断线指数退避重连);content script 执行 DOM 操作(点击/输入/滚动/取内容)
+- 权限:`tabs`/`activeTab`/`scripting`(最小集);设置页配置 `127.0.0.1:<port>` 与 token
+- 分发:企业内 `chrome://extensions` 开发者模式加载或组策略下发(README 说明);**客户端零配置不受影响——未装插件时浏览器工具返回"插件未连接"明确错误**
+
+**工具注册(引擎侧,`browser_*`)**:
+
+| 工具 | 能力 | 安全约束 |
+|------|------|----------|
+| browser_tab_info / browser_get_content | 读取当前页 URL/标题/文本 | 直接可用(内容仅回本机) |
+| browser_click / browser_type / browser_navigate / browser_scroll | 操作当前页 | **高危:审批弹窗**(可能改变用户浏览状态/提交表单) |
+| browser_execute_js | 在页面执行任意 JS | **高危:审批弹窗** |
+
+- 审批沿用 3.4 引擎层门控(60s 超时拒绝);插件未连接 → 工具返回明确错误给 Agent 重试
+- 读取到的页面内容经 Agent 上下文可能被 LLM 处理——与 web_fetch 同源风险,外发仍走 kb_upload 等审批口
 
 ---
 
@@ -720,7 +769,8 @@ kb_folders / kb_documents / kb_folder_users / kb_folder_groups / kb_audit_logs
 | 客户端 token | Electron safeStorage(OS 密钥链)优先;**Windows 无密钥链时回退不落盘(每次启动重登)**,其余平台回退 config.json 0600 |
 | 超管引导 | `--bootstrap-admin` 需 env `PICOAI_ADMIN_PASSWORD`(缺失则启动失败,不打印密码到日志) |
 | master key | env `PICOAI_MASTER_KEY` 或 `data/master.key`(0600);**data 目录 0700**;轮换无(列为已知限制) |
-| 高危操作 | 删除/截屏/剪贴板读取/命令审批/kb_upload → UI 确认弹窗(60s 超时拒绝,自弹窗可见起算);命令按"白名单+无拼接+路径边界"判定(拒绝控制字符/裸 `$`/find) |
+| 高危操作 | 删除/截屏/剪贴板读取/命令审批/kb_upload/浏览器操作类工具 → UI 确认弹窗(60s 超时拒绝,自弹窗可见起算);命令按"白名单+无拼接+路径边界"判定(拒绝控制字符/裸 `$`/find) |
+| 浏览器插件桥 | 仅绑定 127.0.0.1(不对外);连接 Bearer token 鉴权(config.json 0600);操作类/executeScript 工具审批;插件未连接时工具明确报错 |
 | 插件工具 | MCP 插件工具按风险启发式强制审批(动词表:delete/remove/write/exec/shell/http/post/put/send/upload/publish/push/sync/purge/clear/truncate/unlink/rm 等,大小写不敏感,**best-effort 仅减噪,安全边界=安装弹窗**);插件安装风险提示;stdio 命令白名单 |
 | 插件凭证 | 仅登录用户可拉取(建议安装制,无授权表);**per-user 限流 + 下载审计**;仅 enabled 可拉;加密传输;客户端仅内存持有(启动重拉) |
 | 文件越界 | 可访问目录白名单(默认工作目录,realpath 校验) |
@@ -741,6 +791,7 @@ kb_folders / kb_documents / kb_folder_users / kb_folder_groups / kb_audit_logs
 | 服务端不可达 | 客户端离线态,可浏览历史;新任务提示需联网;自动重连;**401 与网络错误区分:token 过期 → 提示重新登录** |
 | 上游 LLM 失败 | 网关 502 + 错误体;客户端重试 1 次,失败展示错误 |
 | 工具超时 | command 默认 60s;超时结果回传 Agent |
+| 浏览器插件未连接 | browser_* 工具返回"插件未连接"明确错误,Agent 可重试或换 web_fetch |
 | Agent 死循环 | 步数上限默认 20;超限提示"继续/停止"("继续"= 以当前消息上下文重新发起 run,步数重置) |
 | 高危确认超时 | 默认拒绝(自弹窗可见起算;主进程缓冲事件,renderer 就绪补发;多弹窗串行排队) |
 | 任务中断 | `status` 标记(running/executing),重启后提示"继续"(截断到最后 user 消息重跑);历史消息全部保留 |
@@ -828,6 +879,7 @@ kb_folders / kb_documents / kb_folder_users / kb_folder_groups / kb_audit_logs
 | 服务端被内部滥用 | 中 | 限流(登录 + 网关双口)+ 计量 + 管理页监控 |
 | 任意登录员工可拉取全部插件凭证(建议安装制固有) | 中 | 企业内可信环境;凭证按插件粒度最小化;per-user 限流 + 下载审计可追溯;二期可加组可见性 |
 | 本地账号部署下无组映射(知识库组权限不可用) | 低 | 知识库以用户级授权兜底;组管理二期 |
+| 浏览器插件依赖员工手动安装/企业分发 | 中 | 插件安装说明入 README;组策略下发;未装插件时工具明确降级(web_fetch 兜底) |
 
 ---
 
@@ -839,6 +891,7 @@ kb_folders / kb_documents / kb_folder_users / kb_folder_groups / kb_audit_logs
 4. web_search 端点选型(可配置搜索 API,实施期定)
 5. docx/pdf 文本抽取库选型(阶段 4 实现,默认 txt/md 先行)
 6. 服务端部署形态(Docker 镜像)
+7. 浏览器插件分发方式(开发者模式加载 vs 组策略;插件商店不上架)
 
 ---
 

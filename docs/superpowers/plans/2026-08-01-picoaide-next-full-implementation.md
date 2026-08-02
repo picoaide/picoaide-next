@@ -24,8 +24,9 @@
 ### 0.2 目录规约(与设计文档 §3.2 一致)
 
 ```
-cmd/server/ internal/{serverauth,llmgateway,marketplace,knowledge,serverstore,util}(服务端 Go)
+cmd/server/ internal/{serverauth,llmgateway,marketplace,knowledge,serverstore,util,bootstrap}(服务端 Go)
 desktop/{src/{main,preload,renderer},tests}(Electron 客户端 TS)
+browser-extension/(浏览器插件 MV3:manifest/background/content/options)
 webadmin/ docs/ scripts/ data/
 ```
 
@@ -1183,7 +1184,7 @@ git checkout master && git merge dev && git tag -a v0.2.0 -m "client skeleton mi
 
 ## 阶段 3:本地能力(约 3-4 周)
 
-**目标:** Craft 模式全流程:真实文件任务("汇总桌面 Word 成 500 字汇报存回桌面")跑通;本地工具 + 审批确认 + Skill + MCP 插件 + 产物面板 + 沙盒执行。
+**目标:** Craft 模式全流程:真实文件任务("汇总桌面 Word 成 500 字汇报存回桌面")跑通;本地工具 + 审批确认 + Skill + MCP 插件 + 产物面板 + 沙盒执行 + 浏览器插件桥(CDP)。
 
 ---
 
@@ -1629,7 +1630,39 @@ git commit -m "feat: web fetch and search tools"
 
 ---
 
-### Task 3.15: 阶段 3 验收
+### Task 3.15: 浏览器插件桥(CDP)
+
+**Files:**
+- Create: `desktop/src/main/cdp_server.ts`、`desktop/src/main/cdp_server.test.ts`、`desktop/src/main/tools/browser.ts`、`desktop/src/main/tools/browser.test.ts`、`browser-extension/manifest.json`、`browser-extension/background.js`、`browser-extension/content.js`、`browser-extension/options.html`、`browser-extension/options.js`、`browser-extension/README.md`
+- Modify: `desktop/src/main/index.ts`(启动/关闭 CDP 服务)、`desktop/src/main/agent/engine.ts`(注册 browser_* 工具)、`desktop/src/renderer/src/pages/Settings.tsx`(端口/token 展示)
+
+- [ ] **Step 1: 写测试(红)**
+
+- `cdp_server.test.ts`:起真实 WebSocket 服务(临时端口)——**无 token 连接拒绝;带 token 连接成功;JSON-RPC 请求/响应往返(browser.tabInfo/browser.getContent 由 mock handler 返回);端口占用时自动 +1**
+- `browser.test.ts`:工具注册——`browser_tab_info`/`browser_get_content` 不标记审批;`browser_click`/`browser_type`/`browser_navigate`/`browser_scroll`/`browser_execute_js` 标记 `needsApproval: true`;插件未连接 → 明确错误
+Run: `cd desktop && npx vitest run src/main/cdp_server src/main/tools/browser`
+Expected: FAIL
+
+- [ ] **Step 2: 实现**
+
+`cdp_server.ts`:`startCdpServer()` 监听 `127.0.0.1:<port>`(**默认 9333,占用 +1 递增;仅绑定回环地址**),连接握手校验 `Authorization: Bearer <bridge_token>`(token 随机生成、safeStorage/0600 持久化于 config.json);JSON-RPC 2.0 分派——`browser.tabInfo`/`browser.getContent`/`browser.click`/`browser.type`/`browser.navigate`/`browser.scroll`/`browser.executeScript`,响应 `{id, result|error}`;客户端退出关闭端口
+`tools/browser.ts`:注册 `browser_*` AI SDK 工具,execute 转发 CDP 请求;**操作类与 executeScript 标记 `needsApproval: true`(引擎层审批门控)**,读取类直接可用;插件未连接 → `ToolError('浏览器插件未连接')`
+`index.ts`:应用启动时启动 CDP 服务,退出时关闭
+`Settings.tsx`:端口与 token 展示(供粘贴到插件设置)
+`browser-extension/`(Chrome MV3):`manifest.json`(permissions: `tabs`/`activeTab`/`scripting`)+ background service worker(WebSocket 常连,断线指数退避重连;转发 CDP 命令到 content script)+ content script(点击/输入/滚动/取文本/执行 JS)+ options 页(配置 `127.0.0.1:<port>` + token)+ README(开发者模式加载说明)
+Run: 同上 + 手工:装插件 → 连上 → Craft 让 Agent 读取当前标签页内容/点击/导航
+Expected: PASS
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add desktop/src/main/cdp_server.ts desktop/src/main/tools/browser.ts browser-extension/
+git commit -m "feat: browser extension bridge over local CDP"
+```
+
+---
+
+### Task 3.16: 阶段 3 验收
 
 - [ ] **Step 1: 全量测试**
 
@@ -1646,6 +1679,7 @@ Expected: PASS
 5. 知识库:Craft 模式让 Agent 查询知识库文档(kb_search)→ 返回正确内容;**要求其把本地内容写入知识库(kb_upload)→ 触发审批**;kb_read 越权文档 → 明确错误
 6. 长任务:让 Agent 执行多步任务,任务中途重启客户端 → 提示恢复 → 继续完成
 7. 管理员改动:管理页改默认模型/下架插件 → 客户端"刷新配置" → 生效
+8. 浏览器插件:安装扩展连上 CDP → Craft 让 Agent 读取当前标签页 → 点击/输入触发审批 → 拒绝后循环继续;未装插件时 browser_* 返回"插件未连接"
 Expected: 全部通过
 
 - [ ] **Step 3: 合并 master**
@@ -1834,6 +1868,7 @@ git add CHANGELOG.md && git commit -m "docs: changelog for 0.4.0"
 - §3.5 本地 SQLite 四表(含 status 列)→ Task 2.2
 - §3.6 本地 MCP 运行时(审批启发式/命令白名单/**凭证启动重拉**)→ Task 3.12
 - §3.7 Skill 运行时 → Task 3.11
+- §3.8 浏览器插件桥(CDP)→ Task 3.15
 - §4.1 认证(本地/LDAP/OIDC/token 过期/超管引导)→ Task 1.4-1.7
 - §4.2 AI 网关 + 限流 + 计量 + **bootstrap 启动配置** → Task 1.8-1.10、1.16b、2.4
 - §4.3/4.4 商城(**企业内分发,建议安装制,无授权;凭证限流+审计**)→ Task 1.11-1.13、1.16b、3.11-3.12
@@ -1844,7 +1879,7 @@ git add CHANGELOG.md && git commit -m "docs: changelog for 0.4.0"
 - **零配置原则** → Task 2.4(bootstrap)、2.7(登录即用)、3.13(设置页仅本地边界)
 - §8 实施阶段 → 全部映射为 Task 1.1-4.6
 
-**待实施时确认的选型**(不影响任务结构,在每个任务内决策并记录):OCR 语言包加载路径(tesseract.js langPath)、MCP TS SDK 版本 API(@modelcontextprotocol/sdk v1 构造签名)、中文 FTS5(unicode61 前缀 vs trigram)、web_search 端点、@ai-sdk/sandbox-just-bash 实际 API 形状、docx/pdf 抽取库、electron-vite 当前版本约定、bootstrap 响应结构字段名。
+**待实施时确认的选型**(不影响任务结构,在每个任务内决策并记录):OCR 语言包加载路径(tesseract.js langPath)、MCP TS SDK 版本 API(@modelcontextprotocol/sdk v1 构造签名)、中文 FTS5(unicode61 前缀 vs trigram)、web_search 端点、@ai-sdk/sandbox-just-bash 实际 API 形状、docx/pdf 抽取库、electron-vite 当前版本约定、bootstrap 响应结构字段名、CDP 桥端口默认值/冲突策略、浏览器插件分发方式(开发者模式 vs 组策略)。
 
 **类型/签名一致性检查:**
 - `createGatewayModel(serverURL, token, modelID)`(Task 2.3 定义)→ 2.5/3.8 一致引用
@@ -1854,6 +1889,7 @@ git add CHANGELOG.md && git commit -m "docs: changelog for 0.4.0"
 - `isAllowed(absPath, allowedDirs)`(Task 3.6)→ 3.1/3.2 复用
 - `confirm(requestId, ok)`(Task 3.7)→ 引擎层审批门控签名;preload/ipc 与 ConfirmModal 同签名
 - `needsApprovalFor(command, allowedDirs)`(Task 3.2)→ 3.7 审批门控消费
+- `startCdpServer()`(Task 3.15)→ index.ts 启动/关闭;browser_* 工具(3.15)经审批门控注册
 - `toModelMessage`/`fromModelMessage`(Task 2.3 探针)→ 2.5/3.8/3.9 一致(含 tool_call_id/tool_name/is_error)
 - `store.*` 方法(任务 2.2)→ 2.5/3.9/3.10 一致
 - 服务端 Go 侧签名(阶段 1)不受客户端改动影响,保持任务 1.x 原文
