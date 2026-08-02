@@ -3,6 +3,7 @@ package serverstore
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestUsers(t *testing.T) {
@@ -89,6 +90,65 @@ func TestAuthenticateLocal(t *testing.T) {
 	}
 	if _, err := AuthenticateLocal(db, "nobody", "pw123456"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown user: want ErrNotFound got %v", err)
+	}
+}
+
+func TestDeleteUserWithReferencedRows(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := CreateUserWithPassword(db, "carol", "pw123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 一个登录用户必然持有:api_token、usage、admin_session、mcp_config_downloads、user_groups
+	if _, err := CreateToken(db, id, "raw-token", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RecordUsage(db, id, "m", 1, 2); err != nil {
+		t.Fatal(err)
+	}
+	adminSessID := "session-" + time.Now().Format("150405")
+	if _, err := db.Exec(`INSERT INTO admin_sessions (id, user_id, csrf_key, expires_at) VALUES (?, ?, ?, ?)`,
+		adminSessID, id, "csrf", time.Now().Add(time.Hour).UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	mcpID, err := AddMCPServer(db, &MCPServer{Name: "mcp1", Transport: "stdio"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordDownload(db, id, mcpID); err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncUserGroups(db, id, []string{"g1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := DeleteUser(db, id); err != nil {
+		t.Fatalf("DeleteUser with referenced rows failed: %v", err)
+	}
+	// 用户及其全部关联行都应消失
+	if _, err := GetUserByID(db, id); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("user still present: %v", err)
+	}
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM api_tokens WHERE user_id = ?", id).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("tokens left: %d err=%v", n, err)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM usage WHERE user_id = ?", id).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("usage left: %d err=%v", n, err)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM admin_sessions WHERE user_id = ?", id).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("sessions left: %d err=%v", n, err)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM mcp_config_downloads WHERE user_id = ?", id).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("downloads left: %d err=%v", n, err)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM user_groups WHERE user_id = ?", id).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("user_groups left: %d err=%v", n, err)
 	}
 }
 
