@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, NavLink } from 'react-router-dom'
 import { Users, Settings2, BarChart3, Store, FolderOpen, LogOut } from 'lucide-react'
 import { me, logout } from './api'
 import { Button } from './components/ui/button'
@@ -34,25 +34,22 @@ export default function App() {
   if (!authed) return <Login onLoggedIn={() => setAuthed(true)} />
 
   return (
-    <BrowserRouter>
+    <BrowserRouter basename="/admin">
       <div className="flex h-screen">
         <aside className="flex w-48 flex-col border-r bg-muted/30">
           <div className="px-4 py-4 text-lg font-bold">PicoAide 管理</div>
           <nav className="flex-1 space-y-1 px-2">
             {nav.map((n) => (
-              <a
+              <NavLink
                 key={n.to}
-                href={'#' + n.to}
-                onClick={(e) => {
-                  e.preventDefault()
-                  window.history.pushState(null, '', n.to)
-                  window.dispatchEvent(new PopStateEvent('popstate'))
-                }}
-                className={cn('flex items-center gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent', location.hash === '#' + n.to && 'bg-accent')}
+                to={n.to}
+                className={({ isActive }) =>
+                  cn('flex items-center gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent', isActive && 'bg-accent')
+                }
               >
                 <n.icon className="h-4 w-4" />
                 {n.label}
-              </a>
+              </NavLink>
             ))}
           </nav>
           <div className="p-2">
