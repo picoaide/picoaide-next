@@ -167,6 +167,15 @@ renderer (React UI) ──contextBridge──▶ preload ──ipcMain──▶ 
                                                       服务端 (HTTPS)
 ```
 
+#### 3.1.1 工程约定(UI 与复用)
+
+1. **UI 组件一律使用 shadcn/ui,禁止自写 UI 组件**:任何界面元素(按钮/输入框/文本域/卡片/对话框/表格/图表/下拉/开关/提示等)必须来自 shadcn 组件(`components/ui/`,`npx shadcn add` 拉取);业务组件(ChatInput/Messages/ToolCalls/ConfirmModal/ArtifactsPanel 及 webadmin 页面)只做**组合与状态编排**,内部一律用 shadcn 原语,不写自定义样式组件、不写裸 `<button>` 等(样式走 Tailwind 工具类 + shadcn 主题变量)
+2. **函数尽量复用,禁止复制粘贴**:同一逻辑只实现一次——
+   - 客户端:工具公共逻辑(路径边界 `paths.ts`/`isAllowed`、审批门控、CDP/HTTP 转发、编码检测)抽共享模块;引擎/工具/连接器分层调用
+   - 服务端:DAO(serverstore)统一数据访问,util 包统一工具函数(密码/加密/路径安全),公共中间件(鉴权/限流/CSRF)只写一遍挂多路由
+   - 双端共享:涉及同语义逻辑(如 bootstrap 字段、JSON-RPC 协议、错误码)以文档契约为准,两端各实现一次转换层,不得内联重复逻辑
+3. 判断标准:新增代码前先搜仓库是否已有等价函数/组件;重复 2 次即提取。
+
 - **main 进程**:Agent 引擎、本地工具、better-sqlite3、MCP 运行时、网关客户端、token 存储(不在 renderer 持敏感数据)
 - **renderer 进程**:纯 UI,经 preload 的 `window.picoaide.*` API 与 main 通信,流式事件经 ipc 推送
 - **preload 脚本**:contextBridge 暴露白名单 API(登录/发消息/事件订阅/设置/确认),contextIsolation 开启
