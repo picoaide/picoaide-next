@@ -60,3 +60,14 @@ export function resolveAllowedDirs(workspaceDir: string, raw: string[]): string[
   for (const d of raw) if (!out.includes(d)) out.push(d)
   return out
 }
+
+const BOUNDARY_PREFIX = '路径不在允许目录内: '
+
+// isBoundaryError reports whether err is an out-of-boundary ToolError,
+// and returns the offending path when it is.
+export function isBoundaryError(err: unknown): { path: string } | null {
+  if (err instanceof ToolError && err.message.startsWith(BOUNDARY_PREFIX)) {
+    return { path: err.message.slice(BOUNDARY_PREFIX.length).trim() }
+  }
+  return null
+}

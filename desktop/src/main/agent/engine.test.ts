@@ -6,6 +6,8 @@ import { AgentEngine, createKbTools, fromModelMessage, toModelMessage } from './
 import type { AppendMessageInput, DBMessage } from './engine'
 import type { AgentEvent } from './events'
 import { createGatewayModel } from './provider'
+import { ToolError } from '../tools/paths'
+import type { GatedTool } from './engine'
 import type { Session } from '../gateway/config'
 import { kbSearch } from '../gateway/remote_mcp'
 
@@ -510,6 +512,93 @@ describe('AgentEngine craft (store-backed)', () => {
   })
 })
 
+describe('AgentEngine plan mode', () => {
+  it('plan round streams text, persists the plan, and leaves the conversation planning', async () => {
+    const { mock, events, engine, store } = makeEngine('text')
+    await engine.plan({ conversationId: 1, content: '写一份周报' })
+    expect(mock.callCount).toBe(1)
+    expect(eventsOf(events, 'tool_start')).toHaveLength(0)
+    expect(eventsOf(events, 'done')).toHaveLength(1)
+    expect(store.listMessages(1).map((m) => m.role)).toEqual(['user', 'assistant'])
+    expect(store.listMessages(1)[1].content).toBe('hello world')
+    expect(store.getConversation(1)?.status).toBe('planning')
+  })
+
+  it('approvePlan(true) runs the second round with tools and finishes done', async () => {
+    const { mock, events, engine, store } = makeEngine('text')
+    await engine.plan({ conversationId: 1, content: '读取并总结' })
+    mock.script = 'tool-call'
+    await engine.approvePlan({ conversationId: 1, ok: true, tools, highRiskTools: new Set() })
+    expect(eventsOf(events, 'tool_start')).toHaveLength(1)
+    expect(eventsOf(events, 'tool_end')).toHaveLength(1)
+    expect(deletedPaths).toEqual(['/home/u/x.doc'])
+    expect(store.getConversation(1)?.status).toBe('done')
+    expect(eventsOf(events, 'done')).toHaveLength(2) // plan 轮 + 执行轮
+    // 执行轮上下文截断到最后一条 user 消息(计划文本不进入上下文,user 不重复)
+    const execPrompt = mock.prompts[1] as Array<{ role: string; content: unknown }>
+    expect(JSON.stringify(execPrompt)).not.toContain('hello world')
+    expect(execPrompt.some((m) => m.role === 'tool')).toBe(false)
+    expect(store.listMessages(1).filter((m) => m.role === 'user')).toHaveLength(1)
+  })
+
+  it('approvePlan(false) marks the conversation rejected without executing', async () => {
+    const { mock, events, engine, store } = makeEngine('text')
+    await engine.plan({ conversationId: 1, content: '写周报' })
+    mock.script = 'tool-call'
+    await engine.approvePlan({ conversationId: 1, ok: false, tools, highRiskTools: new Set() })
+    expect(store.getConversation(1)?.status).toBe('rejected')
+    expect(mock.callCount).toBe(1)
+    expect(eventsOf(events, 'tool_start')).toHaveLength(0)
+  })
+
+  it('marks the conversation failed when the plan round errors', async () => {
+    const { events, engine, store } = makeEngine('throw')
+    await expect(engine.plan({ conversationId: 1, content: 'hi' })).rejects.toThrow('mock upstream failed')
+    expect(store.getConversation(1)?.status).toBe('failed')
+  })
+
+  it('approvePlan is a no-op when the conversation is not planning', async () => {
+    const { mock, engine, store } = makeEngine('text')
+    store.updateConversationStatus(1, 'done')
+    mock.script = 'tool-call'
+    await engine.approvePlan({ conversationId: 1, ok: true, tools, highRiskTools: new Set() })
+    expect(mock.callCount).toBe(0)
+    expect(store.getConversation(1)?.status).toBe('done')
+  })
+})
+
+describe('AgentEngine continueConversation', () => {
+  it('refuses to continue a conversation that is not resumable', async () => {
+    const { engine, store } = makeEngine('text')
+    store.appendMessage({ conversationId: 1, role: 'user', content: 'hi' })
+    await expect(engine.continueConversation({ conversationId: 1 })).rejects.toThrow(/not resumable/)
+  })
+
+  it('resumes a failed conversation from its last user message with tools', async () => {
+    const store = makeStore()
+    store.updateConversationStatus(1, 'failed')
+    store.appendMessage({ conversationId: 1, role: 'user', content: '写报告' })
+    store.appendMessage({ conversationId: 1, role: 'assistant', content: '部分输出' })
+    const { mock, events, engine } = makeEngine('tool-call', {}, store, 'file_read')
+    await engine.continueConversation({ conversationId: 1, tools, highRiskTools: new Set() })
+    expect(eventsOf(events, 'tool_start')).toHaveLength(1)
+    expect(eventsOf(events, 'tool_end')).toHaveLength(1)
+    expect(store.getConversation(1)?.status).toBe('done')
+    expect(mock.callCount).toBe(2)
+    // 上下文截断到最后一条 user('写报告'),不含中断时的部分输出
+    const prompt = mock.prompts[0] as Array<{ role: string; content: unknown }>
+    expect(JSON.stringify(prompt)).not.toContain('部分输出')
+  })
+
+  it('emits an error when there is no user message to resume from', async () => {
+    const store = makeStore()
+    store.updateConversationStatus(1, 'running')
+    const { events, engine } = makeEngine('text', {}, store)
+    await expect(engine.continueConversation({ conversationId: 1 })).rejects.toThrow(/no user message/)
+    expect(eventsOf(events, 'error')).toHaveLength(1)
+  })
+})
+
 describe('knowledge base tools', () => {
   it('createKbTools registers kb_search and marks kb_upload high-risk', async () => {
     const session: Session = { serverURL: 'https://srv.example.com', username: 'u', token: 't' }
@@ -715,5 +804,53 @@ describe('message conversion round trip', () => {
     const msg = toModelMessage(row)
     const back = fromModelMessage(msg as ModelMessage)
     expect(back).toMatchObject({ role: 'tool', content: 'ok', tool_call_id: 'call_2', tool_name: 'file_read', is_error: 0 })
+  })
+})
+
+describe('越界引导(boundary guide)', () => {
+  it('工具越界 → confirm_required(allow_dir) → 确认后加入目录并自动重试', async () => {
+    const events: AgentEvent[] = []
+    const addedDirs: string[] = []
+    const engine = new AgentEngine(
+      { model: {} as LanguageModel, sysPrompt: 'x', approvalTimeoutMs: 5000 },
+      {
+        emit: (ev) => events.push(ev),
+        addAllowedDir: (dir) => addedDirs.push(dir),
+      },
+    )
+    const inner = vi.fn().mockRejectedValueOnce(new ToolError('路径不在允许目录内: /home/u/desktop'))
+      .mockResolvedValueOnce('ok-after-retry')
+    const t: GatedTool = { ...tool({ description: 't', inputSchema: z.object({}), execute: inner }), execute: inner }
+    const wrapped = engine.wrapToolForTest('file_read', t, false)
+    const run = (wrapped as any).execute({}, { toolCallId: 'call-1' })
+    await new Promise((r) => setTimeout(r, 10))
+    const confirm = events.find((e) => e.type === 'confirm_required')
+    expect(confirm).toBeDefined()
+    const d = (confirm as any).data
+    expect(d.op).toBe('allow_dir')
+    expect(d.target).toBe('/home/u/desktop')
+    expect(d.reason).toContain('加入可访问目录')
+    engine.confirm('call-1', true)
+    const out = await run
+    expect(out).toBe('ok-after-retry')
+    expect(addedDirs).toEqual(['/home/u/desktop'])
+    expect(inner).toHaveBeenCalledTimes(2)
+  })
+
+  it('拒绝 → 不加入目录,错误回传模型', async () => {
+    const events: AgentEvent[] = []
+    const addedDirs: string[] = []
+    const engine = new AgentEngine(
+      { model: {} as LanguageModel, sysPrompt: 'x', approvalTimeoutMs: 5000 },
+      { emit: (ev) => events.push(ev), addAllowedDir: (dir) => addedDirs.push(dir) },
+    )
+    const inner = vi.fn().mockRejectedValue(new ToolError('路径不在允许目录内: /etc/passwd'))
+    const t: GatedTool = { ...tool({ description: 't', inputSchema: z.object({}), execute: inner }), execute: inner }
+    const wrapped = engine.wrapToolForTest('file_read', t, false)
+    const run = (wrapped as any).execute({}, { toolCallId: 'call-2' })
+    await new Promise((r) => setTimeout(r, 10))
+    engine.confirm('call-2', false)
+    await expect(run).rejects.toThrow()
+    expect(addedDirs).toEqual([])
   })
 })

@@ -9,6 +9,11 @@ import { AuthError } from './gateway/auth'
 import type { Session } from './gateway/config'
 import { clearCaches, getBootstrapCache, getCurrentSession } from './session_cache'
 
+vi.mock('electron', () => ({
+  ipcMain: { handle: vi.fn() },
+  shell: { showItemInFolder: vi.fn() },
+}))
+
 const USAGE = {
   inputTokens: { total: 7, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
   outputTokens: { total: 3, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
@@ -19,7 +24,11 @@ class FakeProvider {
   provider = 'fake'
   modelId = 'fake-model'
 
-  constructor(private script: 'text' | 'throw' | 'hang' | 'tool-call' = 'text') {}
+  script: 'text' | 'throw' | 'hang' | 'tool-call'
+
+  constructor(script: 'text' | 'throw' | 'hang' | 'tool-call' = 'text') {
+    this.script = script
+  }
 
   async doGenerate() {
     throw new Error('not used')
@@ -138,10 +147,11 @@ function makeStore(): StoreLike {
 function makeDeps(script: 'text' | 'throw' | 'hang' | 'tool-call' = 'text') {
   const sent: Array<{ channel: string; payload: unknown }> = []
   const store = makeStore()
+  const model = new FakeProvider(script)
   const deps: AgentIpcDeps = {
     store,
     sysPrompt: 'sys',
-    createModel: () => new FakeProvider(script) as unknown as LanguageModel,
+    createModel: () => model as unknown as LanguageModel,
     getTools: async () => ({ tools: {} as Record<string, Tool>, highRiskTools: new Set<string>() }),
     getWindow: () => ({
       webContents: {
@@ -149,7 +159,7 @@ function makeDeps(script: 'text' | 'throw' | 'hang' | 'tool-call' = 'text') {
       },
     }),
   }
-  return { sent, store, deps }
+  return { sent, store, deps, model }
 }
 
 function eventsOf(sent: Array<{ channel: string; payload: unknown }>) {
@@ -291,6 +301,86 @@ describe('craft via ipc', () => {
 
 afterEach(() => {
   ipcDeleted.length = 0
+})
+
+describe('chat:continue / chat:approvePlan / chat:listRunning / artifacts', () => {
+  it('chat:continue replays the last user message and finishes done', async () => {
+    const { deps, store, sent } = makeDeps('text')
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({ mode: 'craft' })
+    store.appendMessage({ conversationId: id, role: 'user', content: 'first' })
+    store.appendMessage({ conversationId: id, role: 'assistant', content: 'stale partial' })
+    store.updateConversationStatus(id, 'running')
+    await handlers['chat:continue']({ conversationId: id })
+    expect(store.getConversation(id)?.status).toBe('done')
+    expect(eventsOf(sent).some((e) => (e as { type: string }).type === 'done')).toBe(true)
+    // 中断时的部分输出不进上下文(截断到最后一条 user)
+    expect(store.listMessages(id).filter((m) => m.role === 'user')).toHaveLength(1)
+  })
+
+  it('chat:ask in plan mode produces a plan; chat:approvePlan(true) executes with tools', async () => {
+    const { deps, model, store, sent } = makeDeps('text')
+    const executed: string[] = []
+    deps.getTools = async () => ({
+      tools: {
+        file_delete: tool({
+          description: 'delete a file',
+          inputSchema: z.object({ path: z.string() }),
+          execute: async ({ path }) => {
+            executed.push(path)
+            return 'deleted'
+          },
+        }),
+      },
+      highRiskTools: new Set(['file_delete']),
+    })
+    const handlers = buildAgentHandlers(deps)
+    handlers['picoaide:rendererReady']()
+    const id = handlers['chat:new']({ mode: 'plan' })
+    await handlers['chat:ask']({ conversationId: id, content: 'plan it' })
+    expect(store.getConversation(id)?.status).toBe('planning')
+    expect(store.listMessages(id).map((m) => m.role)).toEqual(['user', 'assistant'])
+    model.script = 'tool-call'
+    const run = handlers['chat:approvePlan']({ conversationId: id, ok: true })
+    await waitFor(() => eventsOf(sent).some((e) => (e as { type: string }).type === 'confirm_required'))
+    handlers['agent:confirm']({ requestId: 'call_1', ok: true })
+    await run
+    expect(executed).toEqual(['/home/u/x.doc'])
+    expect(store.getConversation(id)?.status).toBe('done')
+  })
+
+  it('chat:approvePlan(false) marks the conversation rejected', async () => {
+    const { deps, store } = makeDeps('text')
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({ mode: 'plan' })
+    await handlers['chat:ask']({ conversationId: id, content: 'plan it' })
+    await handlers['chat:approvePlan']({ conversationId: id, ok: false })
+    expect(store.getConversation(id)?.status).toBe('rejected')
+    expect(store.listMessages(id).filter((m) => m.role === 'tool')).toHaveLength(0)
+  })
+
+  it('chat:listRunning returns only running/executing conversations', async () => {
+    const { deps, store } = makeDeps('text')
+    const handlers = buildAgentHandlers(deps)
+    const running = handlers['chat:new']({ mode: 'craft' })
+    store.updateConversationStatus(running, 'running')
+    const executing = handlers['chat:new']({ mode: 'craft' })
+    store.updateConversationStatus(executing, 'executing')
+    handlers['chat:new']({})
+    expect(handlers['chat:listRunning']().map((c) => c.id)).toEqual([running, executing])
+  })
+
+  it('chat:artifacts lists persisted artifacts; artifact:showInFolder is a no-op guard', async () => {
+    const { deps, store } = makeDeps('text')
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({})
+    store.addArtifact({ conversationId: id, path: '/w/report.md', type: 'report', size: 10 })
+    expect(handlers['chat:artifacts']({ conversationId: id })).toEqual([
+      { id: 2, conversation_id: id, path: '/w/report.md', type: 'report', size: 10, created_at: '' },
+    ])
+    expect(() => handlers['artifact:showInFolder']({ path: '/w/report.md' })).not.toThrow()
+    expect(() => handlers['artifact:showInFolder']({ path: '' })).not.toThrow()
+  })
 })
 
 const SESSION: Session = { serverURL: 'https://srv.example.com', username: 'alice', token: 'tok' }

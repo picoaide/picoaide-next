@@ -30,12 +30,15 @@ import { login, saveSession, loadSession, clearSession } from './gateway/auth'
 import { getBootstrap } from './gateway/bootstrap'
 import { createHealthPoller } from './gateway/health'
 import type { Session } from './gateway/config'
-import { establishSession, clearCaches, getBootstrapCache, getCurrentSession } from './session_cache'
+import { establishSession, clearCaches, getBootstrapCache, getCurrentSession, setBootstrapCache } from './session_cache'
+import { buildPluginHandlers } from './plugin_ipc'
 
 let mainWindow: BrowserWindow | null = null
 let poller: ReturnType<typeof createHealthPoller> | null = null
 // 最近一次成功登录的服务器地址(设置表持久化),OIDC 深链回跳时用
 let lastServerURL: string | null = null
+// 启动扫描未完成任务用(架构设计 §3.3.1a):whenReady 内注入 store
+let appStore: StoreLike | null = null
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -47,6 +50,12 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
     },
+  })
+
+  // 重启恢复(架构设计 §3.3.1a):扫描 status IN ('running','executing') 的会话,推送给 renderer 提示继续
+  mainWindow.webContents.on('did-finish-load', () => {
+    const running = appStore?.listConversations().filter((c) => c.status === 'running' || c.status === 'executing')
+    if (running && running.length > 0) mainWindow?.webContents.send('chat:interrupted', running)
   })
 
   if (process.env['ELECTRON_RENDERER_URL']) {
@@ -137,7 +146,67 @@ async function buildToolsRegistry(db: ReturnType<typeof openDb>): Promise<{ tool
   const browser = await loadBrowserTools()
   Object.assign(tools, browser.tools)
   for (const n of browser.highRisk) highRiskTools.add(n)
+
+  // 已装技能:指令注入 sysPrompt(3.11);已装 MCP 插件:工具注册 + 高危启发式(3.12)
+  const mcp = await loadMcpTools(db)
+  Object.assign(tools, mcp.tools)
+  for (const n of mcp.highRisk) highRiskTools.add(n)
   return { tools, highRiskTools }
+}
+
+// loadInstalledSkillInstruction returns "## Skills" block from installed skills.
+export async function loadInstalledSkillInstruction(): Promise<string> {
+  try {
+    const { listInstalledSkills } = await import('./skill/integration')
+    const { loadSkillInstruction } = await import('./skill/integration')
+    const installed = listInstalledSkills((k) => getSetting(appStore as any, k))
+    const parts: string[] = []
+    for (const name of Object.keys(installed)) {
+      const instr = loadSkillInstruction(join(dataDir(), 'skills'), name)
+      if (instr) parts.push(`## Skill: ${name}\n${instr}`)
+    }
+    return parts.length ? '\n\n## Skills\n' + parts.join('\n\n') : ''
+  } catch {
+    return ''
+  }
+}
+
+async function loadMcpTools(db: ReturnType<typeof openDb>): Promise<{ tools: Record<string, GatedTool>; highRisk: Set<string> }> {
+  try {
+    const mod = await import('./mcp/integration')
+    const { refreshPluginCredentials, getCredentials, installedMcpList } = await import('./mcp/installer')
+    const { getMcpConfig } = await import('./gateway/marketplace')
+    const session = getCurrentSession()
+    if (!session) return { tools: {}, highRisk: new Set() }
+    const deps = { getSetting: (k: string) => getSetting(db, k), setSetting: (k: string, v: string) => setSetting(db, k, v), getMcpConfig }
+    await refreshPluginCredentials({ session, deps })
+    const tools: Record<string, GatedTool> = {}
+    const highRisk = new Set<string>()
+    for (const rec of installedMcpList().filter((r) => r.enabled)) {
+      const creds = getCredentials(rec.id)
+      const runner = mod.createMcpRunner({
+        transport: (rec.transport === 'http' ? 'http' : 'stdio') as 'stdio' | 'http',
+        command: rec.command,
+        args: rec.args ?? [],
+        url: rec.url ?? '',
+        headers: creds?.headers ?? {},
+        env: creds?.env ?? {},
+      })
+      try {
+        const conn = await mod.connectRunner(runner)
+        for (const t of conn.tools) {
+          const name = mod.pluginToolName(rec.name, t.name)
+          tools[name] = mod.toAiSdkTool(t, (args) => conn.callTool(t.name, args))
+          if (mod.isHighRiskTool(t.name, t.description ?? '')) highRisk.add(name)
+        }
+      } catch {
+        runner.close().catch(() => {})
+      }
+    }
+    return { tools, highRisk }
+  } catch {
+    return { tools: {}, highRisk: new Set() }
+  }
 }
 
 app.whenReady().then(async () => {
@@ -169,6 +238,7 @@ app.whenReady().then(async () => {
     setSetting: (k, v) => setSetting(db, k, v),
     getAllSettings: () => getAllSettings(db),
   }
+  appStore = store
 
   const authDeps: AuthIpcDeps = {
     flow: { login, saveSession, loadSession, clearSession },
@@ -188,10 +258,27 @@ app.whenReady().then(async () => {
   registerIpcHandlers({
     ...buildHandlers(),
     ...buildAuthHandlers(authDeps),
+    ...buildPluginHandlers({
+      store: { getSetting: (k) => getSetting(db, k), setSetting: (k, v) => setSetting(db, k, v) },
+      refreshBootstrap: async () => {
+        const session = getCurrentSession()
+        if (!session) throw new Error('未登录')
+        const { config } = await getBootstrap(session)
+        setBootstrapCache(config)
+        return config
+      },
+    }),
     ...buildAgentHandlers({
       store,
-      sysPrompt:
-        '你是 PicoAide,企业办公智能体助手。回答简洁准确;需要操作本机文件、终端、浏览器、屏幕时,使用可用工具。',
+      sysPrompt: async () => {
+        const base = '你是 PicoAide,企业办公智能体助手。回答简洁准确;需要操作本机文件、终端、浏览器、屏幕时,使用可用工具。'
+        try {
+          const extra = await loadInstalledSkillInstruction()
+          return extra ? base + extra : base
+        } catch {
+          return base
+        }
+      },
       createModel: () => {
         const session = getCurrentSession()
         if (!session) throw new Error('未登录')
@@ -202,6 +289,13 @@ app.whenReady().then(async () => {
       },
       getTools: () => buildToolsRegistry(db),
       getWindow: () => mainWindow,
+      addAllowedDir: (dir) => {
+        const current = getAllowedDirsFromSettings((k) => getSetting(db, k))
+        if (!current.includes(dir)) {
+          current.push(dir)
+          setSetting(db, 'allowed_dirs', JSON.stringify(current))
+        }
+      },
     }),
   })
 

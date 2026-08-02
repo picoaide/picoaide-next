@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { picoaide } from '../api/picoaide'
 import type { AgentEvent } from '../../../main/agent/events'
-import type { ConversationRow, MessageRow } from '../../../main/ipc'
+import type { ArtifactRow, ConversationRow, MessageRow } from '../../../main/ipc'
 import { useApprovalsStore } from './approvals'
 import { useConnectionStore } from './connection'
 
@@ -40,6 +40,9 @@ interface ChatState {
   conversations: ConversationRow[]
   activeId: number | null
   messages: ChatMessage[]
+  artifacts: ArtifactRow[]
+  // 启动扫描/推送的中断会话(架构设计 §3.3.1a 重跑恢复),非空时 UI 提示"是否继续"
+  interrupted: ConversationRow[]
   streaming: boolean
   streamingText: string
   toolCalls: ToolCallView[]
@@ -50,8 +53,13 @@ interface ChatState {
   selectConversation: (id: number) => Promise<void>
   deleteConversation: (id: number) => Promise<void>
   sendMessage: (content: string) => Promise<void>
+  continueConversation: (id: number) => Promise<void>
+  approvePlan: (id: number, ok: boolean) => Promise<void>
   cancel: () => Promise<void>
   setMode: (m: Mode) => void
+  checkInterrupted: () => Promise<void>
+  onInterrupted: (list: ConversationRow[]) => void
+  clearInterrupted: () => void
   onAgentEvent: (ev: AgentEvent) => void
   clearLocalError: () => void
 }
@@ -60,6 +68,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   conversations: [],
   activeId: null,
   messages: [],
+  artifacts: [],
+  interrupted: [],
   streaming: false,
   streamingText: '',
   toolCalls: [],
@@ -69,7 +79,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   newConversation: async () => {
     const id = await picoaide().chatNew({ mode: get().mode })
     const conversations = await picoaide().chatList()
-    set({ conversations, activeId: id, messages: [], streaming: false, streamingText: '', toolCalls: [], localError: null })
+    set({ conversations, activeId: id, messages: [], artifacts: [], streaming: false, streamingText: '', toolCalls: [], localError: null })
     return id
   },
 
@@ -79,13 +89,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   selectConversation: async (id) => {
     const messages = mapMessages(await picoaide().chatMessages(id))
-    set({ activeId: id, messages, streaming: false, streamingText: '', toolCalls: [], localError: null })
+    const artifacts = await picoaide().chatArtifacts(id)
+    set({ activeId: id, messages, artifacts, streaming: false, streamingText: '', toolCalls: [], localError: null })
   },
 
   deleteConversation: async (id) => {
     await picoaide().chatDelete(id)
     if (get().activeId === id) {
-      set({ activeId: null, messages: [], streaming: false, streamingText: '', toolCalls: [] })
+      set({ activeId: null, messages: [], artifacts: [], streaming: false, streamingText: '', toolCalls: [] })
     }
   },
 
@@ -120,11 +131,46 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  // 重跑恢复(架构设计 §3.3.1a):选中会话 → 截断到最后一条 user 消息重跑;UI 保留历史显示
+  continueConversation: async (id) => {
+    const messages = mapMessages(await picoaide().chatMessages(id))
+    const artifacts = await picoaide().chatArtifacts(id)
+    set({ activeId: id, messages, artifacts, streaming: true, streamingText: '', toolCalls: [], interrupted: [], localError: null })
+    try {
+      await picoaide().chatContinue(id)
+      await get().loadConversations()
+    } catch {
+      set((s) => ({ streaming: false, localError: s.localError ?? '继续失败,请重试' }))
+    }
+  },
+
+  // Plan 确认(架构设计 §3.3.4):ok → 第二轮带 tools 执行;!ok → rejected
+  approvePlan: async (id, ok) => {
+    set({ streaming: true, localError: null })
+    try {
+      await picoaide().approvePlan(id, ok)
+      set({ streaming: false })
+      await get().loadConversations()
+    } catch {
+      set((s) => ({ streaming: false, localError: s.localError ?? '操作失败,请重试' }))
+    }
+  },
+
   cancel: async () => {
     await picoaide().chatCancel()
   },
 
   setMode: (m) => set({ mode: m }),
+
+  // 启动时拉取中断会话;与主进程推送合并(去重:已有提示则不覆盖)
+  checkInterrupted: async () => {
+    const list = await picoaide().listRunningConversations()
+    if (list.length > 0) set((s) => ({ interrupted: s.interrupted.length > 0 ? s.interrupted : list }))
+  },
+
+  onInterrupted: (list) => set((s) => ({ interrupted: s.interrupted.length > 0 ? s.interrupted : list })),
+
+  clearInterrupted: () => set({ interrupted: [] }),
 
   onAgentEvent: (ev) => {
     switch (ev.type) {
@@ -168,16 +214,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case 'confirm_required':
         useApprovalsStore.getState().push(ev.data)
         break
+      case 'artifact':
+        // 流式期间实时追加;最终以 done 后的 DB 重载为准(事件不含 conversationId)
+        set((s) => ({
+          artifacts: s.artifacts.some((a) => a.path === ev.data.path)
+            ? s.artifacts
+            : [
+                ...s.artifacts,
+                {
+                  id: Date.now(),
+                  conversation_id: s.activeId ?? 0,
+                  path: ev.data.path,
+                  type: ev.data.type,
+                  size: ev.data.size,
+                  created_at: '',
+                },
+              ],
+        }))
+        break
       case 'done':
       case 'canceled':
         set({ streaming: false, streamingText: '', toolCalls: [] })
         useApprovalsStore.getState().clear()
         void reloadMessages()
+        void reloadArtifacts()
         break
       case 'error':
         set({ streaming: false, streamingText: '', toolCalls: [], localError: ev.data })
         useApprovalsStore.getState().clear()
         void reloadMessages()
+        void reloadArtifacts()
         break
     }
   },
@@ -190,4 +256,11 @@ async function reloadMessages(): Promise<void> {
   if (activeId === null) return
   const messages = mapMessages(await picoaide().chatMessages(activeId))
   useChatStore.setState({ messages })
+}
+
+async function reloadArtifacts(): Promise<void> {
+  const { activeId } = useChatStore.getState()
+  if (activeId === null) return
+  const artifacts = await picoaide().chatArtifacts(activeId)
+  useChatStore.setState({ artifacts })
 }

@@ -7,14 +7,19 @@ interface FakePicoaide {
   chatNew: ReturnType<typeof vi.fn>
   chatList: ReturnType<typeof vi.fn>
   chatAsk: ReturnType<typeof vi.fn>
+  chatContinue: ReturnType<typeof vi.fn>
+  approvePlan: ReturnType<typeof vi.fn>
   chatMessages: ReturnType<typeof vi.fn>
+  chatArtifacts: ReturnType<typeof vi.fn>
   chatDelete: ReturnType<typeof vi.fn>
   chatCancel: ReturnType<typeof vi.fn>
+  listRunningConversations: ReturnType<typeof vi.fn>
 }
 
 function makeFake() {
   const conversations: Record<string, any>[] = []
   const messages: Record<string, any>[] = []
+  const artifacts: Record<string, any>[] = []
   let nextId = 1
   const api: FakePicoaide = {
     chatNew: vi.fn(async (input?: { mode?: string }) => {
@@ -28,13 +33,19 @@ function makeFake() {
       messages.push({ id: nextId++, conversation_id: cid, role: 'user', content, reasoning: '', tool_calls: '', tool_call_id: '', tool_name: '', is_error: 0, created_at: '' })
       messages.push({ id: nextId++, conversation_id: cid, role: 'assistant', content: 'answer', reasoning: '', tool_calls: '', tool_call_id: '', tool_name: '', is_error: 0, created_at: '' })
     }),
+    chatContinue: vi.fn(async () => undefined),
+    approvePlan: vi.fn(async () => undefined),
     chatMessages: vi.fn(async (cid: number) =>
       messages.filter((m) => m.conversation_id === cid).map((m) => ({ ...m }))
     ),
+    chatArtifacts: vi.fn(async (cid: number) =>
+      artifacts.filter((a) => a.conversation_id === cid).map((a) => ({ ...a }))
+    ),
     chatDelete: vi.fn(async () => undefined),
     chatCancel: vi.fn(async () => undefined),
+    listRunningConversations: vi.fn(async () => []),
   }
-  return { api, conversations, messages }
+  return { api, conversations, messages, artifacts }
 }
 
 let fake: ReturnType<typeof makeFake>
@@ -42,13 +53,13 @@ let fake: ReturnType<typeof makeFake>
 beforeEach(() => {
   fake = makeFake()
   ;(globalThis as any).window = { picoaide: fake.api }
-  useChatStore.setState({ conversations: [], activeId: null, messages: [], streaming: false, streamingText: '', mode: 'ask', localError: null })
+  useChatStore.setState({ conversations: [], activeId: null, messages: [], artifacts: [], interrupted: [], streaming: false, streamingText: '', mode: 'ask', localError: null })
   useConnectionStore.setState({ status: 'online' })
 })
 
 describe('chat store', () => {
   it('newConversation creates a conversation and selects it', async () => {
-    const id = await useChatStore.getState().newConversation()
+    const id = (await useChatStore.getState().newConversation())!
     expect(id).toBe(1)
     expect(fake.api.chatNew).toHaveBeenCalledWith({ mode: 'ask' })
     expect(useChatStore.getState().activeId).toBe(1)
@@ -73,7 +84,7 @@ describe('chat store', () => {
   })
 
   it('onAgentEvent text_delta appends to the streaming text, done finalizes from DB', async () => {
-    const id = await useChatStore.getState().newConversation()
+    const id = (await useChatStore.getState().newConversation())!
     useChatStore.getState().onAgentEvent({ type: 'text_delta', data: '流式' })
     useChatStore.getState().onAgentEvent({ type: 'text_delta', data: '增量' })
     expect(useChatStore.getState().streamingText).toBe('流式增量')
@@ -94,5 +105,55 @@ describe('chat store', () => {
     const s = useChatStore.getState()
     expect(s.streaming).toBe(false)
     expect(s.localError).toContain('upstream 502')
+  })
+
+  it('selectConversation loads artifacts for the conversation', async () => {
+    const id = (await useChatStore.getState().newConversation())!
+    fake.artifacts.push({ id: 1, conversation_id: id, path: '/w/r.md', type: 'report', size: 9, created_at: '' })
+    await useChatStore.getState().selectConversation(id)
+    expect(useChatStore.getState().artifacts).toEqual([
+      { id: 1, conversation_id: id, path: '/w/r.md', type: 'report', size: 9, created_at: '' },
+    ])
+  })
+
+  it('artifact events append live and done reloads from DB', async () => {
+    const id = (await useChatStore.getState().newConversation())!
+    useChatStore.getState().onAgentEvent({ type: 'artifact', data: { path: '/w/a.md', type: 'report', size: 1 } })
+    expect(useChatStore.getState().artifacts.map((a) => a.path)).toEqual(['/w/a.md'])
+    useChatStore.getState().onAgentEvent({ type: 'done', data: {} })
+    await vi.waitFor(() => {
+      expect(useChatStore.getState().artifacts).toEqual([])
+    })
+  })
+
+  it('approvePlan(true) streams until completion then reloads conversations', async () => {
+    const id = (await useChatStore.getState().newConversation())!
+    useChatStore.getState().approvePlan(id, true)
+    expect(useChatStore.getState().streaming).toBe(true)
+    await vi.waitFor(() => {
+      expect(fake.api.approvePlan).toHaveBeenCalledWith(id, true)
+      expect(useChatStore.getState().streaming).toBe(false)
+    })
+  })
+
+  it('checkInterrupted surfaces running conversations; continueConversation selects and resumes', async () => {
+    const id = (await useChatStore.getState().newConversation())!
+    fake.api.listRunningConversations.mockResolvedValue([
+      { id, title: '中断任务', mode: 'craft', status: 'running', model: '', workspace: '', created_at: '', updated_at: '' },
+    ])
+    await useChatStore.getState().checkInterrupted()
+    expect(useChatStore.getState().interrupted).toHaveLength(1)
+    await useChatStore.getState().continueConversation(id)
+    expect(fake.api.chatContinue).toHaveBeenCalledWith(id)
+    expect(useChatStore.getState().interrupted).toEqual([])
+    expect(useChatStore.getState().activeId).toBe(id)
+  })
+
+  it('onInterrupted merges without clobbering an existing prompt', () => {
+    useChatStore.getState().onInterrupted([{ id: 1, title: 'a', mode: 'craft', status: 'running', model: '', workspace: '', created_at: '', updated_at: '' }])
+    useChatStore.getState().onInterrupted([{ id: 2, title: 'b', mode: 'craft', status: 'running', model: '', workspace: '', created_at: '', updated_at: '' }])
+    expect(useChatStore.getState().interrupted.map((c) => c.id)).toEqual([1])
+    useChatStore.getState().clearInterrupted()
+    expect(useChatStore.getState().interrupted).toEqual([])
   })
 })

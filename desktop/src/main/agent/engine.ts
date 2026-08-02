@@ -4,7 +4,10 @@ import { isAbsolute } from 'node:path'
 import type { LanguageModel, ModelMessage, Tool, ToolCallPart, ToolExecutionOptions, ToolResultPart, ToolSet, TextPart } from 'ai'
 import type { AgentEvent } from './events'
 import { buildRunConfig, type Mode } from './modes'
+import { artifactType } from './artifacts'
+import { lastUserMessageIndex } from './continue'
 import { kbRead, kbSearch, kbList, kbUpload } from '../gateway/remote_mcp'
+import { isBoundaryError } from '../tools/paths'
 import type { Session } from '../gateway/config'
 
 export const DEFAULT_MAX_STEPS = 20
@@ -40,6 +43,8 @@ export interface EngineDeps {
   emit: (ev: AgentEvent) => void
   // Ask 路径依赖 store 做会话/消息持久化;run() 探针路径可不用
   store?: StoreLike
+  // 越界引导(3.13):员工确认后将目录加入可访问目录(settings allowed_dirs)
+  addAllowedDir?: (dir: string) => void
 }
 
 export type ConversationStatus = 'running' | 'executing' | 'planning' | 'approved' | 'rejected' | 'done' | 'failed'
@@ -77,6 +82,30 @@ export interface CraftInput {
   maxSteps?: number
 }
 
+// 重跑恢复输入(架构设计 §3.3.1a):截断到最后一条 user 消息重新多步循环
+export interface ContinueInput {
+  conversationId: number
+  tools?: Record<string, GatedTool>
+  highRiskTools?: Set<string>
+  maxSteps?: number
+  // 恢复时的初始状态:continue 用 running,Plan 批准执行用 executing
+  status?: 'running' | 'executing'
+}
+
+// Plan 模式(架构设计 §3.3.4):首轮无工具出计划(plan)→ 用户确认(approvePlan)→ 第二轮带 tools 执行
+export interface PlanInput {
+  conversationId: number
+  content: string
+}
+
+export interface ApprovePlanInput {
+  conversationId: number
+  ok: boolean
+  tools?: Record<string, GatedTool>
+  highRiskTools?: Set<string>
+  maxSteps?: number
+}
+
 export interface RunOptions {
   content: string
   history?: ModelMessage[]
@@ -102,6 +131,7 @@ interface ApprovalEntry {
   resolve: () => void
   reject: (err: Error) => void
   timer?: ReturnType<typeof setTimeout>
+  boundaryDir?: string
 }
 
 export class AgentEngine {
@@ -136,11 +166,36 @@ export class AgentEngine {
     const store = this.deps.store
     if (!store) throw new Error('ask requires a store (EngineDeps.store)')
     const { conversationId, content } = input
-    if (!store.getConversation(conversationId)) {
+    this.assertConversation(conversationId)
+    await this.runAskLoop(conversationId, content, 'running', 'done')
+  }
+
+  // Plan 首轮:无工具、单步出计划(架构设计 §3.3.4);状态保持 planning 等用户确认,approvePlan 发起第二轮
+  async plan(input: PlanInput): Promise<void> {
+    const store = this.deps.store
+    if (!store) throw new Error('plan requires a store (EngineDeps.store)')
+    const { conversationId, content } = input
+    this.assertConversation(conversationId)
+    await this.runAskLoop(conversationId, content, 'planning', 'planning')
+  }
+
+  private assertConversation(conversationId: number): void {
+    const store = this.deps.store
+    if (!store?.getConversation(conversationId)) {
       this.deps.emit({ type: 'error', data: `conversation ${conversationId} not found` })
       throw new Error(`conversation ${conversationId} not found`)
     }
-    store.updateConversationStatus(conversationId, 'running')
+  }
+
+  // Ask 与 Plan 首轮共用的单步无工具循环(重试 1 次;cancel → failed)
+  private async runAskLoop(
+    conversationId: number,
+    content: string,
+    runStatus: ConversationStatus,
+    finalStatus: ConversationStatus,
+  ): Promise<void> {
+    const store = this.deps.store as StoreLike
+    store.updateConversationStatus(conversationId, runStatus)
     // 上下文窗口:发送给 LLM 的历史最多最近 50 条(超出仅存 DB 供 UI 查看)
     const history = store.listMessages(conversationId).map(toModelMessage)
     store.appendMessage({ conversationId, role: 'user', content })
@@ -207,7 +262,7 @@ export class AgentEngine {
       }
       if (store.getConversation(conversationId)) {
         store.appendMessage({ conversationId, role: 'assistant', content: fullText })
-        store.updateConversationStatus(conversationId, 'done')
+        store.updateConversationStatus(conversationId, finalStatus)
       } else {
         // 会话中途被删:跳过落库,不崩溃(消息即状态:UI 侧已无此会话)
         console.warn(`[agent] conversation ${conversationId} deleted mid-run; skipping writes`)
@@ -239,19 +294,80 @@ export class AgentEngine {
     if (!store) throw new Error('craft requires a store (EngineDeps.store)')
     const { conversationId, content } = input
     const maxSteps = input.maxSteps ?? this.cfg.maxSteps ?? DEFAULT_MAX_STEPS
-    if (!store.getConversation(conversationId)) {
-      this.deps.emit({ type: 'error', data: `conversation ${conversationId} not found` })
-      throw new Error(`conversation ${conversationId} not found`)
-    }
+    this.assertConversation(conversationId)
     store.updateConversationStatus(conversationId, 'running')
     // 上下文窗口:发送给 LLM 的历史最多最近 50 条(超出仅存 DB 供 UI 查看)
     const history = store.listMessages(conversationId).map(toModelMessage)
     store.appendMessage({ conversationId, role: 'user', content })
     const messages: ModelMessage[] = [...lastN(history, DEFAULT_CONTEXT_WINDOW), { role: 'user', content }]
+    await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps)
+  }
 
+  // 重跑恢复(架构设计 §3.3.1a):截断到最后一条 user 消息(其后的 assistant/tool 行不进入上下文)重新多步循环
+  async continueConversation(input: ContinueInput): Promise<void> {
+    const store = this.deps.store
+    if (!store) throw new Error('continueConversation requires a store (EngineDeps.store)')
+    const { conversationId } = input
+    const conv = store.getConversation(conversationId)
+    if (!conv) {
+      this.deps.emit({ type: 'error', data: `conversation ${conversationId} not found` })
+      throw new Error(`conversation ${conversationId} not found`)
+    }
+    const resumable =
+      conv.status === 'running' || conv.status === 'executing' || conv.status === 'planning' || conv.status === 'failed'
+    if (!resumable) {
+      this.deps.emit({ type: 'error', data: `conversation ${conversationId} 无需继续(status=${conv.status})` })
+      throw new Error(`conversation ${conversationId} is not resumable (status=${conv.status})`)
+    }
+    const rows = store.listMessages(conversationId)
+    const idx = lastUserMessageIndex(rows)
+    if (idx === -1) {
+      this.deps.emit({ type: 'error', data: `conversation ${conversationId} 没有可继续的用户消息` })
+      throw new Error(`conversation ${conversationId} has no user message`)
+    }
+    store.updateConversationStatus(conversationId, input.status ?? 'running')
+    const history = rows.slice(0, idx + 1).map(toModelMessage)
+    const messages = lastN(history, DEFAULT_CONTEXT_WINDOW)
+    const maxSteps = input.maxSteps ?? this.cfg.maxSteps ?? DEFAULT_MAX_STEPS
+    await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps)
+  }
+
+  // Plan 确认(架构设计 §3.3.4):ok → 第二轮带 tools 执行(截断到最后一条 user 消息);!ok → rejected
+  async approvePlan(input: ApprovePlanInput): Promise<void> {
+    const store = this.deps.store
+    if (!store) throw new Error('approvePlan requires a store (EngineDeps.store)')
+    const { conversationId, ok } = input
+    const conv = store.getConversation(conversationId)
+    if (!conv) {
+      this.deps.emit({ type: 'error', data: `conversation ${conversationId} not found` })
+      throw new Error(`conversation ${conversationId} not found`)
+    }
+    if (conv.status !== 'planning') return // 幂等:非计划待确认状态不处理(重复点击/迟到回执)
+    if (!ok) {
+      store.updateConversationStatus(conversationId, 'rejected')
+      return
+    }
+    await this.continueConversation({
+      conversationId,
+      tools: input.tools,
+      highRiskTools: input.highRiskTools,
+      maxSteps: input.maxSteps,
+      status: 'executing',
+    })
+  }
+
+  // 多步循环主体(craft 与重跑/Plan 执行共用):每步落库,步数超限报错,完成置 done
+  private async runCraftLoop(
+    conversationId: number,
+    messages: ModelMessage[],
+    tools: Record<string, GatedTool>,
+    highRisk: Set<string>,
+    maxSteps: number,
+  ): Promise<void> {
+    const store = this.deps.store as StoreLike
     const abort = new AbortController()
     this.currentAbort = abort
-    const wrapped = this.wrapTools(input.tools ?? {}, input.highRiskTools ?? new Set(), conversationId) as ToolSet
+    const wrapped = this.wrapTools(tools, highRisk, conversationId) as ToolSet
 
     let canceled = false
     let steps = 0
@@ -496,6 +612,11 @@ export class AgentEngine {
     return out
   }
 
+  // 测试钩子:包装单个工具(越界引导/审批门控单测用)
+  wrapToolForTest(name: string, t: GatedTool, flaggedHighRisk = false): Tool {
+    return this.wrapTool(name, t, flaggedHighRisk)
+  }
+
   private wrapTool(name: string, t: GatedTool, flaggedHighRisk: boolean, conversationId?: number): Tool {
     const execute = t.execute
     if (!execute) return t
@@ -508,7 +629,7 @@ export class AgentEngine {
         try {
           // 静态标记(highRiskTools)或工具自带的按调用参数判定谓词(如 command_exec 白名单策略)
           if (flaggedHighRisk || t.requiresApproval?.(input) === true) await this.requestApproval(id, name, input)
-          const output = await execute(input, options)
+          const output = await this.runWithBoundaryGuide(id, name, input, options, execute)
           this.maybeEmitArtifact(conversationId, output)
           this.deps.emit({ type: 'tool_end', data: { id, name, output, duration_ms: Date.now() - startedAt } })
           return output
@@ -519,6 +640,37 @@ export class AgentEngine {
         }
       },
     } as Tool
+  }
+
+  // 越界引导:工具访问可访问目录外路径 → 弹窗"是否将 X 加入可访问目录?" → 确认后加入并重试一次(旗舰场景一键授权)
+  private async runWithBoundaryGuide(
+    id: string,
+    name: string,
+    input: unknown,
+    options: ToolExecutionOptions<unknown>,
+    execute: (input: unknown, options: ToolExecutionOptions<unknown>) => Promise<unknown>,
+  ): Promise<unknown> {
+    try {
+      return await execute(input, options)
+    } catch (err) {
+      const boundary = isBoundaryError(err)
+      if (!boundary || !this.deps.addAllowedDir) throw err
+      const dir = boundary.path
+      await new Promise<void>((resolve, reject) => {
+        this.queue.push({
+          requestId: id,
+          toolName: 'allow_dir',
+          input,
+          resolve,
+          reject,
+          boundaryDir: dir,
+        })
+        this.pump()
+      })
+      this.deps.addAllowedDir(dir)
+      // 授权后自动重试一次
+      return execute(input, options)
+    }
   }
 
   // 产物提取:工具结果含绝对路径 {path, size?} → artifact 事件 + artifacts 表落库;缺 path/相对路径 → 静默跳过
@@ -552,13 +704,14 @@ export class AgentEngine {
       return
     }
     this.active = entry
+    const isBoundary = entry.toolName === 'allow_dir'
     this.deps.emit({
       type: 'confirm_required',
       data: {
         request_id: entry.requestId,
-        op: entry.toolName,
-        target: approvalTarget(entry.toolName, entry.input),
-        reason: `执行 ${entry.toolName} 需要确认`,
+        op: isBoundary ? 'allow_dir' : entry.toolName,
+        target: isBoundary ? (entry.boundaryDir ?? '') : approvalTarget(entry.toolName, entry.input),
+        reason: isBoundary ? `是否将 ${entry.boundaryDir} 加入可访问目录?` : `执行 ${entry.toolName} 需要确认`,
       },
     })
     // 超时自 confirm_required 发出起算(60s);settle 时清理 timer,防泄漏
@@ -620,32 +773,6 @@ export function createKbTools(session: Session): { tools: Record<string, Tool>; 
     }),
   }
   return { tools, highRisk: ['kb_upload'] }
-}
-
-// 产物类型按扩展名推断(架构设计 §3.5 artifacts.type)
-export function artifactType(path: string): string {
-  const ext = path.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ?? ''
-  switch (ext) {
-    case 'md':
-      return 'report'
-    case 'png':
-    case 'jpg':
-    case 'jpeg':
-    case 'gif':
-    case 'webp':
-      return 'image'
-    case 'html':
-    case 'htm':
-      return 'html'
-    case 'pptx':
-      return 'ppt'
-    case 'docx':
-      return 'docx'
-    case 'xlsx':
-      return 'xlsx'
-    default:
-      return 'file'
-  }
 }
 
 // ---- 消息转换(DB 行 ↔ AI SDK 消息) ----

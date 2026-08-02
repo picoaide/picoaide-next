@@ -2,6 +2,8 @@ import { useEffect } from 'react'
 import { LogOut, Plus, Trash2 } from 'lucide-react'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '../components/ui/card'
+import ArtifactsPanel from '../components/ArtifactsPanel'
 import ChatInput from '../components/ChatInput'
 import Messages from '../components/Messages'
 import ConfirmModal from '../components/ConfirmModal'
@@ -16,6 +18,8 @@ export default function Main() {
   const conversations = useChatStore((s) => s.conversations)
   const activeId = useChatStore((s) => s.activeId)
   const messages = useChatStore((s) => s.messages)
+  const artifacts = useChatStore((s) => s.artifacts)
+  const interrupted = useChatStore((s) => s.interrupted)
   const streaming = useChatStore((s) => s.streaming)
   const streamingText = useChatStore((s) => s.streamingText)
   const toolCalls = useChatStore((s) => s.toolCalls)
@@ -25,6 +29,10 @@ export default function Main() {
 
   useEffect(() => {
     void loadConversations()
+    // 启动扫描中断会话(架构设计 §3.3.1a 重跑恢复):主进程推送 + 拉取兜底(去重由 store 保证)
+    void useChatStore.getState().checkInterrupted()
+    const off = window.picoaide.onInterrupted((list) => useChatStore.getState().onInterrupted(list))
+    return () => off()
   }, [loadConversations])
 
   const model = bootstrap?.models.find((m) => m.id === bootstrap.default_model) ?? bootstrap?.models[0]
@@ -33,6 +41,10 @@ export default function Main() {
   const handleDelete = async (id: number) => {
     await deleteConversation(id)
     await loadConversations()
+  }
+
+  const handleContinue = async (id: number) => {
+    await useChatStore.getState().continueConversation(id)
   }
 
   return (
@@ -88,18 +100,48 @@ export default function Main() {
               {connStatus === 'online' ? '在线' : connStatus === 'offline' ? '离线' : '已过期'}
             </Badge>
           </header>
-          <div className="min-h-0 flex-1">
-            <Messages
-              messages={messages}
-              streaming={streaming}
-              streamingText={streamingText}
-              toolCalls={toolCalls}
-              error={localError}
-            />
+          <div className="flex min-h-0 flex-1">
+            <div className="flex min-w-0 flex-1 flex-col">
+              <div className="min-h-0 flex-1">
+                <Messages
+                  messages={messages}
+                  streaming={streaming}
+                  streamingText={streamingText}
+                  toolCalls={toolCalls}
+                  error={localError}
+                />
+              </div>
+              <ChatInput />
+            </div>
+            <ArtifactsPanel artifacts={artifacts} />
           </div>
-          <ChatInput />
         </main>
       </div>
+      {interrupted.length > 0 && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <Card className="w-full max-w-md">
+            <CardHeader>
+              <CardTitle className="text-base">有未完成任务</CardTitle>
+              <CardDescription>上次中断的会话将从最后一条消息继续执行(历史消息保留)</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {interrupted.map((c) => (
+                <div key={c.id} className="flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm">
+                  <span className="truncate">{c.title || '新会话'}</span>
+                  <Button size="sm" onClick={() => void handleContinue(c.id)}>
+                    继续
+                  </Button>
+                </div>
+              ))}
+            </CardContent>
+            <CardFooter className="justify-end">
+              <Button variant="outline" onClick={() => useChatStore.getState().clearInterrupted()}>
+                暂不处理
+              </Button>
+            </CardFooter>
+          </Card>
+        </div>
+      )}
       <ConfirmModal />
     </div>
   )

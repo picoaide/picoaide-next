@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import type { Session, BootstrapConfig } from '../main/gateway/config'
 import type { AgentEvent } from '../main/agent/events'
-import type { ConversationRow, MessageRow } from '../main/ipc'
+import type { ArtifactRow, ConversationRow, MessageRow } from '../main/ipc'
 
 type Unsub = () => void
 
@@ -29,15 +29,24 @@ const api = {
   chatNew: (input?: { title?: string; mode?: string }): Promise<number> => ipcRenderer.invoke('chat:new', input),
   chatAsk: (conversationId: number, content: string): Promise<void> =>
     ipcRenderer.invoke('chat:ask', { conversationId, content }),
+  chatContinue: (conversationId: number): Promise<void> =>
+    ipcRenderer.invoke('chat:continue', { conversationId }),
+  approvePlan: (conversationId: number, ok: boolean): Promise<void> =>
+    ipcRenderer.invoke('chat:approvePlan', { conversationId, ok }),
   chatCancel: (): Promise<void> => ipcRenderer.invoke('chat:cancel'),
   chatList: (): Promise<ConversationRow[]> => ipcRenderer.invoke('chat:list'),
+  listRunningConversations: (): Promise<ConversationRow[]> => ipcRenderer.invoke('chat:listRunning'),
   chatMessages: (conversationId: number): Promise<MessageRow[]> =>
     ipcRenderer.invoke('chat:messages', { conversationId }),
+  chatArtifacts: (conversationId: number): Promise<ArtifactRow[]> =>
+    ipcRenderer.invoke('chat:artifacts', { conversationId }),
   chatDelete: (conversationId: number): Promise<void> => ipcRenderer.invoke('chat:delete', { conversationId }),
   confirm: (requestId: string, ok: boolean): Promise<void> =>
     ipcRenderer.invoke('agent:confirm', { requestId, ok }),
+  artifactShowInFolder: (path: string): Promise<void> => ipcRenderer.invoke('artifact:showInFolder', { path }),
   ready: (): Promise<void> => ipcRenderer.invoke('picoaide:rendererReady'),
   onAgentEvent: (cb: (ev: AgentEvent) => void): Unsub => subscribe('agent:event', cb),
+  onInterrupted: (cb: (list: ConversationRow[]) => void): Unsub => subscribe('chat:interrupted', cb),
   onConnectionStatus: (cb: (status: 'online' | 'offline' | 'auth_expired' | 'trusting_cert') => void): Unsub =>
     subscribe('connection:status', cb),
   onLoggedIn: (cb: (session: Session) => void): Unsub => subscribe('auth:logged-in', cb),

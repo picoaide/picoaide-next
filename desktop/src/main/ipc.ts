@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron'
+import { ipcMain, shell } from 'electron'
 import { AgentEngine } from './agent/engine'
 import type { GatedTool, StoreLike as EngineStore } from './agent/engine'
 import type { AgentEvent } from './agent/events'
@@ -65,10 +65,12 @@ export interface ArtifactRow {
 export interface AgentIpcDeps {
   store: StoreLike
   createModel: () => LanguageModel
-  sysPrompt: string
+  sysPrompt: string | (() => string) | (() => Promise<string>)
   // 工具注册表(本地文件/终端/沙盒/屏幕/剪贴板/web/浏览器桥/远程知识库),index.ts 构建;craft 模式时调用
   getTools: () => Promise<{ tools: Record<string, GatedTool>; highRiskTools: Set<string> }>
   getWindow: () => { webContents: { send(channel: string, payload: unknown): void } } | null
+  // 越界引导:确认后将目录加入可访问目录(settings allowed_dirs)
+  addAllowedDir?: (dir: string) => void
 }
 
 export interface IpcHandlers {
@@ -76,11 +78,16 @@ export interface IpcHandlers {
   'picoaide:rendererReady': () => void
   'chat:new': (input?: { title?: string; mode?: string }) => number
   'chat:ask': (input: { conversationId: number; content: string }) => Promise<void>
+  'chat:continue': (input: { conversationId: number }) => Promise<void>
+  'chat:approvePlan': (input: { conversationId: number; ok: boolean }) => Promise<void>
   'chat:cancel': () => void
   'chat:list': () => ConversationRow[]
+  'chat:listRunning': () => ConversationRow[]
   'chat:messages': (input: { conversationId: number }) => MessageRow[]
+  'chat:artifacts': (input: { conversationId: number }) => ArtifactRow[]
   'chat:delete': (input: { conversationId: number }) => void
   'agent:confirm': (input: { requestId: string; ok: boolean }) => void
+  'artifact:showInFolder': (input: { path: string }) => void
   'auth:login': (input: { serverURL: string; username: string; password: string }) => Promise<{
     session: Session & { persisted: boolean }
     bootstrap: BootstrapConfig
@@ -102,13 +109,15 @@ export type ChatHandlers = Omit<IpcHandlers, 'auth:login' | 'auth:loadSession' |
 export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
   // 引擎单例(持有 currentAbort/审批队列);模型经 createModel 惰性创建(登录后 token 就绪)
   let engine: AgentEngine | null = null
-  const getEngine = (): AgentEngine => {
+  const getEngine = async (): Promise<AgentEngine> => {
     if (!engine) {
+      const sysPrompt = typeof deps.sysPrompt === 'function' ? await deps.sysPrompt() : deps.sysPrompt
       engine = new AgentEngine(
-        { model: deps.createModel(), sysPrompt: deps.sysPrompt },
+        { model: deps.createModel(), sysPrompt },
         {
           store: deps.store,
           emit: emitAgentEvent,
+          addAllowedDir: deps.addAllowedDir,
         },
       )
     }
@@ -138,19 +147,47 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
     },
     'chat:new': (input) => deps.store.createConversation(input),
     'chat:ask': async ({ conversationId, content }) => {
-      const conv = deps.store.getConversation(conversationId)
-      if (conv?.mode === 'craft') {
+      const mode = deps.store.getConversation(conversationId)?.mode ?? 'ask'
+      if (mode === 'craft') {
         const { tools, highRiskTools } = await deps.getTools()
-        await getEngine().craft({ conversationId, content, tools, highRiskTools })
+        await (await getEngine()).craft({ conversationId, content, tools, highRiskTools })
+      } else if (mode === 'plan') {
+        await (await getEngine()).plan({ conversationId, content })
       } else {
-        await getEngine().ask({ conversationId, content })
+        await (await getEngine()).ask({ conversationId, content })
       }
     },
-    'chat:cancel': () => getEngine().cancel(),
-    'agent:confirm': ({ requestId, ok }) => getEngine().confirm(requestId, ok),
+    // 重跑恢复(架构设计 §3.3.1a):ask 会话无工具重跑;craft/plan 带全量工具
+    'chat:continue': async ({ conversationId }) => {
+      const mode = deps.store.getConversation(conversationId)?.mode ?? 'ask'
+      if (mode === 'ask') {
+        await (await getEngine()).continueConversation({ conversationId })
+      } else {
+        const { tools, highRiskTools } = await deps.getTools()
+        await (await getEngine()).continueConversation({ conversationId, tools, highRiskTools })
+      }
+    },
+    // Plan 确认(架构设计 §3.3.4):ok → 同会话第二轮带 tools 执行;!ok → rejected
+    'chat:approvePlan': async ({ conversationId, ok }) => {
+      if (ok) {
+        const { tools, highRiskTools } = await deps.getTools()
+        await (await getEngine()).approvePlan({ conversationId, ok, tools, highRiskTools })
+      } else {
+        await (await getEngine()).approvePlan({ conversationId, ok })
+      }
+    },
+    'chat:cancel': () => { void getEngine().then((e) => e.cancel()) },
+    'agent:confirm': ({ requestId, ok }) => { void getEngine().then((e) => e.confirm(requestId, ok)) },
     'chat:list': () => deps.store.listConversations(),
+    // 启动扫描用:重启后 status IN ('running','executing') 的会话(架构设计 §3.3.1a)
+    'chat:listRunning': () =>
+      deps.store.listConversations().filter((c) => c.status === 'running' || c.status === 'executing'),
     'chat:messages': ({ conversationId }) => deps.store.listMessages(conversationId),
+    'chat:artifacts': ({ conversationId }) => deps.store.listArtifacts(conversationId),
     'chat:delete': ({ conversationId }) => deps.store.deleteConversation(conversationId),
+    'artifact:showInFolder': ({ path }) => {
+      if (typeof path === 'string' && path.length > 0) shell.showItemInFolder(path)
+    },
   }
 }
 
