@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/picoaide/picoaide/internal/util"
 )
 
 type User struct {
@@ -18,6 +20,34 @@ type User struct {
 	Status       int
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+// CreateUserWithPassword creates a local user, hashing the plaintext password.
+func CreateUserWithPassword(db *sql.DB, username, password string) (int64, error) {
+	hash, err := util.HashPassword(password)
+	if err != nil {
+		return 0, err
+	}
+	return CreateUser(db, &User{Username: username, PasswordHash: hash, Source: "local", Status: 1})
+}
+
+// AuthenticateLocal verifies username/password against the users table.
+// Returns ErrNotFound for unknown users or wrong password.
+func AuthenticateLocal(db *sql.DB, username, password string) (User, error) {
+	u, err := GetUserByUsername(db, username)
+	if err != nil {
+		return User{}, err
+	}
+	if u.Source != "local" || u.PasswordHash == "" {
+		return User{}, ErrNotFound
+	}
+	if u.Status != 1 {
+		return User{}, ErrNotFound
+	}
+	if !util.VerifyPassword(u.PasswordHash, password) {
+		return User{}, ErrNotFound
+	}
+	return *u, nil
 }
 
 func scanUser(row interface{ Scan(...any) error }) (*User, error) {

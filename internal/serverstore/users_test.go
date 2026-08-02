@@ -65,6 +65,33 @@ func TestUsers(t *testing.T) {
 	}
 }
 
+func TestAuthenticateLocal(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateUserWithPassword(db, "bob", "pw123456"); err != nil {
+		t.Fatal(err)
+	}
+	u, err := GetUserByUsername(db, "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.PasswordHash == "" || u.PasswordHash == "pw123456" {
+		t.Fatal("password not hashed")
+	}
+	if _, err := AuthenticateLocal(db, "bob", "pw123456"); err != nil {
+		t.Fatalf("correct password rejected: %v", err)
+	}
+	if _, err := AuthenticateLocal(db, "bob", "bad"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("wrong password: want ErrNotFound got %v", err)
+	}
+	if _, err := AuthenticateLocal(db, "nobody", "pw123456"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown user: want ErrNotFound got %v", err)
+	}
+}
+
 func TestSettings(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()
