@@ -1,6 +1,10 @@
 BIN := bin/picoaide-server
 
-.PHONY: test test-server test-client build-server build-client build-desktop webadmin check pkg-linux pkg-windows pkg-macos
+# 服务端镜像名(GHCR,与仓库同名);TAG 默认 latest
+IMAGE ?= ghcr.io/picoaide/picoaide-server
+TAG ?= latest
+
+.PHONY: test test-server test-client build-server build-client build-desktop webadmin docker-image check pkg-linux pkg-windows pkg-macos
 
 test:
 	go test ./... -count=1
@@ -22,6 +26,11 @@ build-desktop:
 
 webadmin:
 	cd webadmin && npm run build
+
+# 服务端 Docker 镜像(计划 Task 4.6):本地验证单平台;CI 用 buildx 出 amd64/arm64
+# 用法:make docker-image 或 make docker-image IMAGE=ghcr.io/picoaide/picoaide-server TAG=v0.4.0
+docker-image:
+	docker build -t $(IMAGE):$(TAG) .
 
 check:
 	gofmt -l cmd internal | grep -v '^$$' && exit 1 || true
