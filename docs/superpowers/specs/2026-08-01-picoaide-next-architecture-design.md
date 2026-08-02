@@ -15,20 +15,26 @@
 | D2 | 与旧项目关系 | 全新仓库、全新重写,零继承 | 用户决策:干净起步,架构按新形态自由设计 |
 | D3 | Agent 循环位置 | 客户端本地运行 | 操作本机文件/浏览器/屏幕必须在本地;会话/记忆本地存储,离线可用 |
 | D4 | 旧沙箱模式 | 退役 | 服务端不再跑沙箱/picoagent |
-| D5 | 客户端技术栈 | Go + Wails + React | Go 复用 ADK 生态;Wails 提供 WebView;React 做聊天类 UI 生态最丰富 |
-| D6 | Agent 引擎 | 继续用 google.golang.org/adk/v2(外部库) | 成熟 LLM Agent 运行时,自家代码重写不重造引擎 |
-| D7 | 服务端技术栈 | Go | 与客户端同语言同生态,一套工具链 |
-| D8 | 平台 | Windows / macOS / Linux 三平台并行 | Wails 原生跨平台 |
+| D5 | 客户端技术栈 | Electron + React + TypeScript | Electron 桌面壳成熟度远超 Wails(WebView 跨平台差异/调试/打包生态);React 聊天 UI 生态最丰富 |
+| D6 | Agent 引擎 | Vercel AI SDK(`ai` + `@ai-sdk/workflow`,TS) | 事实标准的 TS LLM/Agent 框架;WorkflowAgent 提供 durable 执行 + 工具审批流;streamText 流式 UI 一流;provider baseURL 直连自研网关 |
+| D7 | 服务端技术栈 | Go | 网关/认证/知识库重负载场景 Go 稳、部署单二进制 |
+| D8 | 平台 | Windows / macOS / Linux 三平台并行 | Electron 原生跨平台,electron-builder 打包成熟 |
 | D9 | 认证 | LDAP / OIDC / 本地账号(保留企业集成) | 私有化部署刚需 |
 | D10 | LLM 调用路径 | 全走服务端 AI 网关代理 | 密钥不出服务端,按用户计量 |
 | D11 | MCP 工具运行位置 | 客户端本地运行(商城下发配置/凭证) | 工具需要本地环境(如小红书插件本地 HTTP 服务) |
 | D12 | Skill 形态 | 混合型(指令 + 可执行包) | 简单技能用指令,复杂技能带脚本 |
 | D13 | 知识库 | 服务端全新实现,客户端经远程 MCP 查询 | 数据集中服务端,跨设备一致 |
 | D14 | 会话/记忆存储 | 客户端本地 SQLite | 离线可用,敏感数据不出本机 |
-| D15 | 本地安全沙箱 | 不做 OS 级沙箱,只做高危操作确认弹窗 | 用户自有电脑运行,风险自担;防手滑不防恶意 |
+| D15 | 沙盒执行 | Vercel Sandbox(`@ai-sdk/sandbox-vercel`)运行 Agent 生成的不可信代码 | AI SDK 官方沙盒适配,受限会话跑 untrusted 代码/脚本,防本机损坏;本地工具(文件/桌面)仍直连用户授权目录 |
 | D16 | 服务端管理 | 极简 Web 管理页 | 用户管理/商城上架/用量统计需要界面 |
-| D17 | 前端框架 | React(不用 Vue) | 用户决策:AI 聊天组件/流式渲染生态 React 最丰富 |
+| D17 | 前端框架 | React + TypeScript(不用 Vue) | AI 聊天组件/流式渲染生态 React 最丰富,与 AI SDK 原生契合 |
 | D18 | 仓库名 | picoaide-next | 与旧仓库 picoaide 区分 |
+| D19 | 客户端本地存储 | better-sqlite3 | Node 生态最稳的同步 SQLite 驱动,主进程内使用 |
+| D20 | 客户端本地 MCP | 官方 @modelcontextprotocol/sdk(Client) | MCP 标准 TypeScript SDK,stdio + HTTP 双传输 |
+| D21 | 客户端 OCR | tesseract.js | 纯 JS/WASM,三平台免系统依赖,惰性加载 |
+| D22 | 长任务 | @ai-sdk/workflow(WorkflowAgent) | durable + resumable:任务可中断恢复、工具审批流内置(承接高危确认) |
+| D23 | UI 组件 | ai-elements(AI Elements 组件注册表) | Vercel 官方 AI 原生组件库,聊天/流式/工作台组件开箱即用 |
+| D24 | 网关接入 | 自研 Go 网关;AI SDK provider baseURL 直连 | 不用 Vercel AI Gateway 云服务;客户端零密钥,计量在服务端 |
 
 ---
 
@@ -66,20 +72,20 @@ PicoAide(旧)是浏览器 Web UI + 服务端沙箱(overlayfs + netns)模式,存�
 ### 2.1 架构图
 
 ```
-┌─────────────── 桌面客户端 picoaide-desktop (Wails: Go + WebView) ─────────────┐
+┌─────────────── 桌面客户端 picoaide-desktop (Electron: main + renderer) ──────┐
 │                                                                              │
-│  React UI (全新写)                                                           │
+│  React UI (renderer, 全新写)                                                  │
 │  ├─ 登录页:服务器 URL/端口 + 用户名/密码                                     │
 │  ├─ 主界面:会话列表 + 聊天区 + 右侧产物/可视化面板 + 底部状态栏               │
 │  ├─ 交互模式:Ask(聊天) / Plan(先计划后执行) / Craft(Agent 执行)              │
 │  └─ 设置页:模型选择、工作目录、可访问目录、MCP 插件管理、技能管理、离线状态    │
 │                                                                              │
-│  Go 后端 (Wails bindings + 本地 HTTP)                                        │
-│  ├─ Agent 引擎:包装 google.golang.org/adk/v2(llmagent + runner)              │
-│  ├─ 本地工具:文件 / 终端 / 浏览器 / 屏幕截图 / OCR / 剪贴板                    │
-│  ├─ 本地 MCP 运行时:从商城安装,本地 spawn(stdio)或直连(http)                 │
+│  Electron 主进程 (Node + TS)                                                 │
+│  ├─ Agent 引擎:Vercel AI SDK(streamText + tools + maxSteps)                  │
+│  ├─ 本地工具:文件 / 终端 / 浏览器 / 屏幕截图 / OCR(tesseract.js) / 剪贴板     │
+│  ├─ 本地 MCP 运行时:@modelcontextprotocol/sdk Client,本地 spawn(stdio)/直连(http)│
 │  ├─ Skill 运行时:从商城下载,指令注入系统提示 + scripts 本地执行               │
-│  ├─ 会话/记忆:本地 SQLite(WAL 模式)                                          │
+│  ├─ 会话/记忆:better-sqlite3(WAL 模式)                                       │
 │  └─ 服务端连接器:登录/token 管理、AI 网关客户端(SSE 流式)、远程 MCP 客户端    │
 │                                                                              │
 └────────────────────────────┬─────────────────────────────────────────────────┘
@@ -127,64 +133,98 @@ PicoAide(旧)是浏览器 Web UI + 服务端沙箱(overlayfs + netns)模式,存�
 
 | 层 | 技术 | 版本建议 |
 |----|------|----------|
-| 桌面壳 | Wails v2 | 最新稳定 |
-| 后端语言 | Go | 1.24+ |
-| Agent 引擎 | google.golang.org/adk/v2 | 最新(参考旧 go.mod) |
-| 本地数据库 | modernc.org/sqlite(纯 Go)或 mattn/go-sqlite3(CGO) | 优先 modernc 免 CGO |
+| 桌面壳 | Electron | 最新稳定(主进程 Node + renderer) |
+| 主进程语言 | TypeScript(Node) | Node 20+ 内置于 Electron |
+| Agent 引擎 | Vercel AI SDK(`ai` + `@ai-sdk/workflow` + `@ai-sdk/openai-compatible`) | 最新 |
+| 长任务/审批 | `@ai-sdk/workflow`(WorkflowAgent) | durable + resumable + 工具审批流 |
+| 沙盒执行 | `@ai-sdk/sandbox-vercel` | 不可信代码/脚本在 Vercel Sandbox 受限会话运行 |
+| 流式 UI | `@ai-sdk/react`(useChat/streamText) | 随 ai 包 |
+| UI 组件 | ai-elements(AI Elements 注册表) | 官方 AI 原生组件 |
+| 本地数据库 | better-sqlite3 | 最新(主进程同步 API) |
 | 前端 | React 18 + TypeScript + Vite | 最新 |
-| 前端 UI | 自研轻量组件(不引重型组件库)或 shadcn 风格 | 实施期定 |
-| 流式渲染 | @ai-sdk/react 或手写 fetch + SSE 解析 | 实施期定 |
-| 截图 | github.com/kbinani/screenshot | 三平台 |
-| OCR | gosseract(Tesseract)或 onnxruntime Go binding | 实施期评估,惰性加载 |
-| 剪贴板 | github.com/atotto/clipboard | 三平台 |
+| 本地 MCP | @modelcontextprotocol/sdk(Client) | 最新 |
+| 截图 | Electron `desktopCapturer` + `nativeImage` | 内置,免依赖 |
+| OCR | tesseract.js(纯 JS/WASM,中文 `chi_sim`) | 惰性加载 |
+| 剪贴板 | Electron `clipboard` | 内置 |
 | 浏览器控制 | 一期:web_fetch/web_search(HTTP);二期:Playwright CDP | 实施期定 |
+| 测试 | Vitest(main + renderer) | 最新 |
+
+**客户端架构模型(Electron 三进程):**
+
+```
+renderer (React UI) ──contextBridge──▶ preload ──ipcMain──▶ main (Node: 引擎/工具/DB/MCP)
+                                                              │
+                                                              ▼
+                                                      服务端 (HTTPS)
+```
+
+- **main 进程**:Agent 引擎、本地工具、better-sqlite3、MCP 运行时、网关客户端、token 存储(不在 renderer 持敏感数据)
+- **renderer 进程**:纯 UI,经 preload 的 `window.picoaide.*` API 与 main 通信,流式事件经 ipc 推送
+- **preload 脚本**:contextBridge 暴露白名单 API(登录/发消息/事件订阅/设置/确认),contextIsolation 开启
 
 ### 3.2 目录结构(仓库全景)
 
 ```
 picoaide-next/
-├── go.mod                        # 单 module:github.com/picoaide/picoaide
+├── go.mod                        # 单 module:github.com/picoaide/picoaide(服务端)
 ├── Makefile                      # 构建/测试/打包
-├── cmd/
-│   ├── server/main.go            # 服务端网关入口
-│   └── desktop/main.go           # Wails 客户端入口
-├── internal/
-│   ├── agent/                    # Agent 引擎:ADK 包装、Provider、事件流
-│   │   ├── engine.go             # AgentEngine:包装 llmagent+runner
-│   │   ├── provider.go           # Provider 工厂(指向本地/网关)
-│   │   ├── session_sqlite.go     # ADK session.Service → SQLite 实现
-│   │   ├── tools_local.go        # 本地工具注册表
-│   │   ├── events.go             # 流式事件模型(UI 协议)
-│   │   └── modes.go              # Ask / Plan / Craft 三模式
-│   ├── localtools/               # 本地工具实现
-│   │   ├── filesystem.go         # 文件读/写/编辑/追加/删除/列表/搜索
-│   │   ├── terminal.go           # 命令执行(超时/输出截断/工作目录)
-│   │   ├── web.go                # web_fetch / web_search
-│   │   ├── screen.go             # 屏幕截图
-│   │   ├── ocr.go                # 截图 OCR(惰性加载)
-│   │   └── clipboard.go          # 剪贴板读写
-│   ├── localmcp/                 # 本地 MCP 插件运行时
-│   │   ├── installer.go          # 从商城拉取安装
-│   │   ├── runner_stdio.go       # stdio server 进程管理(JSON-RPC)
-│   │   ├── runner_http.go        # http server 直连客户端
-│   │   └── adk_toolset.go        # MCP client → ADK toolset 适配
-│   ├── localskill/               # Skill 运行时
-│   │   ├── loader.go             # SKILL.md + metadata.yaml + scripts 加载
-│   │   ├── installer.go          # 商城下载/更新/卸载
-│   │   └── inject.go             # 系统提示词注入
-│   ├── gateway/                  # 服务端连接器(客户端侧)
-│   │   ├── client.go             # AI 网关 OpenAI 兼容客户端(SSE)
-│   │   ├── auth.go               # 登录、token 存取、刷新
-│   │   ├── remote_mcp.go         # 服务端远程 MCP 客户端(知识库等)
-│   │   └── marketplace.go        # 商城 API 客户端
-│   ├── localstore/               # 本地 SQLite(会话/记忆/设置/缓存)
-│   │   ├── db.go                 # 打开/迁移(WAL)
-│   │   ├── conversations.go
-│   │   ├── messages.go
-│   │   ├── artifacts.go
-│   │   ├── memories.go
-│   │   └── settings.go
-│   ├── serverauth/               # 服务端认证(全新实现)
+├── cmd/server/main.go            # 服务端网关入口
+├── internal/                     # 服务端 Go 代码(serverauth/llmgateway/marketplace/knowledge/serverstore/util)
+├── desktop/                      # Electron 客户端(TypeScript monorepo 子包)
+│   ├── package.json              # name: picoaide-desktop,main: dist/main/index.js
+│   ├── electron-builder.yml      # 三平台打包配置
+│   ├── src/
+│   │   ├── main/                 # 主进程(Node)
+│   │   │   ├── index.ts          # app 生命周期、窗口创建、安全策略
+│   │   │   ├── ipc.ts            # ipcMain 路由注册(与 preload API 一一对应)
+│   │   │   ├── agent/
+│   │   │   │   ├── engine.ts     # AgentEngine:WorkflowAgent + streamText + 审批流
+│   │   │   │   ├── provider.ts   # createOpenAICompatible({baseURL: 自研网关})
+│   │   │   │   ├── modes.ts      # Ask / Plan / Craft 三模式
+│   │   │   │   ├── events.ts     # 流式事件模型(UI 协议)
+│   │   │   │   └── resume.ts     # durable 恢复(从 SQLite 恢复 workflow 状态)
+│   │   │   ├── tools/            # 本地工具
+│   │   │   │   ├── filesystem.ts # 文件读/写/编辑/追加/删除/列表/搜索(GBK 检测)
+│   │   │   │   ├── terminal.ts   # 命令执行(超时/输出截断/进程组 kill)
+│   │   │   │   ├── sandbox.ts    # Vercel Sandbox 受限会话(@ai-sdk/sandbox-vercel)
+│   │   │   │   ├── web.ts        # web_fetch / web_search
+│   │   │   │   ├── screen.ts     # desktopCapturer 截图
+│   │   │   │   ├── ocr.ts        # tesseract.js 惰性加载
+│   │   │   │   └── clipboard.ts  # Electron clipboard
+│   │   │   ├── mcp/              # 本地 MCP 插件运行时
+│   │   │   │   ├── installer.ts  # 商城拉取/安装
+│   │   │   │   ├── runner.ts     # stdio(http) Client 生命周期管理
+│   │   │   │   └── adapter.ts    # MCP tools → AI SDK tool 适配
+│   │   │   ├── skill/            # Skill 运行时
+│   │   │   │   ├── loader.ts     # SKILL.md + metadata + scripts
+│   │   │   │   ├── installer.ts  # 下载/更新/卸载
+│   │   │   │   └── inject.ts     # 系统提示注入
+│   │   │   ├── store/            # better-sqlite3 数据层
+│   │   │   │   ├── db.ts         # 打开/迁移(WAL)
+│   │   │   │   ├── conversations.ts / messages.ts / artifacts.ts / memories.ts / settings.ts / workflow_state.ts
+│   │   │   ├── gateway/          # 服务端连接器
+│   │   │   │   ├── client.ts     # AI 网关请求(SSE 解析)
+│   │   │   │   ├── auth.ts       # 登录/token 存取/登出
+│   │   │   │   ├── health.ts     # 离线检测轮询
+│   │   │   │   ├── remote_mcp.ts # 服务端远程 MCP(知识库)
+│   │   │   │   └── marketplace.ts# 商城 API 客户端
+│   │   │   └── paths.ts          # 数据目录定位(per-platform)
+│   │   ├── preload/index.ts      # contextBridge 白名单 API
+│   │   └── renderer/             # React UI
+│   │       ├── src/
+│   │       │   ├── App.tsx / main.tsx
+│   │       │   ├── api/picoaide.ts        # preload API 封装
+│   │       │   ├── components/            # ChatInput/Messages/ToolCalls/Artifacts/ConfirmModal
+│   │       │   ├── pages/                # Login/Main/Settings
+│   │       │   └── stores/               # Zustand:chat/auth/connection
+│   │       ├── vite.config.ts / index.html / tsconfig.json
+│   ├── tests/                   # Vitest(main 逻辑 + renderer 组件)
+│   └── resources/               # 图标/安装资源
+├── webadmin/                     # 服务端管理页(独立小 React 应用)
+├── docs/
+├── scripts/                      # 打包脚本(NSIS/dmg/deb/AppImage)
+└── data/                         # 服务端运行时数据(库/缓存,gitignore)
+```
 │   │   ├── provider.go           # Provider 接口 + 注册表
 │   │   ├── local.go              # 本地账号(argon2id)
 │   │   ├── ldap.go               # LDAP(参考旧 go-ldap 用法)
@@ -215,17 +255,7 @@ picoaide-next/
 │       ├── password.go           # argon2id / bcrypt
 │       ├── safe.go               # SafePathSegment 等
 │       └── crypto.go             # AES-GCM 加密(凭证/密钥)
-├── ui/                           # React 客户端 UI
-│   ├── src/
-│   │   ├── App.tsx / main.tsx
-│   │   ├── api/                  # Wails bindings 封装 + SSE 客户端
-│   │   ├── components/           # ChatInput/Messages/ToolCalls/Artifacts/Modal
-│   │   ├── pages/                # Login/Main/Settings
-│   │   ├── stores/               # Zustand:会话/设置/连接状态
-│   │   └── styles/
-│   ├── package.json / vite.config.ts / tsconfig.json
-│   └── wails.json                # Wails 配置(前端指向 ui/)
-├── webadmin/                     # 服务端管理页(独立小 React 应用或复用 ui 组件)
+├── webadmin/                     # 服务端管理页(独立小 React 应用)
 │   └── src/                      # Users/Marketplace/Usage/Gateway
 ├── docs/
 │   ├── 01-architecture.md
@@ -242,73 +272,110 @@ picoaide-next/
 
 ### 3.3 Agent 引擎(核心)
 
-#### 3.3.1 引擎封装
+#### 3.3.1 引擎封装(主进程,TypeScript)
 
-```go
-// internal/agent/engine.go
-type AgentEngine struct {
-    cfg        *AgentConfig        // 模型/工作目录/工具开关
-    registry   *ToolRegistry       // 本地工具
-    mcpTools   []tool.Toolset      // 本地 MCP 插件 + 远程 MCP
-    sessionSvc session.Service     // SQLite 会话
-    provider   Provider            // 指向服务端网关
-}
+```ts
+// desktop/src/main/agent/engine.ts
+export class AgentEngine {
+  private cfg: EngineConfig          // 模型/工作目录/工具开关
+  private tools: Record<string, Tool>  // AI SDK tool 注册表(本地 + MCP + 远程 + 沙盒)
+  private aborter: AbortController | null
 
-func NewAgentEngine(cfg *AgentConfig) (*AgentEngine, error)
-func (e *AgentEngine) Run(ctx context.Context, conversationID int64, msg *agent.Message,
-    mode Mode, cb func(Event)) error   // Ask/Plan/Craft 共用
-func (e *AgentEngine) Cancel() error
-```
-
-基于 ADK v2 的 `llmagent` + `runner` 模式(参考旧 `internal/agent/adk_run.go` 的既有用法,重新实现):
-
-```go
-// 伪代码骨架
-func (e *AgentEngine) runOnce(ctx, msg, sysPrompt, history) {
-    llm := llmagent.New(agent.Model{ID: cfg.Model.ModelID, Provider: e.provider})
-    llm.Tools = append(e.registry.AsADKToolset(), e.mcpTools...)
-    r := runner.New(llm, runner.SessionService(e.sessionSvc), runner.MaxIter(cfg.MaxIter))
-    events := r.Run(ctx, session.New("picoaide", cfg.UserID, convID), msg)
-    for ev := range events {
-        e.cb(mapADKEvent(ev))      // 转成 UI 事件流
-    }
+  constructor(cfg: EngineConfig, store: Store, deps: EngineDeps)
+  // Ask/Plan/Craft 共用入口
+  run(opts: { conversationId: number; content: string; mode: Mode }): Promise<RunHandle>
+  cancel(): void
+  confirm(requestId: string, ok: boolean): void   // 审批流回执
 }
 ```
+
+Agent 骨架(基于 `@ai-sdk/workflow` 的 WorkflowAgent,durable + resumable):
+
+```ts
+// desktop/src/main/agent/engine.ts — 骨架伪代码
+import { WorkflowAgent, type ModelCallStreamPart } from '@ai-sdk/workflow'
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
+import { getWritable } from 'workflow'
+import { z } from 'zod'
+
+const provider = createOpenAICompatible({
+  name: 'gateway',
+  baseURL: `${serverURL}/v1`,        // 自研 Go AI 网关
+  apiKey: token,
+})
+
+const agent = new WorkflowAgent({
+  model: provider.chatModel(modelID),
+  instructions: buildSysPrompt(skills, mode),
+  tools: this.tools,                 // 本地/MCP/远程/沙盒工具
+  // 高危工具审批流(WorkflowAgent 内置):
+  //   tool.execute 标记 needsApproval → agent.stream() 返回未执行 toolCalls
+  //   → UI 弹窗 → confirm(requestId, ok) → 以 approved input 继续
+})
+
+const result = await agent.stream({
+  messages: history.map(toModelMessage),
+  writable: getWritable<ModelCallStreamPart>(),
+  onStepEnd: (step) => this.persistStep(step),   // durable 落库
+})
+// result.stream → text-delta → ipc 推 text_delta;tool-call → tool_start
+```
+
+#### 3.3.1a 长任务与恢复(WorkflowAgent)
+
+- 办公任务可能执行数分钟甚至更久,`WorkflowAgent` 支持 durable execution:
+  - **中断恢复**:应用重启后可从最近 step 恢复(状态序列化到 better-sqlite3)
+  - **内置审批流**:工具可声明需要人工批准,审批前不执行(见 3.4 高危确认,实现层直接复用 WorkflowAgent 审批机制,不再自建状态机)
+- Ask 模式用轻量 `streamText`(无工具、无持久化 step);Craft/Plan 用 WorkflowAgent
+
+#### 3.3.1b 沙盒执行(Vercel Sandbox)
+
+- 不可信代码(Agent 生成的脚本、技能自带的 run.py 等)在 Vercel Sandbox 受限会话运行:
+  ```ts
+  import { createVercelSandbox } from '@ai-sdk/sandbox-vercel'
+  const sandbox = createVercelSandbox({ runtime: 'node24', ports: [0] })
+  const session = (await sandbox.createSession()).restricted()
+  const { stdout } = await session.run({ command: 'python3 script.py' })
+  ```
+- 用途:`sandbox_exec` 工具(替代/补充本地 terminal)、技能 scripts 执行、产物生成任务
+- **边界**:沙盒内无用户文件访问权限;需要访问用户授权目录的操作仍走本地工具(文件/桌面/剪贴板)
 
 #### 3.3.2 Provider(LLM 通道)
 
-```go
-// internal/agent/provider.go — 全新实现,参考旧 provider_adapter.go 的设计
-type Provider interface {
-    StreamChat(ctx context.Context, req *ChatRequest, cb func(StreamEvent)) error
-}
-
-// NewGatewayProvider:OpenAI 协议客户端,指向服务端 AI 网关
-func NewGatewayProvider(gatewayURL, token, modelID string) Provider
-
-// 本地无直连模式:客户端一律经网关,不持有任何上游密钥
+```ts
+// desktop/src/main/agent/provider.ts
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
+// createOpenAICompatible({ name, baseURL: 服务端网关, apiKey: 登录 token })
 ```
+
+- 客户端一律经网关,不持有上游密钥
+- AI SDK 的 OpenAI 兼容 provider 直接对接服务端 `/v1/chat/completions`(streaming 原生支持,SSE 由 SDK 处理,无需手写解析)
 
 #### 3.3.3 事件流(UI 协议)
 
-```go
-type Event struct {
-    Type string          // "text_delta" | "reasoning_delta" | "tool_start" |
-                         // "tool_end" | "tool_error" | "artifact" | "confirm_required" |
-                         // "done" | "error"
-    Data json.RawMessage
-}
+```ts
+// desktop/src/main/agent/events.ts — 主进程经 ipc 推送给 renderer
+export type AgentEvent =
+  | { type: 'text_delta'; data: string }
+  | { type: 'reasoning_delta'; data: string }
+  | { type: 'tool_start'; data: { id: string; name: string; input: unknown } }
+  | { type: 'tool_end'; data: { id: string; name: string; output: unknown; durationMs: number } }
+  | { type: 'tool_error'; data: { id: string; name: string; error: string } }
+  | { type: 'confirm_required'; data: { requestId: string; op: string; target: string; reason: string } }
+  | { type: 'artifact'; data: { path: string; type: string; size: number } }
+  | { type: 'done'; data: { usage?: { promptTokens: number; completionTokens: number } } }
+  | { type: 'error'; data: string }
 ```
 
-React UI 通过 Wails binding 订阅(或本地 SSE),打字机渲染 `text_delta`,工具卡片渲染 `tool_start/end`。
+renderer 经 preload 暴露的 `window.picoaide.onEvent(cb)` 订阅(底层 ipcRenderer.on),打字机渲染 `text_delta`,工具卡片渲染 `tool_start/end`。
 
 #### 3.3.4 三模式
 
 | 模式 | 行为 | 实现 |
 |------|------|------|
-| Ask | 纯聊天,不调工具 | 请求带 `DisableTools: true`,不注册工具集 |
-| Plan | 第一轮禁用工具输出计划 → 用户确认 → 转 Craft | 同一会话,第二轮启用工具 |
-| Craft | 完整 Agent 循环 | 默认全量 |
+| Ask | 纯聊天,不调工具 | `tools: {}`(不注册工具),纯 streamText |
+| Plan | 第一轮禁用工具输出计划 → 用户确认 → 转 Craft | 同一会话,第二轮带 tools |
+| Craft | 完整 Agent 循环 | 默认全量:tools + maxSteps(默认 20) |
 
 ### 3.4 本地工具
 
@@ -316,23 +383,25 @@ React UI 通过 Wails binding 订阅(或本地 SSE),打字机渲染 `text_delta`
 |--------|------|----------|
 | file_read | 读取文本文件(编码自动检测:UTF-8/GBK/Big5) | 可访问目录内 |
 | file_write / file_edit / file_append | 写/编辑/追加 | 可访问目录内 |
-| file_delete | 删除文件 | **高危:弹窗确认** |
+| file_delete | 删除文件 | **高危:审批流弹窗** |
 | file_list / file_search | 列目录/搜索 | 可访问目录内 |
 | command_exec | 执行命令(60s 默认超时,输出截断 50KB) | 工作目录内;需确认的命令模式(rm -rf 等)弹窗 |
+| sandbox_exec | Vercel Sandbox 受限会话运行不可信代码/脚本 | 无用户文件权限;时间/网络受限 |
 | web_fetch / web_search | HTTP 抓取/搜索 | 无外发敏感数据 |
 | screen_capture | 屏幕截图 → base64 | 无 |
 | screen_ocr | 对截图 OCR | 惰性加载模型 |
-| clipboard_read / write | 剪贴板 | 读剪贴板属敏感,**读取前弹窗确认** |
+| clipboard_read / write | 剪贴板 | 读剪贴板属敏感,**读取前审批弹窗** |
 
 **可访问目录模型**:默认 = 用户工作目录(每次对话独立子目录 `workspaces/<conv>/`),用户在设置中可追加"可访问目录"列表。工具越界返回明确错误给 Agent 重试。
 
-**高危操作确认协议**:
+**高危操作确认协议(WorkflowAgent 审批流)**:
 
 ```
-Agent 发起高危工具 → 引擎发出 Event{Type:"confirm_required", Data:{op, target, reason}}
-→ UI 弹窗(显示操作内容 + 目标路径)→ 用户选择
-→ 客户端调 engine.Confirm(convID, ok) → 继续/拒绝
-→ 确认操作默认 60s 超时,超时按拒绝处理
+Agent 发起高危工具(needsApproval: true)
+→ WorkflowAgent 不执行,stream() 返回未执行 toolCalls(含 requestId)
+→ 引擎发 confirm_required 事件 → UI 弹窗(操作内容 + 目标路径 + 60s 倒计时)
+→ 用户允许 → engine.confirm(requestId, true) → 以批准的输入继续执行
+→ 用户拒绝/超时 → confirm(requestId, false) → 工具返回拒绝错误给 Agent
 ```
 
 ### 3.5 本地 SQLite
@@ -419,7 +488,7 @@ CREATE TABLE settings (
 
 - `stdio`:本地 spawn,JSON-RPC over stdio,进程生命周期随客户端,崩溃自动重启 1 次
 - `http`:客户端起 MCP client 直连 URL(本地服务或内网地址)
-- MCP client → ADK toolset 适配层(`AsADKToolset`),工具暴露给 Agent
+- MCP client → AI SDK `tool` 适配层(`adapter.ts`),工具暴露给 Agent
 - 插件开关在设置页;凭证敏感字段服务端加密存储、HTTPS 传输、客户端仅存进程内存(可选落盘时加密)
 
 ### 3.7 Skill 运行时
@@ -435,7 +504,7 @@ skill-name-v1.2.3.tar.gz
 └── tools/              # 可选:技能自带工具定义(JSON schema)
 ```
 
-- 加载:SKILL.md → 注入系统提示;scripts → 注册为 `skill_exec <name>` 工具(command 子进程,沙盒无,仅超时+输出截断)
+- 加载:SKILL.md → 注入系统提示;scripts → 注册为 `skill_exec <name>` 工具(**在 Vercel Sandbox 受限会话执行**,仅超时+输出截断;需要用户文件的操作仍走本地工具)
 - 更新:商城版本检测,手动更新;卸载:删目录 + 移除提示注入
 - 来源信任:仅商城官方渠道;第三方 skill 首次安装弹窗提示风险
 

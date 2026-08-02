@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 全新重写 WorkBuddy 式桌面 AI 办公智能体:Go+Wails+React 桌面客户端(本地跑完整 Agent)+ Go 服务端纯网关(认证/AI 网关/双商城/知识库)。
+**Goal:** 全新重写 WorkBuddy 式桌面 AI 办公智能体:Electron+React+TS 桌面客户端(本地跑完整 Agent)+ Go 服务端纯网关(认证/AI 网关/双商城/知识库)。
 
-**Architecture:** 客户端(Agent 引擎基于 google.golang.org/adk/v2,本地工具 + 本地 MCP/Skill 运行时 + SQLite 会话)经 Bearer token 连服务端;服务端(AI 网关 OpenAI 兼容代理 + LDAP/OIDC/本地认证 + Skill/MCP 商城 + 知识库远程 MCP + 极简管理页)。零代码迁移,旧仓库 `/data/picoaide` 仅作参考。
+**Architecture:** 客户端(Agent 引擎基于 Vercel AI SDK WorkflowAgent,本地工具 + 沙盒执行 + 本地 MCP/Skill 运行时 + better-sqlite3 会话,durable 可恢复)经 Bearer token 连服务端;服务端(AI 网关 OpenAI 兼容代理 + LDAP/OIDC/本地认证 + Skill/MCP 商城 + 知识库远程 MCP + 极简管理页)。零代码迁移,旧仓库 `/data/picoaide` 仅作参考。
 
-**Tech Stack:** Go 1.24+、Wails v2、React 18+TS+Vite、google.golang.org/adk/v2、gin、modernc.org/sqlite、argon2id、AES-GCM、FTS5。
+**Tech Stack:** 服务端 Go 1.24+(gin、modernc.org/sqlite、argon2id、AES-GCM、FTS5);客户端 Electron + TypeScript + React 18 + Vite + Vercel AI SDK(`ai`、`@ai-sdk/openai-compatible`、`@ai-sdk/workflow`、`@ai-sdk/sandbox-vercel`)+ ai-elements + better-sqlite3 + @modelcontextprotocol/sdk + tesseract.js + Vitest。
 
 **前置参考(只读,禁止复制):** `/data/picoaide/internal/agent/adk_run.go`(ADK 用法)、`/data/picoaide/internal/store/users.go`(argon2)、`/data/picoaide/internal/store/migrations/`(迁移命名)、`/data/picoaide/internal/authsource/`(认证注册表)、`/data/picoaide/internal/skill/`(技能解析)。
 
@@ -24,7 +24,9 @@
 ### 0.2 目录规约(与设计文档 §3.2 一致)
 
 ```
-cmd/server/ cmd/desktop/ internal/{agent,localtools,localmcp,localskill,gateway,localstore,serverauth,llmgateway,marketplace,knowledge,serverstore,util} ui/ webadmin/ docs/ scripts/
+cmd/server/ internal/{serverauth,llmgateway,marketplace,knowledge,serverstore,util}(服务端 Go)
+desktop/{src/{main,preload,renderer},tests}(Electron 客户端 TS)
+webadmin/ docs/ scripts/ data/
 ```
 
 ### 0.3 Makefile 目标(任务 1.1 建立,全程维护)
@@ -33,7 +35,7 @@ cmd/server/ cmd/desktop/ internal/{agent,localtools,localmcp,localskill,gateway,
 |------|------|
 | `make test` | `go test ./... -count=1`(服务端+客户端 Go 代码) |
 | `make test-server` | `go test ./internal/serverauth/... ./internal/llmgateway/... ./internal/marketplace/... ./internal/knowledge/... ./internal/serverstore/... -count=1` |
-| `make test-client` | `go test ./internal/agent/... ./internal/localtools/... ./internal/localmcp/... ./internal/localskill/... ./internal/gateway/... ./internal/localstore/... -count=1` |
+| `make test-client` | `cd desktop && npm test && npm run typecheck`(客户端 Vitest) |
 | `make ui` | `cd ui && npm run build` |
 | `make webadmin` | `cd webadmin && npm run build` |
 | `make build-server` | 编译 `bin/picoaide-server` |
@@ -60,7 +62,7 @@ cmd/server/ cmd/desktop/ internal/{agent,localtools,localmcp,localskill,gateway,
 
 #### 0.4.3 流式 LLM 事件(客户端 UI 协议)
 
-Wails binding 层发送给 React 的事件:
+Electron main 进程经 ipc(`agent:event`)发送给 renderer 的事件:
 
 ```json
 {"type":"text_delta","data":"..."}
@@ -76,7 +78,7 @@ Wails binding 层发送给 React 的事件:
 
 #### 0.4.4 工具 JSON Schema 约定
 
-工具定义用 OpenAI function-calling schema(`name/description/parameters`),注册在 `internal/agent/tools_local.go` 的 ToolRegistry,格式与 ADK tool.Tool 兼容。
+工具定义用 AI SDK `tool({ description, inputSchema: z.object({...}), execute })`(zod 模式,序列化后为 OpenAI function-calling schema,服务端网关原样转发)。注册在 `desktop/src/main/agent/engine.ts` 的工具注册表。
 
 #### 0.4.5 里程碑判定
 
@@ -99,7 +101,7 @@ Wails binding 层发送给 React 的事件:
 
 - [ ] **Step 1: 初始化 module 与目录**
 
-Run: `cd /data/picoaide-next && go mod init github.com/picoaide/picoaide && mkdir -p cmd/server cmd/desktop internal/{agent,localtools,localmcp,localskill,gateway,localstore,serverauth,llmgateway,marketplace,knowledge,serverstore,util} ui webadmin docs scripts`
+Run: `cd /data/picoaide-next && go mod init github.com/picoaide/picoaide && mkdir -p cmd/server internal/{serverauth,llmgateway,marketplace,knowledge,serverstore,util} desktop/src/{main,preload,renderer} webadmin docs scripts data`
 Expected: 目录创建成功,`go.mod` 第一行 `module github.com/picoaide/picoaide`
 
 - [ ] **Step 2: 写最小 main + db 打开测试(红)**
@@ -720,150 +722,189 @@ git checkout master && git merge dev && git tag -a v0.1.0 -m "server gateway mil
 ---
 
 ## 阶段 2:客户端骨架(约 2-3 周)
+## 阶段 2:客户端骨架(约 2-3 周)
 
-**目标:** 桌面端登录服务端,Ask 模式完成一次对话,会话持久化,重启恢复。
+**目标:** Electron 桌面端登录服务端,Ask 模式完成一次对话,会话持久化,重启恢复。
 
 **前置:** 阶段 1 完成(依赖 `/v1/chat/completions`、`/api/auth/*`)。
 
----
-
-### Task 2.1: Wails + React 脚手架
-
-**Files:**
-- Create: `cmd/desktop/main.go`、`cmd/desktop/app.go`、`wails.json`、`ui/`(Vite React 模板)、`scripts/build-desktop.sh`
-
-- [ ] **Step 1: 生成脚手架**
-
-Run: `cd /data/picoaide-next && wails init -n picoaide-desktop -t react-ts`(在 `ui/` 生成模板)然后调整目录:模板 `frontend/` → `ui/`,`wails.json` 的 `frontend` 字段改为 `ui`
-Expected: `wails dev` 能启动窗口显示 React 欢迎页
-
-- [ ] **Step 2: 清理模板 + 写最小 binding**
-
-Modify: `cmd/desktop/app.go` — 结构体 `App` 方法 `Version() string`(返回 `0.2.0`);`cmd/desktop/main.go` 用 `options.App{...}` 注册 `App`
-Modify: `ui/src/App.tsx` — 调用 `window.go.main.App.Version()` 渲染到页面
-Run: `wails dev`
-Expected: 窗口显示版本号 0.2.0
-
-- [ ] **Step 3: 建立测试目录**
-
-Create: `cmd/desktop/app_test.go`(测试 `App.Version()` 返回非空)
-Run: `go test ./cmd/desktop/ -count=1`
-Expected: PASS
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add -A && git commit -m "feat: wails react scaffold with version binding"
-```
+**技术栈变更说明:** 客户端为 Electron + TypeScript(主进程 Node)+ React renderer,Vercel AI SDK 引擎。`desktop/` 是独立 npm 包;`internal/localstore` 等 Go 客户端包**不再存在**,数据层为 `desktop/src/main/store/`(better-sqlite3)。
 
 ---
 
-### Task 2.2: 本地 SQLite 存储层(localstore)
+### Task 2.1: Electron + React + Vite 脚手架
 
 **Files:**
-- Create: `internal/localstore/db.go`、`internal/localstore/conversations.go`、`internal/localstore/messages.go`、`internal/localstore/artifacts.go`、`internal/localstore/memories.go`、`internal/localstore/settings.go`、`internal/localstore/db_test.go`(每个文件配 `_test.go`)
-- Create: `internal/localstore/migrations/0001_local.sql`
+- Create: `desktop/package.json`、`desktop/tsconfig.json`、`desktop/electron-builder.yml`、`desktop/vite.config.ts`、`desktop/index.html`、`desktop/src/main/index.ts`、`desktop/src/preload/index.ts`、`desktop/src/renderer/{main.tsx,App.tsx}`、`desktop/scripts/dev.mjs`、`.gitignore` 追加 `desktop/dist`、`desktop/node_modules`
 
-- [ ] **Step 1: 写测试(红)**
+- [ ] **Step 1: 初始化 package + 依赖**
 
-- `db_test.go`:Open(临时目录)创建 schema、版本迁移幂等、路径默认 `~/.local/share/picoaide` 可被覆盖
-- `conversations_test.go`:CreateConversation/ListConversations(按 updated_at 倒序)/GetConversation/DeleteConversation(级联删 messages)
-- `messages_test.go`:AppendMessage/ListMessages(按 id 升序)/tool_calls JSON 存取往返
-- `artifacts_test.go`:AddArtifact/ListArtifacts(按会话)
-- `memories_test.go`:SetMemory/GetMemory/ListMemories
-- `settings_test.go`:Set/Get(与 serverstore 同语义)
-Run: `go test ./internal/localstore/ -count=1`
-Expected: FAIL
-
-- [ ] **Step 2: 实现**
-
-复用任务 1.2 的迁移框架思路(复制到 localstore,独立演进);`db.go` 提供 `Open(path string) (*Store, error)` 单例包装
-`0001_local.sql` 表结构 = 设计文档 §3.5 的五张表 + `settings`,外键 `ON DELETE CASCADE`
-所有时间用 SQLite `datetime('now','localtime')` 统一(与 serverstore 一致)
-Run: 同上
-Expected: PASS
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add -A && git commit -m "feat: local sqlite store for conversations and settings"
-```
-
----
-
-### Task 2.3: ADK 引擎探针(验证 session.Service 适配)
-
-**Files:**
-- Create: `internal/agent/provider.go`(Provider 接口 + GatewayProvider 骨架)、`internal/agent/session_sqlite.go`、`internal/agent/engine_probe_test.go`
-
-**目的:** 本项目最大技术风险是 ADK v2 的 `session.Service` 与本地 SQLite 的适配。先写探针测试,只验证"接口契约可编译可跑",不依赖服务端。
-
-- [ ] **Step 1: 写探针测试(红)**
-
-`engine_probe_test.go`:
-- 实现最小 `session.Service`(内存 map,参照 `/data/picoaide/internal/agent/adk_run.go` 中 sessionSvc 的调用方式:Create/Get/AppendEvent 被 runner 使用)
-- 用 **mock Provider**(在 `internal/agent/provider_mock.go` 定义 `MockProvider` 实现 `StreamChat`,回放固定 SSE 文本)+ `llmagent.New` + `runner.New`(全部参数与 adk_run.go 一致:Config{AppName, Agent, SessionService, AutoCreateSession:true})发一条消息,断言收到文本事件
-Run: `go test ./internal/agent/ -run TestEngineProbe -count=1`
-Expected: FAIL(接口不存在或编译错)
-
-- [ ] **Step 2: 实现 Provider 接口 + mock**
-
-`provider.go`:
-```go
-type Provider interface {
-  StreamChat(ctx context.Context, req *ChatRequest, cb func(StreamEvent)) error
+Run: `cd /data/picoaide-next && mkdir -p desktop/src/{main,preload,renderer}`
+Create: `desktop/package.json`:
+```json
+{
+  "name": "picoaide-desktop",
+  "version": "0.2.0",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.main.json && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "electron": "^33", "electron-builder": "^25", "vite": "^5", "typescript": "^5",
+    "react": "^18", "react-dom": "^18", "@vitejs/plugin-react": "^4", "vitest": "^2"
+  }
 }
-type ChatRequest struct { Model string; System string; Messages []LLMMessage; Tools []ToolDef; MaxTokens int; Temperature float64; DisableTools bool; RequestTimeout int }
-type StreamEvent struct { Type string; Data json.RawMessage }  // type: text|reasoning|tool_call|tool_result|done
 ```
-`provider_mock.go`:`MockProvider{Responses []string}` 依次回放文本,发 `done`
-Run: 同上
-Expected: PASS(探针通过 → ADK 适配可行)
+Run: `cd desktop && npm install`
+Expected: 安装成功,`node_modules` 出现
 
-- [ ] **Step 3: 把 session.Service 切到 SQLite**
+- [ ] **Step 2: 最小 main/preload/renderer**
 
-`session_sqlite.go`:用 localstore 的 messages 表实现 `session.Service` 三方法(Create/Get/AppendEvent;Get 时把 messages 重建为 `session.Event` 序列)
-Modify: 探针测试改用 `session_sqlite`(临时目录库)
-Run: `go test ./internal/agent/ -run TestEngineProbe -count=1`
+Create: `desktop/src/main/index.ts` — 创建 `BrowserWindow`(900x680,`webPreferences: { preload, contextIsolation: true, nodeIntegration: false }`),开发环境加载 `http://localhost:5173`,生产加载 `dist/renderer/index.html`;`app.whenReady` → 创建窗口
+Create: `desktop/src/preload/index.ts` — `contextBridge.exposeInMainWorld('picoaide', { version: () => '0.2.0' })`
+Create: `desktop/src/renderer/main.tsx` — React 渲染 `App.tsx`,`App.tsx` 显示 `window.picoaide.version()`
+Create: `desktop/vite.config.ts` — react 插件,`root: src/renderer`,`base: './'`,`build.outDir: ../../dist/renderer`
+Run: `cd desktop && npm run build`
+Expected: `desktop/dist/main/index.js` 与 `desktop/dist/renderer/index.html` 产出
+
+- [ ] **Step 3: 冒烟启动**
+
+Run: `cd desktop && npx electron .`
+Expected: 窗口出现,页面显示 `0.2.0`
+
+- [ ] **Step 4: 写最小测试**
+
+Create: `desktop/src/main/ipc.test.ts` — 测试 `registerIpcHandlers` 中 `picoaide:version` handler 返回 `0.2.0`(handler 抽成纯函数,不依赖 Electron API,便于 Vitest 单测)
+Run: `cd desktop && npm test`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add desktop/ .gitignore
+git commit -m "feat: electron react vite scaffold with version preload api"
+```
+
+---
+
+### Task 2.2: 本地 SQLite 存储层(better-sqlite3)
+
+**Files:**
+- Create: `desktop/src/main/store/db.ts`、`desktop/src/main/store/migrations.ts`、`desktop/src/main/store/conversations.ts`、`desktop/src/main/store/messages.ts`、`desktop/src/main/store/artifacts.ts`、`desktop/src/main/store/memories.ts`、`desktop/src/main/store/settings.ts`、`desktop/src/main/paths.ts`
+- Test: `desktop/src/main/store/*.test.ts`
+
+- [ ] **Step 1: 安装依赖**
+
+Run: `cd desktop && npm i better-sqlite3 && npm i -D @types/better-sqlite3`
+Expected: 安装成功
+
+- [ ] **Step 2: 写测试(红)**
+
+- `db.test.ts`:`openDb(':memory:')` 执行迁移后 6 张表存在;重复 open 幂等;`PRAGMA journal_mode=WAL` 生效
+- `conversations.test.ts`:create/list(updated_at 倒序)/get/delete(级联删 messages)
+- `messages.test.ts`:append/list(按 id 升序)/tool_calls JSON 往返
+- `artifacts.test.ts`、`memories.test.ts`、`settings.test.ts`:同语义
+Run: `cd desktop && npx vitest run src/main/store`
+Expected: FAIL(db 模块未实现)
+
+- [ ] **Step 3: 实现**
+
+`paths.ts`:`dataDir()` 按平台:`~/.local/share/picoaide`(Linux)/`~/Library/Application Support/picoaide`(macOS)/`%APPDATA%/picoaide`(Windows);`dbPath()`/`workspaceDir()`
+`db.ts`:`openDb(filePath)` 返回 better-sqlite3 实例,WAL + `foreign_keys=ON`
+`migrations.ts`:版本表 `schema_migrations(version INTEGER PRIMARY KEY, applied_at)` + 迁移数组(与设计文档 §3.5 表结构一致的 6 张表:conversations/messages/artifacts/memories/settings/workflow_state)
+`workflow_state` 表(WorkflowAgent durable 恢复用):
+```sql
+CREATE TABLE workflow_state (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  state TEXT NOT NULL,             -- JSON 序列化的 workflow 状态
+  updated_at DATETIME DEFAULT (datetime('now','localtime'))
+);
+```
+各表方法签名:与设计文档 §3.5 一致,全部同步 API(better-sqlite3 特性)
+Run: `cd desktop && npx vitest run src/main/store`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add -A && git commit -m "feat: ADK engine probe with sqlite session service"
+git add desktop/src/main/store desktop/src/main/paths.ts
+git commit -m "feat: better-sqlite3 local store with migrations"
 ```
 
 ---
 
-### Task 2.4: GatewayProvider(连接服务端 AI 网关)
+### Task 2.3: AI SDK 引擎探针(核心风险验证)
 
 **Files:**
-- Create: `internal/gateway/client.go`、`internal/gateway/client_test.go`、`internal/gateway/auth.go`、`internal/gateway/auth_test.go`
-- Modify: `internal/agent/provider.go`(补 `GatewayProvider` 实现 `agent.Provider`)
+- Create: `desktop/src/main/agent/provider.ts`、`desktop/src/main/agent/engine.ts`、`desktop/src/main/agent/events.ts`、`desktop/src/main/agent/engine.test.ts`
+
+**目的:** 验证 `@ai-sdk/openai-compatible` 对接自研网关 + `streamText`/`WorkflowAgent` 基本链路。不依赖真服务端,用模拟 Provider。
+
+- [ ] **Step 1: 安装依赖**
+
+Run: `cd desktop && npm i ai @ai-sdk/openai-compatible @ai-sdk/react zod`
+Expected: 安装成功
+
+- [ ] **Step 2: 写探针测试(红)**
+
+`engine.test.ts`:
+- `MockProvider`:实现 `LanguageModelV2` 的最小桩(streamText 调用时返回固定文本分块)——或更简单:直接测 `provider.ts` 的 `createGatewayModel(serverURL, token, modelID)` 返回的对象是 OpenAI 兼容 chatModel;`events.ts` 的 `toAgentEvent` 把 AI SDK 的 stream part(`text-delta`/`tool-call`/`finish`)转成 UI 事件
+- `WorkflowAgent` 探针:构造 `new WorkflowAgent({ model: mockModel, instructions: '...', tools: {} })` → `stream({ messages, writable: getWritable() })` → 断言收到 text-delta 流
+Run: `cd desktop && npx vitest run src/main/agent`
+Expected: FAIL(未实现)
+
+- [ ] **Step 3: 实现**
+
+`provider.ts`:
+```ts
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
+export function createGatewayModel(serverURL: string, token: string, modelID: string) {
+  return createOpenAICompatible({ name: 'gateway', baseURL: `${serverURL}/v1`, apiKey: token }).chatModel(modelID)
+}
+```
+`events.ts`:UI 事件类型(§0.4.3 契约,TS 版)+ `agentEventStream(stream, cb)` 把 `ModelCallStreamPart` 流转换为 `text_delta`/`reasoning_delta`/`tool_start`/`tool_end`/`done` 回调
+`engine.ts`(骨架):`EngineConfig{ model, serverURL, token, sysPrompt, maxSteps }`、`class AgentEngine { constructor(cfg) ; async ask(content, history): Promise<AsyncIterable<AgentEvent>> }` — Ask 模式用 `streamText`(无 tools);Craft 骨架留 `ErrNotImplemented` 抛错
+Run: `cd desktop && npx vitest run src/main/agent`
+Expected: PASS(探针通过 → AI SDK 链路可行)
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add desktop/src/main/agent desktop/package.json desktop/package-lock.json
+git commit -m "feat: ai sdk engine probe with gateway provider"
+```
+
+---
+
+### Task 2.4: 服务端连接器(登录/token/网关)
+
+**Files:**
+- Create: `desktop/src/main/gateway/auth.ts`、`desktop/src/main/gateway/health.ts`、`desktop/src/main/gateway/config.ts`、`desktop/src/main/gateway/auth.test.ts`、`desktop/src/main/gateway/health.test.ts`
 
 - [ ] **Step 1: 写测试(红)**
 
-- `client_test.go`(httptest 假网关):`StreamChat` 发送请求体含 `stream:true`、`Authorization: Bearer <token>`;逐块解析 SSE 回调 text/reasoning/done;`[DONE]` 后正常结束
-- `auth_test.go`:Login(serverURL, username, password) 成功存 token 到临时文件(权限 0600)、LoadToken/RestoreToken、失败登录返回错误
-Run: `go test ./internal/gateway/ -count=1`
+- `auth.test.ts`:`login(serverURL, username, password)` 用 fetch mock 断言 POST `/api/auth/login`、成功返回 token;`saveSession/loadSession/clearSession` 用临时目录读写 `config.json`(仅存 URL/用户名/token,0600 权限)
+- `health.test.ts`:`ping(serverURL, token)` — mock fetch:200 → true;网络错误 → false;401 → false
+Run: `cd desktop && npx vitest run src/main/gateway`
 Expected: FAIL
 
 - [ ] **Step 2: 实现**
 
-`client.go`:基于 `bufio.Scanner` 解析 SSE(`data:` 行 → JSON chunk → 转 `agent.StreamEvent`);超时由 ChatRequest.RequestTimeout 控制
-`agent/provider.go` 增:
-```go
-func NewGatewayProvider(gatewayURL, token, modelID string) Provider
-```
-内部调用 `gateway.StreamChat`,把 `agent.ChatRequest` 翻译为 OpenAI 请求体(含 tools)
-`auth.go`:Login 调 `/api/auth/login` 拿 token → 写 `~/.local/share/picoaide/config.json`(0600);`Restore` 读回;登出删除
+`config.ts`:`Session{ serverURL, username, token }`,`sessionPath()`(paths.ts)
+`auth.ts`:`login` 用全局 `fetch`(Electron main 可用),超时 15s,401 抛 `AuthError`;`saveSession` 写 JSON(权限 0600,`fs.chmod`)、`loadSession` 读、`clearSession` 删
+`health.ts`:`createHealthPoller(session, { intervalMs: 15000 })` — 返回 `{ start(cb), stop() }`,轮询 `GET /api/auth/me`,结果经回调输出 `online|offline`
 Run: 同上
 Expected: PASS
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add -A && git commit -m "feat: gateway provider client with sse streaming and login"
+git add desktop/src/main/gateway
+git commit -m "feat: gateway client with login session and health poller"
 ```
 
 ---
@@ -871,69 +912,80 @@ git add -A && git commit -m "feat: gateway provider client with sse streaming an
 ### Task 2.5: Ask 模式引擎(可运行的最小 Agent)
 
 **Files:**
-- Create: `internal/agent/engine.go`、`internal/agent/modes.go`、`internal/agent/events.go`、`internal/agent/engine_test.go`
-- Modify: `cmd/desktop/app.go`
+- Modify: `desktop/src/main/agent/engine.ts`、`desktop/src/main/agent/modes.ts`
+- Create: `desktop/src/main/ipc.ts`、`desktop/src/main/ipc.test.ts`
+- Modify: `desktop/src/main/index.ts`(注册 ipc)
 
 - [ ] **Step 1: 写测试(红)**
 
-`engine_test.go`(MockProvider,不连真服务端):
-- `Run(convID, "你好", ModeAsk)` → 回调收到 text_delta 序列 + 最终 done;messages 表落库(role/content)
-- Ask 模式请求 `DisableTools:true`,不注册工具集(断言 mock 收到的 req.DisableTools 为 true)
-- `Cancel()` 后 Run 返回 context.Canceled
-Run: `go test ./internal/agent/ -run TestEngine -count=1`
+`ipc.test.ts`(mock session + mock model):`handleChatAsk({ conversationId, content })` → 会话落库(user+assistant 两条)、流式事件经事件发射器推送、完成后 messages 表可读回
+`modes.test.ts`:Ask 模式 `buildRunConfig(mode)` 返回 `{ tools: {}, maxSteps: 1 }`;Craft 返回 `{ tools: <注册表>, maxSteps: 20 }`
+Run: `cd desktop && npx vitest run src/main/agent src/main/ipc.test.ts`
 Expected: FAIL
 
 - [ ] **Step 2: 实现**
 
-`events.go`:UI 事件结构(§0.4.3 契约)+ `func Emit(cb, ev)` 工具
-`engine.go`:
-```go
-type Engine struct { store *localstore.Store; provider agent.Provider; cfg Config }
-type Config struct { Model string; MaxIter int; SysPrompt string; AllowedDirs []string }
-func NewEngine(store, provider, cfg) *Engine
-func (e *Engine) Run(ctx, convID int64, content string, mode Mode, cb func(Event)) error
+`modes.ts`:
+```ts
+export type Mode = 'ask' | 'plan' | 'craft'
+export function buildRunConfig(mode: Mode, tools: Record<string, Tool>, maxSteps: number) {
+  if (mode === 'ask') return { tools: {}, maxSteps: 1 }
+  return { tools, maxSteps }
+}
 ```
-流程:读会话 → 构造 messages → `ADKRun`(先直接 import 旧库函数签名的等价实现,或自写 llmagent+runner 循环——**以探针 Task 2.3 落定为准**)→ 事件转 UI Event → 落库
-`modes.go`:Ask 置 DisableToolCall;Plan/Craft 骨架(阶段 3 完成,先返回 ErrNotImplemented)
-`app.go`:binding `RunAsk(convID, content)` 起 goroutine,`OnEvent(cb)` 注册回调,事件经 Wails 事件总线推前端
+`engine.ts` 完成 Ask 路径:
+```ts
+async ask(input: { conversationId: number; content: string }): Promise<RunHandle> {
+  const history = store.messages.list(input.conversationId).map(toModelMessage)
+  const result = await streamText({ model, system, messages: [...history, userMsg], tools: {} })
+  // result.textStream → for await → emit('text_delta') ; finish → emit('done')
+}
+```
+`ipc.ts`:`ipcMain.handle('chat:ask', ...)`、`ipcMain.handle('chat:new', ...)`、`webContents.send('agent:event', ev)` 推送;`index.ts` 注册
 Run: 同上
 Expected: PASS
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add -A && git commit -m "feat: ask-mode agent engine with event emission"
+git add desktop/src/main
+git commit -m "feat: ask-mode engine with ipc bridge"
 ```
 
 ---
 
-### Task 2.6: React 聊天 UI
+### Task 2.6: React 聊天 UI(AI Elements 起步)
 
 **Files:**
-- Create: `ui/src/api/events.ts`(Wails event 封装)、`ui/src/api/client.ts`、`ui/src/components/{ChatInput,Messages,MessageItem,Markdown}.tsx`、`ui/src/pages/Main.tsx`、`ui/src/stores/chat.ts`(Zustand)
-- Modify: `ui/src/App.tsx`、`ui/package.json`
+- Create: `desktop/src/renderer/src/api/picoaide.ts`、`desktop/src/renderer/src/stores/chat.ts`、`desktop/src/renderer/src/stores/auth.ts`、`desktop/src/renderer/src/pages/Main.tsx`、`desktop/src/renderer/src/components/{ChatInput,Messages}.tsx`
+- Modify: `desktop/src/renderer/App.tsx`、`desktop/package.json`
 
-- [ ] **Step 1: 安装依赖 + 状态层**
+- [ ] **Step 1: 安装依赖 + 初始化 AI Elements**
 
-Run: `cd ui && npm i zustand react-markdown remark-gfm`
-Create: `ui/src/stores/chat.ts` — state:`conversations[]`、`messages[]`、`streaming bool`、`mode`;actions:`newConversation/loadConversation/sendMessage/onEngineEvent/appendDelta/selectConversation`
-Create: `ui/src/api/events.ts` — 封装 `window.runtime.EventsOn("agent_event", cb)` 分发到 store
-Run: `npm run build`
+Run: `cd desktop && npm i zustand && npx ai-elements init`
+Expected: AI Elements 组件注册表初始化成功(组件在 `node_modules/ai-elements` 或生成到本地目录,以 init 输出为准,记录到文档)
+
+- [ ] **Step 2: 状态层 + API 封装**
+
+Create: `desktop/src/renderer/src/api/picoaide.ts` — 封装 `window.picoaide.*`(chatAsk/onEvent/loadConversations/…),事件订阅 `window.picoaide.onAgentEvent(cb)`(preload 的 ipcRenderer.on 包装)
+Create: `desktop/src/renderer/src/stores/chat.ts`(Zustand):`conversations/messages/streaming/mode`,actions:`newConversation/loadConversation/sendMessage/onAgentEvent/appendDelta/selectConversation`
+Create: `desktop/src/renderer/src/stores/auth.ts`:`status/login/logout`
+Run: `cd desktop && npm run build`
 Expected: 编译通过
 
-- [ ] **Step 2: 组件**
+- [ ] **Step 3: 组件**
 
-- `Markdown.tsx`:react-markdown + remark-gfm 渲染 assistant 文本(代码块/表格)
-- `Messages.tsx`:渲染 message 列表,streaming 时展示流式增量文本,自动滚动到底部(尾随元素 `scrollIntoView`)
-- `ChatInput.tsx`:多行 textarea + Enter 发送 + 模式切换(Ask/Plan/Craft 三按钮,阶段 3 前仅 Ask 可用)
-- `Main.tsx`:左侧会话列表(新建/切换/删除)+ 右侧聊天区
-Run: `npm run build && wails dev`
-Expected: 界面出现,输入发送后在 UI 看到流式文本(需本机服务端 + 已登录)
+- `Messages.tsx`:渲染消息列表,streaming 时展示流式增量,自动滚动(尾随 `scrollIntoView`)
+- `ChatInput.tsx`:多行 textarea + Enter 发送 + 模式切换(Ask/Plan/Craft 按钮,阶段 3 前仅 Ask 可用)
+- `Main.tsx`:左侧会话列表 + 右侧聊天区;AI Elements 组件用于输入框/按钮等基础 UI
+Run: `cd desktop && npm run build`
+Expected: 编译通过,`npx electron .` 手工验证(需本机服务端 + 已登录,阶段 2.7 后联调)
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add ui/src ui/package.json ui/package-lock.json && git commit -m "feat: react chat ui with streaming render"
+git add desktop/src/renderer desktop/package.json desktop/package-lock.json
+git commit -m "feat: react chat ui with ai elements and zustand"
 ```
 
 ---
@@ -941,29 +993,27 @@ git add ui/src ui/package.json ui/package-lock.json && git commit -m "feat: reac
 ### Task 2.7: 登录页 + token 持久化
 
 **Files:**
-- Create: `ui/src/pages/Login.tsx`、`ui/src/stores/auth.ts`、`ui/src/api/auth.ts`
-- Modify: `cmd/desktop/app.go`(binding `Login/LoadAuth`)、`ui/src/App.tsx`(路由:未登录 → Login)
+- Create: `desktop/src/renderer/src/pages/Login.tsx`
+- Modify: `desktop/src/preload/index.ts`(暴露 login/loadSession/logout/onAgentEvent)、`desktop/src/main/ipc.ts`(auth handlers)、`desktop/src/renderer/App.tsx`(路由:未登录 → Login)
 
-- [ ] **Step 1: binding + store**
+- [ ] **Step 1: preload + ipc 扩展**
 
-`app.go` 增:
-```go
-func (a *App) Login(serverURL, username, password string) error   // gateway.Auth.Login + 配置持久化
-func (a *App) LoadAuth() (AuthInfo, error)                         // 读 config.json,serverURL+user(不含 token)
-func (a *App) Logout() error
-```
-`ui/src/api/auth.ts` 封装;`stores/auth.ts`:`status: idle|loading|authed`,persist 到 localStorage(仅 URL/用户名,token 在 Go 侧)
+`preload/index.ts` 增:`login(serverURL, username, password)`、`loadSession()`、`logout()`、`onAgentEvent(cb)`(返回取消函数)、`onConnectionStatus(cb)`
+`ipc.ts` 增:`auth:login`、`auth:loadSession`、`auth:logout`(调 gateway/auth.ts)
+Run: `cd desktop && npm run typecheck`
+Expected: 类型通过
+
 - [ ] **Step 2: Login 页**
 
-Form:服务端 URL + 用户名 + 密码 + 登录按钮 + 错误提示(401 显示"用户名或密码错误",网络错误显示"无法连接服务器");登录成功跳 Main
-`App.tsx`:用 `LoadAuth()` 判断初始路由
-Run: `wails dev`,连本机服务端登录成功/失败两分支验证
+Form:服务端 URL + 用户名 + 密码 + 登录按钮 + 错误提示(401 → "用户名或密码错误";网络错误 → "无法连接服务器");登录成功跳 Main;`App.tsx` 用 `loadSession()` 判断初始路由
+Run: `cd desktop && npm run build && npx electron .`,连本机服务端验证成功/失败分支
 Expected: 正常
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add -A && git commit -m "feat: login page with token persistence"
+git add desktop/src
+git commit -m "feat: login page with session persistence"
 ```
 
 ---
@@ -971,25 +1021,21 @@ git add -A && git commit -m "feat: login page with token persistence"
 ### Task 2.8: 离线检测与重连
 
 **Files:**
-- Create: `internal/gateway/health.go`、`internal/gateway/health_test.go`、`ui/src/stores/connection.ts`
+- Create: `desktop/src/renderer/src/stores/connection.ts`
+- Modify: `desktop/src/main/index.ts`(启动 health poller)、`desktop/src/preload/index.ts`
 
-- [ ] **Step 1: 测试(红)**
+- [ ] **Step 1: 实现**
 
-`health_test.go`:假服务端 `GET /api/auth/me` → Ping 返回 true/网络错误 false/401 false
-Run: `go test ./internal/gateway/ -run TestPing -count=1`
-Expected: FAIL
+`index.ts`:登录成功后 `createHealthPoller(session, cb)` 启动,`cb` 经 `webContents.send('connection:status')` 推送
+`connection.ts`:状态 `online|offline`,顶部横幅"已断开,将自动重连";发送时 offline 直接本地报错
+Run: `cd desktop && npm run build && npx electron .` 停服务端观察横幅
+Expected: 正常
 
-- [ ] **Step 2: 实现**
-
-`health.go`:`Ping(timeout)` 每 15s 轮询(后台 goroutine,可在 app.go 启动/停止),结果事件 `connection_status` 推前端
-`ui/src/stores/connection.ts`:状态 `online|offline`,顶部横幅提示"已断开,将自动重连";发送时 offline 直接本地报错提示
-Run: 同上 + `wails dev` 停服务端观察横幅
-Expected: PASS/正常
-
-- [ ] **Step 3: Commit**
+- [ ] **Step 2: Commit**
 
 ```bash
-git add -A && git commit -m "feat: offline detection and reconnect banner"
+git add desktop/src
+git commit -m "feat: offline detection and reconnect banner"
 ```
 
 ---
@@ -998,13 +1044,13 @@ git add -A && git commit -m "feat: offline detection and reconnect banner"
 
 - [ ] **Step 1: 全量测试**
 
-Run: `make test-client && go test ./... -count=1`
+Run: `cd desktop && npm test && npm run typecheck`
 Expected: PASS
 
-- [ ] **Step 2: 手工场景(本机服务端 + wails dev)**
+- [ ] **Step 2: 手工场景(本机服务端 + electron .)**
 
 1. 首次启动 → 登录页 → 输 URL/账号密码 → 进入主界面
-2. 新建会话 → 输入"你好,介绍你自己" → 流式回复 → 刷新重启客户端 → 会话列表仍在 → 点开历史可见消息
+2. 新建会话 → 输入"你好,介绍你自己" → 流式回复 → 重启客户端 → 会话列表仍在 → 点开历史可见消息
 3. 停掉服务端 → 顶部离线横幅出现 → 重启服务端 → 自动恢复在线
 Expected: 三场景全部通过
 
@@ -1018,36 +1064,44 @@ git checkout master && git merge dev && git tag -a v0.2.0 -m "client skeleton mi
 
 ## 阶段 3:本地能力(约 3-4 周)
 
-**目标:** Craft 模式全流程:真实文件任务("汇总桌面 Word 成 500 字汇报存回桌面")跑通;本地工具 + 高危确认 + Skill + MCP 插件 + 产物面板。
+**目标:** Craft 模式全流程:真实文件任务("汇总桌面 Word 成 500 字汇报存回桌面")跑通;本地工具 + 审批确认 + Skill + MCP 插件 + 产物面板 + 沙盒执行。
 
 ---
 
 ### Task 3.1: 文件工具
 
 **Files:**
-- Create: `internal/localtools/filesystem.go`、`internal/localtools/filesystem_test.go`、`internal/agent/tools_local.go`
+- Create: `desktop/src/main/tools/filesystem.ts`、`desktop/src/main/tools/filesystem.test.ts`
 
 - [ ] **Step 1: 写测试(红)**
 
-用 `t.TempDir()` 建目录树,每工具验证:
-- `file_read(path, encoding auto)`:UTF-8 正常;GBK 文件正确解码(先写 GBK 字节,断言输出中文)
-- `file_write/file_edit/file_append`:内容正确、越界路径(`/etc/passwd`、`../x`)返回明确错误
+用 `fs.mkdtempSync` 建临时目录树,每工具验证:
+- `file_read(path, encoding)`:UTF-8 正常;GBK 文件正确解码(`iconv-lite` 或 `TextDecoder('gbk')` — 先写 GBK 字节,断言输出中文)
+- `file_write/file_edit/file_append`:内容正确;越界路径(`/etc/passwd`、`../x`)返回明确错误
 - `file_delete`:存在删除、不存在报错
 - `file_list/file_search`:递归、按名过滤
-Run: `go test ./internal/localtools/ -count=1`
+Run: `cd desktop && npx vitest run src/main/tools/filesystem`
 Expected: FAIL
 
 - [ ] **Step 2: 实现**
 
-`filesystem.go`:结构体 `FileTools{AllowedDirs []string}` + 方法签名 `func (f *FileTools) List() []agent.ToolDef` / `Execute(name string, args map[string]any) (any, error)`;路径校验:`filepath.Abs` 后必须落在某 AllowedDir 前缀下;编码检测:UTF-8 BOM/校验 → GBK(用 `golang.org/x/text/encoding/simplifiedchinese` 探测,探测失败按 UTF-8 读)
-`tools_local.go`:把 localtools 包装成 `agent.ToolRegistry` 注册表(与 ADK tool.Tool 兼容的封装)
+`filesystem.ts`:
+```ts
+export interface FileToolContext { allowedDirs: string[]; cwd: string }
+export function createFileTools(ctx: FileToolContext): Record<string, Tool>  // AI SDK tool 格式
+export function isAllowed(absPath: string, allowedDirs: string[]): boolean  // 前缀边界 + realpath 校验
+```
+- 编码检测:GBK 用 `iconv-lite`(`npm i iconv-lite`),探测:BOM 优先,否则 UTF-8 严格校验失败回退 GBK
+- 工具注册为 AI SDK `tool({ description, inputSchema: z.object({...}), execute })`,`file_delete` 标记 `needsApproval: true`(WorkflowAgent 审批流识别)
+- 越界返回 `throw new ToolError('路径不在允许目录内: ' + path)`(AI SDK 工具错误 → tool_error 事件)
 Run: 同上
 Expected: PASS
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add -A && git commit -m "feat: local filesystem tools with encoding detection"
+git add desktop/src/main/tools/filesystem.ts desktop/package.json desktop/package-lock.json
+git commit -m "feat: local filesystem tools with encoding detection"
 ```
 
 ---
@@ -1055,52 +1109,68 @@ git add -A && git commit -m "feat: local filesystem tools with encoding detectio
 ### Task 3.2: 终端工具
 
 **Files:**
-- Create: `internal/localtools/terminal.go`、`internal/localtools/terminal_test.go`
+- Create: `desktop/src/main/tools/terminal.ts`、`desktop/src/main/tools/terminal.test.ts`
 
 - [ ] **Step 1: 写测试(红)**
 
-- `command_exec("echo hello")` → stdout 正确、exit code 0
-- 超时:`sleep 5` with 1s timeout → 返回超时错误且进程被 kill
+- `commandExec('echo hello')` → stdout 正确、exit code 0
+- 超时:`sleep 5` with 1s timeout → 超时错误且进程被 kill(用 `child_process.spawn` + `AbortController` / `kill(-pid)` 进程组)
 - 输出截断:cat 10KB 文件 → 输出 ≤50KB 且有截断标记
-Run: `go test ./internal/localtools/ -run TestTerminal -count=1`
+Run: `cd desktop && npx vitest run src/main/tools/terminal`
 Expected: FAIL
 
 - [ ] **Step 2: 实现**
 
-`terminal.go`:`Execute(command string, cwd string, timeoutSec int) (stdout, stderr string, code int, err error)`;`exec.CommandContext` + 超时 kill(进程组:`Setpgid` + `kill -pgid`,防止子进程残留);cwd 默认工作目录;危险命令清单(首词 ∈ `rm,mv,dd,mkfs,shutdown,reboot,sudo` 时标记 `needsConfirm:true`,由确认协议拦截)
+`terminal.ts`:
+```ts
+export interface CommandResult { stdout: string; stderr: string; code: number }
+export async function commandExec(command: string, opts: { cwd: string; timeoutSec: number; maxOutput: number }): Promise<CommandResult>
+```
+- `spawn(command, { shell: true, cwd })`,输出累计超 `maxOutput`(50KB)截断
+- 超时:`setTimeout` → `process.kill(-child.pid, 'SIGKILL')`(posix 进程组,防子进程残留;Windows 用 `taskkill /pid /T /F` 分支)
+- 危险命令首词清单(`rm,mv,dd,mkfs,shutdown,reboot,sudo`)→ `needsApproval: true`
 Run: 同上
 Expected: PASS
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add -A && git commit -m "feat: terminal tool with timeout and output truncation"
+git add desktop/src/main/tools/terminal.ts
+git commit -m "feat: terminal tool with timeout and output truncation"
 ```
 
 ---
 
-### Task 3.3: Web 工具
+### Task 3.3: 沙盒执行工具(Vercel Sandbox)
 
 **Files:**
-- Create: `internal/localtools/web.go`、`internal/localtools/web_test.go`
+- Create: `desktop/src/main/tools/sandbox.ts`、`desktop/src/main/tools/sandbox.test.ts`(mock)
 
-- [ ] **Step 1: 写测试(红)**
+- [ ] **Step 1: 安装 + 写测试(红)**
 
-- `web_fetch(url)`:httptest 假服务器返回 HTML → 提取正文文本(剥标签)与链接
-- `web_search(query)`:假"搜索 API"响应 → 解析出结果列表;对目标站点不可达 → 明确错误
-Run: `go test ./internal/localtools/ -run TestWeb -count=1`
+Run: `cd desktop && npm i @ai-sdk/sandbox-vercel`
+`sandbox.test.ts`(mock `createVercelSandbox`):`sandboxExec({ command: 'cat hello.txt' })` → 调 `createSession().restricted().run()`;输出截断;会话停止
+Run: `cd desktop && npx vitest run src/main/tools/sandbox`
 Expected: FAIL
 
 - [ ] **Step 2: 实现**
 
-`web.go`:`web_fetch`(GET + 5s 超时 + 大小上限 2MB + HTML 转文本:`golang.org/x/net/html` 提取 body 文本与 `<a href>`)、`web_search`(可配置搜索引擎端点,默认 DuckDuckGo HTML 端点或 `https://html.duckduckgo.com/html/?q=`,解析结果;实施时验证端点可用,不可用则换 Bing HTML 端点)
+`sandbox.ts`:
+```ts
+import { createVercelSandbox } from '@ai-sdk/sandbox-vercel'
+export function createSandboxTool(sandbox: ReturnType<typeof createVercelSandbox>): Tool
+// sandboxExec({ command, timeoutSec }) → restricted 会话 run,stdout/stderr/code,输出截断 50KB
+```
+- 单例 sandbox 实例,惰性创建;不可信代码/技能脚本在此执行
+- 生产若无 Sandbox 环境变量/凭证,工具返回明确错误"沙盒执行不可用"并降级提示
 Run: 同上
 Expected: PASS
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add -A && git commit -m "feat: web fetch and search tools"
+git add desktop/src/main/tools/sandbox.ts desktop/package.json desktop/package-lock.json
+git commit -m "feat: vercel sandbox exec tool"
 ```
 
 ---
@@ -1108,29 +1178,27 @@ git add -A && git commit -m "feat: web fetch and search tools"
 ### Task 3.4: 屏幕截图 + OCR
 
 **Files:**
-- Create: `internal/localtools/screen.go`、`internal/localtools/screen_test.go`、`internal/localtools/ocr.go`
+- Create: `desktop/src/main/tools/screen.ts`、`desktop/src/main/tools/ocr.ts`、`desktop/src/main/tools/screen.test.ts`
 
 - [ ] **Step 1: 写测试(红)**
 
-- `screen.go`:`Capture(region?) (imagePNGB64 string, error)`;测试环境(CI 无显示器)下跳过,本地手工验证
-- `ocr.go`:`OCRFromImage(pngBytes) (string, error)`;测试:用含文本的合成图片(Pillow 无 Go 依赖 → 用 `image` 包画黑白文本近似)验证返回非空
-Run: `go test ./internal/localtools/ -run 'TestScreen|TestOCR' -count=1`
-Expected: FAIL(OCR 引擎未接入)
+- `screen.ts`:`captureScreen()` 用 `desktopCapturer.getSources({ types: ['screen'] })` → `nativeImage.toPNG()` → base64;测试环境跳过真实截图,断言结构正确
+- `ocr.ts`:`ocrImage(pngBase64)` 用 tesseract.js(`npm i tesseract.js`);测试:合成含文本图片 → 返回非空字符串(CI 无 GPU 可 skip,本地验证中文)
+Run: `cd desktop && npx vitest run src/main/tools/screen src/main/tools/ocr`
+Expected: FAIL
 
 - [ ] **Step 2: 实现**
 
-`screen.go`:`github.com/kbinani/screenshot` 捕获主屏 → `png.Encode` → base64
-`ocr.go`:引擎二选一(实施时在本机实测,选可用的):
-- 优先:`github.com/otiai10/gosseract/v2`(Tesseract,需系统装 `tesseract-ocr` + `chi_sim` 语言包)
-- 备选:纯 Go `github.com/auula/gos` 或 onnxruntime binding(无系统依赖)
-**惰性加载:** 首次调用才初始化引擎(单例 + sync.Once),失败降级:返回错误信息"OCR 不可用(未安装引擎)",截图工具照常工作
-Run: 同上 + 手工:截图 → OCR 输出中文文本
+`screen.ts`:`captureScreen()` — Electron main 的 `desktopCapturer`,返回 `{ pngBase64, width, height }`(Base64 直传 renderer 预览)
+`ocr.ts`:tesseract.js 惰性初始化(单例,首次调用 `createWorker('chi_sim+eng')`);失败降级:抛"OCR 不可用",截图工具照常工作
+Run: 同上 + 手工验证
 Expected: PASS
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add -A && git commit -m "feat: screen capture and lazy-loaded OCR"
+git add desktop/src/main/tools/screen.ts desktop/src/main/tools/ocr.ts desktop/package.json desktop/package-lock.json
+git commit -m "feat: screen capture and lazy ocr"
 ```
 
 ---
@@ -1138,24 +1206,20 @@ git add -A && git commit -m "feat: screen capture and lazy-loaded OCR"
 ### Task 3.5: 剪贴板工具
 
 **Files:**
-- Create: `internal/localtools/clipboard.go`、`internal/localtools/clipboard_test.go`
+- Create: `desktop/src/main/tools/clipboard.ts`
 
-- [ ] **Step 1: 写测试(红)**
+- [ ] **Step 1: 实现**
 
-`clipboard_write` → `clipboard_read` 往返一致;读操作标记 `needsConfirm:true`(敏感)
-Run: `go test ./internal/localtools/ -run TestClipboard -count=1`
-Expected: FAIL
+`clipboard.ts`:用 Electron `clipboard` 模块:`clipboardRead()`(标记 `needsApproval: true`)、`clipboardWrite(text)`
+- AI SDK tool 注册,`clipboard_read` 触发审批流
+Run: `cd desktop && npm run typecheck`
+Expected: 通过
 
-- [ ] **Step 2: 实现**
-
-`github.com/atotto/clipboard`:Write/Read;`clipboard_read` 工具元数据 `needsConfirm:true`
-Run: 同上
-Expected: PASS
-
-- [ ] **Step 3: Commit**
+- [ ] **Step 2: Commit**
 
 ```bash
-git add -A && git commit -m "feat: clipboard tools"
+git add desktop/src/main/tools/clipboard.ts
+git commit -m "feat: clipboard tools"
 ```
 
 ---
@@ -1163,54 +1227,60 @@ git add -A && git commit -m "feat: clipboard tools"
 ### Task 3.6: 可访问目录模型 + 越界防护
 
 **Files:**
-- Create: `internal/agent/dirs.go`、`internal/agent/dirs_test.go`
-- Modify: `internal/localtools/filesystem.go`(改用共享的路径校验)
+- Modify: `desktop/src/main/tools/filesystem.ts`(抽 `isAllowed` 到 `desktop/src/main/tools/paths.ts`)、`desktop/src/main/store/settings.ts`(allowed_dirs)
+- Create: `desktop/src/main/tools/paths.ts`、`desktop/src/main/tools/paths.test.ts`
 
 - [ ] **Step 1: 写测试(红)**
 
-`dirs_test.go`:`IsAllowed(path, allowedDirs)` — 前缀匹配、`/home/u/a` vs `/home/u/ab` 不误判(必须 `allowed + "/"` 边界)、符号链接 `filepath.EvalSymlinks` 后校验(指向外部 → 拒绝)
-Run: `go test ./internal/agent/ -run TestDirs -count=1`
+`paths.test.ts`:`isAllowed` — 前缀匹配、`/home/u/a` vs `/home/u/ab` 不误判(必须 `allowed + path.sep` 边界)、符号链接 `fs.realpathSync` 后校验(指向外部 → 拒绝)
+Run: `cd desktop && npx vitest run src/main/tools/paths`
 Expected: FAIL
 
 - [ ] **Step 2: 实现**
 
-`dirs.go`:`func IsAllowed(absPath string, allowedDirs []string) bool`;工具层统一调用;Engine 启动时从 settings 读 `allowed_dirs`(默认 `workspaces/`)
-Modify: `filesystem.go` 删掉自带校验,全部走 `IsAllowed`
+`paths.ts`:`isAllowed(absPath, allowedDirs)`;引擎启动时从 settings 读 `allowed_dirs`(默认工作目录 `workspaces/`);所有工具统一调用
 Run: 同上
 Expected: PASS
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add -A && git commit -m "feat: shared allowed-dirs path guard"
+git add desktop/src/main/tools
+git commit -m "feat: shared allowed-dirs path guard"
 ```
 
 ---
 
-### Task 3.7: 高危操作确认协议
+### Task 3.7: 高危操作审批(WorkflowAgent 审批流)
 
 **Files:**
-- Create: `internal/agent/confirm.go`、`internal/agent/confirm_test.go`
-- Modify: `internal/agent/engine.go`、`cmd/desktop/app.go`、`ui/src/components/ConfirmModal.tsx`
+- Modify: `desktop/src/main/agent/engine.ts`、`desktop/src/main/agent/engine.test.ts`、`desktop/src/main/ipc.ts`
+- Create: `desktop/src/renderer/src/components/ConfirmModal.tsx`
 
 - [ ] **Step 1: 写测试(红)**
 
-`confirm_test.go`:`Engine.Run` 中注册工具返回 `needsConfirm` → 引擎发 `confirm_required` 事件并**暂停**(工具结果未返回给 ADK)→ `Confirm(ok=true)` 后继续 → 断言工具执行结果出现在后续事件;`Confirm(ok=false)` → 工具返回拒绝错误给 Agent;60s 未确认 → 自动拒绝
-Run: `go test ./internal/agent/ -run TestConfirm -count=1`
+`engine.test.ts`(Craft 模式 + mock model):模型第一轮返回 tool-call 且该工具 `needsApproval` → `agent.stream()` 返回的 `toolCalls` 含未执行调用(审批前不执行)→ `confirm(requestId, true)` 后工具执行结果出现;`confirm(requestId, false)` → 工具返回拒绝错误;60s 未确认 → 自动拒绝(WorkflowAgent 审批超时配置)
+Run: `cd desktop && npx vitest run src/main/agent`
 Expected: FAIL
 
 - [ ] **Step 2: 实现**
 
-`confirm.go`:确认状态机(请求表 `map[requestID]chan bool` + 超时);引擎在 ADK 工具执行前拦截:`tool needsConfirm` → 发事件 → 等 channel → 决定执行/拒绝
-`app.go` binding:`Confirm(requestID string, ok bool) error`
-`ConfirmModal.tsx`:弹窗(操作名 + 目标路径 + 原因 + 允许/拒绝按钮 + 60s 倒计时)
-Run: 同上 + `wails dev` 手工:让 Agent 执行 `file_delete` 观察弹窗
-Expected: PASS/正常
+`engine.ts`:
+```ts
+// WorkflowAgent 审批流:工具 execute 声明 needsApproval
+// → agent.stream() 产物中 toolCalls 未执行 → emit('confirm_required', { requestId, op, target, reason })
+// → ipc 'agent:confirm' → confirm(requestId, ok) → 以批准输入继续
+```
+`ipc.ts` 增:`agent:confirm` handler;`index.ts` 转发 `confirm_required` 事件到 renderer
+`ConfirmModal.tsx`:弹窗(操作名 + 目标路径 + 原因 + 允许/拒绝 + 60s 倒计时)
+Run: 同上 + 手工验证
+Expected: PASS
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add -A && git commit -m "feat: high-risk operation confirmation protocol"
+git add desktop/src
+git commit -m "feat: workflow approval flow for high-risk tools"
 ```
 
 ---
@@ -1218,52 +1288,57 @@ git add -A && git commit -m "feat: high-risk operation confirmation protocol"
 ### Task 3.8: Craft 模式全流程
 
 **Files:**
-- Modify: `internal/agent/modes.go`、`internal/agent/engine.go`、`internal/agent/engine_test.go`、`ui/src/stores/chat.ts`、`ui/src/components/ToolCalls.tsx`
+- Modify: `desktop/src/main/agent/engine.ts`、`desktop/src/main/agent/modes.ts`、`desktop/src/main/agent/engine.test.ts`
+- Create: `desktop/src/renderer/src/components/ToolCalls.tsx`
 
 - [ ] **Step 1: 写测试(红)**
 
-`engine_test.go` 增(Craft):MockProvider 设计两轮:第一轮 LLM 返回 tool_call(file_read),第二轮返回文本 → 断言:工具执行结果回传、事件流含 tool_start/tool_end、最终 done;`MaxIter` 到达(让 mock 永远返回 tool_call)→ 引擎报错并提示"达到最大迭代次数"
-Run: `go test ./internal/agent/ -run TestCraft -count=1`
-Expected: FAIL(工具未接入引擎)
+`engine.test.ts` 增(Craft):mock model 两轮:第一轮 tool-call(file_read),第二轮文本 → 断言:工具执行结果回传、事件含 tool_start/tool_end、最终 done;`maxSteps` 到达(永远 tool-call)→ 引擎报错"达到最大步骤数"
+Run: `cd desktop && npx vitest run src/main/agent`
+Expected: FAIL
 
 - [ ] **Step 2: 实现**
 
-`engine.go`:注册全部 localtools 到 ToolRegistry;Craft 模式:请求带 tools,完整循环(ADK runner 默认行为);MaxIter 上限;事件 `tool_start/tool_end/tool_error` 按 §0.4.3 发
-`ui/src/components/ToolCalls.tsx`:折叠卡片显示工具名/输入/输出/耗时/失败标红
-Run: 同上 + 手工:登录后 Craft 模式让 Agent 读本机文件
+`engine.ts` Craft 路径:WorkflowAgent(`tools: 全部本地工具`、`maxSteps: 20`);事件 `tool_start/tool_end/tool_error` 按 §0.4.3 发;每 step 结束 `workflow_state` 落库(durable)
+`ToolCalls.tsx`:折叠卡片(工具名/输入/输出/耗时/失败标红)
+Run: 同上 + 手工:登录后 Craft 让 Agent 读本机文件
 Expected: PASS
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add -A && git commit -m "feat: craft mode full agent loop with tool cards"
+git add desktop/src
+git commit -m "feat: craft mode with workflow agent and tool cards"
 ```
 
 ---
 
-### Task 3.9: 产物面板
+### Task 3.9: 产物面板 + durable 恢复
 
 **Files:**
-- Create: `internal/agent/artifacts.go`、`internal/agent/artifacts_test.go`
-- Modify: `ui/src/components/ArtifactsPanel.tsx`、`ui/src/pages/Main.tsx`
+- Create: `desktop/src/main/agent/artifacts.ts`、`desktop/src/main/agent/artifacts.test.ts`、`desktop/src/main/agent/resume.ts`、`desktop/src/renderer/src/components/ArtifactsPanel.tsx`
+- Modify: `desktop/src/main/store/workflow_state.ts`、`desktop/src/main/index.ts`(恢复未完成任务)
 
 - [ ] **Step 1: 写测试(红)**
 
-`artifacts_test.go`:工具写入 `workspaces/<conv>/` 下文件 → 引擎检测到(定时扫描或写入钩子)→ `artifact` 事件(路径/类型/大小)→ localstore.artifacts 落库
-Run: `go test ./internal/agent/ -run TestArtifacts -count=1`
+- `artifacts.test.ts`:工具写入 `workspaces/<conv>/` 下文件 → 引擎检测(每次工具结束后扫描会话目录)→ `artifact` 事件 + artifacts 表落库
+- `resume.test.ts`:workflow_state 表存了状态 → `resumeConversation(convId)` 恢复并继续,事件续推
+Run: `cd desktop && npx vitest run src/main/agent`
 Expected: FAIL
 
 - [ ] **Step 2: 实现**
 
-`artifacts.go`:工作目录管理器(创建/清理);文件写入后扫描(每次工具结束后扫描该会话目录,新增文件 → 事件 + 落库);类型按扩展名(map:`.md→report,.png/.jpg→image,.html→html,.pptx→ppt,.docx→docx,.xlsx→xlsx,其他→file`)
-`ArtifactsPanel.tsx`:右侧面板列出当前会话产物,点击"在文件夹中显示"(binding `RevealInFolder(path)` → `exec open/explorer/xdg-open`)
+`artifacts.ts`:工作目录管理器(创建/清理);类型按扩展名 map(`.md→report,.png/.jpg→image,.html→html,.pptx→ppt,.docx→docx,.xlsx→xlsx,其他→file`)
+`resume.ts`:启动时扫描 `workflow_state` 未完成会话 → UI 提示"有未完成任务,是否恢复" → WorkflowAgent 从持久化状态继续
+`ArtifactsPanel.tsx`:右侧面板列出当前会话产物,点击"在文件夹中显示"(main `shell.showItemInFolder`)
 Run: 同上 + 手工验证
 Expected: PASS
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add -A && git commit -m "feat: artifact detection and side panel"
+git add desktop/src
+git commit -m "feat: artifacts panel and workflow resume"
 ```
 
 ---
@@ -1271,45 +1346,46 @@ git add -A && git commit -m "feat: artifact detection and side panel"
 ### Task 3.10: Plan 模式
 
 **Files:**
-- Modify: `internal/agent/modes.go`、`internal/agent/modes_test.go`、`ui/src/components/ChatInput.tsx`、`ui/src/stores/chat.ts`
+- Modify: `desktop/src/main/agent/modes.ts`、`desktop/src/main/agent/modes.test.ts`、`desktop/src/main/agent/engine.ts`、`desktop/src/renderer/src/components/ChatInput.tsx`、`desktop/src/renderer/src/stores/chat.ts`
 
 - [ ] **Step 1: 写测试(红)**
 
-`modes_test.go`:Plan 首轮 `DisableTools:true` 产出计划 → 用户确认(`ApprovePlan()`)→ 同会话第二轮带工具执行;拒绝则终止
-Run: `go test ./internal/agent/ -run TestPlan -count=1`
+`modes.test.ts`:Plan 首轮 `tools: {}`(无工具)产出计划 → 用户确认(`approvePlan()`)→ 同会话第二轮带 tools 执行;拒绝则终止
+Run: `cd desktop && npx vitest run src/main/agent/modes`
 Expected: FAIL
 
 - [ ] **Step 2: 实现**
 
-`modes.go`:Plan 状态(会话表加 `plan_status` 列:planning|approved|rejected|executing;迁移 `0002_plan.sql`);UI:Plan 消息后显示"执行计划"按钮
+`modes.ts`:Plan 状态(conversations 表加 `plan_status` 列:planning|approved|rejected|executing;迁移 `0002_plan.ts`);UI:Plan 消息后显示"执行计划"按钮
 Run: 同上 + 手工
 Expected: PASS
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add -A && git commit -m "feat: plan-then-execute mode"
+git add desktop/src
+git commit -m "feat: plan-then-execute mode"
 ```
 
 ---
 
-### Task 3.11: Skill 运行时
+### Task 3.11: Skill 运行时(沙盒执行)
 
 **Files:**
-- Create: `internal/localskill/loader.go`、`internal/localskill/loader_test.go`、`internal/localskill/installer.go`、`internal/localskill/installer_test.go`
-- Modify: `internal/agent/engine.go`、`ui/src/pages/Settings.tsx`
+- Create: `desktop/src/main/skill/loader.ts`、`desktop/src/main/skill/loader.test.ts`、`desktop/src/main/skill/installer.ts`、`desktop/src/main/skill/installer.test.ts`
+- Modify: `desktop/src/main/agent/engine.ts`、`desktop/src/renderer/src/pages/Settings.tsx`
 
 - [ ] **Step 1: 写测试(红)**
 
-- `loader_test.go`:构造 `skills/<name>/`(SKILL.md + metadata.yaml + scripts/run.py)→ `Load(name)` 返回 `{Instruction string; Entrypoint string}`;缺 SKILL.md 报错
-- `installer_test.go`:从假商城端点下载 tar.gz → 解压到 skills 目录(路径穿越防护:拒绝 `../` 条目)→ 版本记录在 settings;卸载删目录
-Run: `go test ./internal/localskill/ -count=1`
+- `loader.test.ts`:构造 `skills/<name>/`(SKILL.md + metadata.yaml + scripts/run.py)→ `load(name)` 返回 `{ instruction, entrypoint }`;缺 SKILL.md 报错
+- `installer.test.ts`:从 mock 商城端点下载 tar.gz → 解压到 skills 目录(路径穿越防护:拒绝 `../` 条目)→ 版本记 settings;卸载删目录
+Run: `cd desktop && npx vitest run src/main/skill`
 Expected: FAIL
 
 - [ ] **Step 2: 实现**
 
-`loader.go`:`Load(skillsDir, name)` 读 SKILL.md 全文为 instruction,metadata 校验(version 语义化);`installer.go`:调 `gateway.Marketplace` 下载 archive(带 token)→ 校验 tar 条目(复用 1.11 的 ValidatePackage 思路,客户端独立实现一份)→ 解压;已装列表记 settings `skills.installed`
-`engine.go`:启动时把已装 skill 的 Instruction 拼入 SysPrompt(`## Skills\n` + 各 skill 正文);`skill_exec` 工具注册(scripts 入口,command 子进程,60s 超时,输出截断)
+`loader.ts`:`load(skillsDir, name)` 读 SKILL.md 为 instruction,metadata 校验(语义化版本);`installer.ts`:调 `gateway.marketplace` 下载 archive(带 token)→ tar 条目安全校验(`tar` 流式读取,拒绝 `..`/绝对路径)→ 解压;已装列表记 settings `skills.installed`
+`engine.ts`:启动时已装 skill 的 instruction 拼入 sysPrompt(`## Skills\n` + 正文);`skill_exec <name>` 工具注册(**走沙盒工具 sandboxExec 执行**,60s 超时,输出截断)
 `Settings.tsx`:技能列表(安装/更新/卸载/详情)
 Run: 同上 + 手工:安装示例技能 → 对话中生效
 Expected: PASS
@@ -1317,7 +1393,8 @@ Expected: PASS
 - [ ] **Step 3: Commit**
 
 ```bash
-git add -A && git commit -m "feat: skill loader installer and prompt injection"
+git add desktop/src/main/skill desktop/src/renderer/src/pages/Settings.tsx
+git commit -m "feat: skill loader installer with sandbox exec"
 ```
 
 ---
@@ -1325,24 +1402,22 @@ git add -A && git commit -m "feat: skill loader installer and prompt injection"
 ### Task 3.12: MCP 插件运行时
 
 **Files:**
-- Create: `internal/localmcp/runner.go`、`internal/localmcp/runner_stdio.go`、`internal/localmcp/runner_http.go`、`internal/localmcp/adk_toolset.go`、`internal/localmcp/runner_test.go`
-- Modify: `internal/agent/engine.go`、`ui/src/pages/Settings.tsx`
+- Create: `desktop/src/main/mcp/installer.ts`、`desktop/src/main/mcp/runner.ts`、`desktop/src/main/mcp/adapter.ts`、`desktop/src/main/mcp/runner.test.ts`
+- Modify: `desktop/src/main/agent/engine.ts`、`desktop/src/renderer/src/pages/Settings.tsx`
 
-- [ ] **Step 1: 写测试(红)**
+- [ ] **Step 1: 安装依赖 + 写测试(红)**
 
-- `runner_stdio_test.go`:假 stdio MCP server(起 `go run` 测试进程或 Python 脚本,响应 `initialize`/`tools/list`/`tools/call`)→ 客户端 `ListTools()` 返回工具、`CallTool(name, args)` 返回结果;进程崩溃 → `Restart()` 后可用(自动重启 1 次)
-- `runner_http_test.go`:httptest 假 MCP HTTP server → 直连调用成功
-Run: `go test ./internal/localmcp/ -count=1`
+Run: `cd desktop && npm i @modelcontextprotocol/sdk`
+`runner.test.ts`:mock stdio MCP server(测试脚本进程,响应 `initialize`/`tools/list`/`tools/call`)→ `listTools()` 返回工具、`callTool(name, args)` 返回结果;进程崩溃 → 自动重启 1 次后可调用
+Run: `cd desktop && npx vitest run src/main/mcp`
 Expected: FAIL
 
 - [ ] **Step 2: 实现**
 
-选型:用 `github.com/mark3labs/mcp-go`(Go MCP client/server 库,实施时验证其 v1 版本 API,与本设计签名对齐)
-- `runner.go`:插件注册表(settings 存已装插件 id → 启动时拉配置 → 起 runner)
-- `runner_stdio.go`:spawn(command,args,env 注入)→ JSON-RPC over stdio;崩溃检测(进程退出)→ 自动重启 1 次
-- `runner_http.go`:HTTP client → `POST {url}` JSON-RPC
-- `adk_toolset.go`:把 mcp-go 的工具定义转换为 `agent.ToolDef` + 执行桥(适配 engine 的工具调用路径)
-`engine.go`:启动时加载已启用插件,工具并入注册表;插件工具执行失败 → tool_error 事件
+`installer.ts`:商城配置拉取(`GET /api/marketplace/mcp/:id/config` 带 token)→ 存 `mcp/<plugin-id>/config.json`(env 敏感值仅在内存)
+`runner.ts`:配置 `transport: stdio` → `StdioClientTransport(command, args, env)` + `Client`(initialize/handshake)→ 崩溃监听(进程退出)→ 自动重启 1 次;`transport: http` → `StreamableHTTPClientTransport(url, headers)`
+`adapter.ts`:把 MCP 工具定义转换为 AI SDK `tool`(`inputSchema: z.object(JSON Schema 转换)`),execute 桥接 `callTool`
+`engine.ts`:启动时加载已启用插件,工具并入注册表;插件失败 → tool_error
 `Settings.tsx`:插件列表(启用/禁用/查看配置脱敏/卸载)
 Run: 同上 + 手工:安装 xiaohongshu 类插件调用
 Expected: PASS
@@ -1350,7 +1425,8 @@ Expected: PASS
 - [ ] **Step 3: Commit**
 
 ```bash
-git add -A && git commit -m "feat: local MCP plugin runtime with stdio and http"
+git add desktop/src/main/mcp desktop/package.json desktop/package-lock.json
+git commit -m "feat: local mcp plugin runtime with stdio and http"
 ```
 
 ---
@@ -1358,24 +1434,25 @@ git add -A && git commit -m "feat: local MCP plugin runtime with stdio and http"
 ### Task 3.13: 设置页
 
 **Files:**
-- Create: `ui/src/pages/Settings.tsx`(完整版)、`internal/localstore/settings.go` 扩展
-- Modify: `cmd/desktop/app.go`(settings bindings)
+- Create: `desktop/src/renderer/src/pages/Settings.tsx`(完整版)、`desktop/src/main/store/settings.ts` 扩展
+- Modify: `desktop/src/preload/index.ts`、`desktop/src/main/ipc.ts`
 
 - [ ] **Step 1: 实现**
 
-设置项(binding `GetSettings/SetSettings`):
-- 模型:拉 `/v1/models` 选择默认模型(settings `model.default`)
-- 工作目录:默认 `~/.local/share/picoaide/workspaces`,可改
+设置项(binding `settings:get`/`settings:set`):
+- 模型:`GET /v1/models` 拉列表选择默认模型(settings `model.default`)
+- 工作目录:默认 `workspaces/`,可改
 - 可访问目录:列表增删(settings `allowed_dirs`,JSON 数组)
 - 插件/技能:复用 3.11/3.12 的管理区
 - 服务端信息:URL/用户名显示,登出按钮
-Run: `wails dev` 逐项验证保存/重启后生效
+Run: `cd desktop && npm run build && npx electron .` 逐项验证保存/重启生效
 Expected: 正常
 
 - [ ] **Step 2: Commit**
 
 ```bash
-git add -A && git commit -m "feat: settings page for model dirs and plugins"
+git add desktop/src
+git commit -m "feat: settings page for model dirs and plugins"
 ```
 
 ---
@@ -1384,17 +1461,18 @@ git add -A && git commit -m "feat: settings page for model dirs and plugins"
 
 - [ ] **Step 1: 全量测试**
 
-Run: `make test && go test ./... -count=1`
+Run: `cd desktop && npm test && npm run typecheck`
 Expected: PASS
 
 - [ ] **Step 2: 真实任务端到端(本机)**
 
 准备:桌面目录放 2-3 个 .docx/.md 文件;服务端知识库上传一篇文档
 1. Craft 模式:"汇总桌面/文档里的文件,生成 500 字汇报保存到桌面" → 产物出现在产物面板 → 打开文件内容正确
-2. 高危:要求 Agent 删除文件 → 弹窗 → 拒绝后 Agent 收到拒绝
-3. 技能:安装一个商城技能 → 新对话中生效
+2. 高危:要求 Agent 删除文件 → 审批弹窗 → 拒绝后 Agent 收到拒绝
+3. 技能:安装一个商城技能 → 新对话中生效(脚本在沙盒执行)
 4. 插件:安装 stdio 插件 → 对话中调用成功
 5. 知识库:Ask Agent 查询知识库文档 → 返回正确内容
+6. 长任务:让 Agent 执行多步任务,任务中途重启客户端 → 提示恢复 → 继续完成
 Expected: 全部通过
 
 - [ ] **Step 3: 合并 master**
@@ -1414,26 +1492,35 @@ git checkout master && git merge dev && git tag -a v0.3.0 -m "local capabilities
 ### Task 4.1: 三平台打包
 
 **Files:**
-- Create: `scripts/pkg-linux.sh`、`scripts/pkg-windows.sh`、`scripts/pkg-macos.sh`、`Makefile` 增 `pkg-*` 目标
+- Create: `desktop/electron-builder.yml`(完善)、`scripts/pkg-linux.sh`、`scripts/pkg-windows.sh`、`scripts/pkg-macos.sh`、`Makefile` 增 `pkg-*` 目标
 
-- [ ] **Step 1: 编写打包脚本**
+- [ ] **Step 1: 配置 electron-builder**
 
-- Linux:Wails 产出二进制 → `deb`(用 `nFPM` 或 `dpkg-deb`,依赖 libwebkit2gtk-4.1)+ `AppImage`(可选);产物到 `dist/`
-- Windows:Wails NSIS 安装器(icon/名称/版本);产物 `dist/picoaide-setup.exe`
-- macOS:`wails build -platform darwin` + `dmg`(用 `hdiutil` 或 `create-dmg`)
-Run: 三平台各跑一次(本机为 Linux 时,Windows/macOS 在 CI 或对应机器验证)
-Expected: 三平台安装包产出,安装后可启动登录
+`desktop/electron-builder.yml`:
+```yaml
+appId: com.picoaide.desktop
+productName: PicoAide
+directories: { output: ../dist, buildResources: resources }
+files: [dist/**]
+linux: { target: [deb, AppImage], category: Utility }
+win: { target: [nsis] }
+nsis: { oneClick: false, allowToChangeInstallationDirectory: true }
+mac: { target: [dmg], category: public.app-category.productivity }
+```
+- [ ] **Step 2: 打包脚本**
 
-- [ ] **Step 2: 版本号注入**
-
-`wails.json`/`app.go` 从 `VERSION` 环境变量注入(`-X main.Version`),安装包文件名带版本
-Run: `make pkg-linux VERSION=0.4.0`
-Expected: 产物名 `picoaide_0.4.0_amd64.deb`
+- Linux:`npm run build && electron-builder --linux` → `dist/picoaide_0.4.0_amd64.deb` + AppImage
+- Windows:`electron-builder --win` → `dist/picoaide-setup.exe`(CI 或 Windows 机器)
+- macOS:`electron-builder --mac` → `dist/picoaide.dmg`(CI 或 mac 机器)
+- 版本号从 `package.json` version 注入
+Run: `bash scripts/pkg-linux.sh`
+Expected: Linux 安装包产出,安装后可启动登录(Windows/macOS 在 CI 或对应机器验证)
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add -A && git commit -m "feat: three-platform packaging scripts"
+git add desktop/electron-builder.yml scripts/ Makefile
+git commit -m "feat: three-platform electron packaging"
 ```
 
 ---
@@ -1465,7 +1552,7 @@ git add -A && git commit -m "feat: usage charts and knowledge admin"
 
 - [ ] **Step 1: 按 §11 文档计划编写**
 
-内容以设计文档(`docs/superpowers/specs/2026-08-01-picoaide-next-architecture-design.md`)为准,更新为实际实现细节(端点/表/目录有出入处以代码为准)
+内容以设计文档为准,更新为实际实现细节(端点/表/目录有出入处以代码为准;客户端章节按 Electron/AI SDK/WorkflowAgent/Sandbox 实际实现写)
 - `README.md`:项目简介、快速开始(服务端 + 客户端)、截图占位
 Run: 通读全文,交叉检查 API/表名与代码一致(用 `grep` 抽查 3 处)
 Expected: 一致
@@ -1481,20 +1568,22 @@ git add -A && git commit -m "docs: full documentation set"
 ### Task 4.4: 性能优化
 
 **Files:**
-- Modify: `internal/agent/engine.go`、`ui/src/components/Messages.tsx`、`internal/localstore/db.go`
+- Modify: `desktop/src/main/agent/engine.ts`、`desktop/src/renderer/src/components/Messages.tsx`、`desktop/src/main/store/db.ts`
 
 - [ ] **Step 1: 实施与验证**
 
 - 流式渲染节流:React `useDeferredValue`/requestAnimationFrame 合并 text_delta 渲染(>10 delta/s 时),验证长回复无卡顿
-- SQLite WAL 自动检查点:`PRAGMA wal_autocheckpoint(1000)`,会话页加载 >200 条消息时分页(先加载最近 100,向上滚动加载更多)
+- SQLite WAL 自动检查点:`PRAGMA wal_autocheckpoint(1000)`;会话页加载 >200 条消息时分页(先加载最近 100,向上滚动加载更多)
 - OCR 惰性加载回归确认(3.4 已做,此处复验)
-Run: `wails dev` 长对话(50+ 轮)滚动流畅;`time go test ./...` 无明显退化
+- Workflow 状态序列化大小控制:每 step 状态压缩/精简后落库
+Run: `cd desktop && npm run build && npx electron .` 长对话(50+ 轮)滚动流畅;`npm test` 无明显退化
 Expected: 流畅
 
 - [ ] **Step 2: Commit**
 
 ```bash
-git add -A && git commit -m "perf: streaming throttle and message pagination"
+git add desktop/src
+git commit -m "perf: streaming throttle and message pagination"
 ```
 
 ---
@@ -1512,14 +1601,15 @@ Expected: 全绿
 
 - [ ] **Step 2: 客户端冒烟**
 
-在打包产物上:启动 → 自动登录(预设 config.json)→ 发起一次 Ask → 断言收到 done 事件(用 `wails dev` 日志或临时 E2E hook 输出结果文件)
+在打包产物上:启动 → 自动登录(预设 config)→ 发起一次 Ask → 断言收到 done 事件(用 Electron 日志或临时 E2E hook 输出结果文件)
 Run: 打包机上执行
 Expected: 通过
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add -A && git commit -m "test: e2e smoke scripts"
+git add scripts/e2e
+git commit -m "test: e2e smoke scripts"
 ```
 
 ---
@@ -1529,7 +1619,7 @@ git add -A && git commit -m "test: e2e smoke scripts"
 - [ ] **Step 1: 版本与发布**
 
 ```bash
-make pkg-linux VERSION=0.4.0 && make pkg-windows VERSION=0.4.0 && make pkg-macos VERSION=0.4.0
+bash scripts/pkg-linux.sh && bash scripts/pkg-windows.sh && bash scripts/pkg-macos.sh
 git checkout master && git merge dev && git tag -a v0.4.0 -m "picoaide desktop 0.4.0"
 ```
 Expected: 三平台安装包在 `dist/`,tag 建立
@@ -1551,10 +1641,12 @@ git add CHANGELOG.md && git commit -m "docs: changelog for 0.4.0"
 ## 自审记录(计划编写时完成)
 
 **Spec 覆盖检查:**
-- §3.1 客户端技术栈 → Task 2.1(壳)/2.2(DB)/2.3(ADK)/2.4(网关客户端)
-- §3.3 Agent 引擎三模式 → Task 2.3/2.5(Ask)、3.8(Craft)、3.10(Plan)
+- §3.1 客户端技术栈 → Task 2.1(壳)/2.2(DB)/2.3(引擎探针)/2.4(网关客户端)
+- §3.3 Agent 引擎三模式 + durable + 沙盒 → Task 2.3/2.5(Ask)、3.8(Craft)、3.10(Plan)、3.9(恢复)、3.3/3.11(沙盒)
+- §3.3a 长任务与恢复 → Task 3.9(resume)
+- §3.3b 沙盒执行 → Task 3.3(工具)、3.11(skill 脚本)
 - §3.4 本地工具全表 → Task 3.1-3.5
-- §3.5 本地 SQLite 五表 → Task 2.2
+- §3.5 本地 SQLite 六表(含 workflow_state)→ Task 2.2
 - §3.6 本地 MCP 运行时 → Task 3.12
 - §3.7 Skill 运行时 → Task 3.11
 - §4.1 认证(本地/LDAP/OIDC/token)→ Task 1.4-1.7
@@ -1562,15 +1654,17 @@ git add CHANGELOG.md && git commit -m "docs: changelog for 0.4.0"
 - §4.3/4.4 商城 → Task 1.11-1.13
 - §4.5 知识库 + 远程 MCP → Task 1.14-1.15
 - §4.7 管理页 → Task 1.16/4.2
-- §5 安全(高危确认/越界/加密)→ Task 1.13/3.6/3.7
-- §6 错误边界 → 分散在各任务测试(超时/重连/确认超时)
+- §5 安全(审批/越界/加密)→ Task 1.13/3.6/3.7
+- §6 错误边界 → 分散在各任务测试(超时/重连/审批超时)
 - §8 实施阶段 → 全部映射为 Task 1.1-4.6
 
-**待实施时确认的选型**(不影响任务结构,在每个任务内决策并记录):OCR 引擎(gosseract vs 纯 Go)、MCP Go 库(mark3labs/mcp-go 版本 API)、中文 FTS5(unicode61 vs trigram)、web_search 端点、Wails 前端模板目录名。
+**待实施时确认的选型**(不影响任务结构,在每个任务内决策并记录):OCR 引擎(tesseract.js 语言包加载方式)、MCP TS SDK 版本 API(@modelcontextprotocol/sdk v1)、中文 FTS5(unicode61 vs trigram)、web_search 端点、Vercel Sandbox 生产凭证接入方式、ai-elements init 产物位置。
 
 **类型/签名一致性检查:**
-- `agent.Provider`/`agent.StreamEvent`(Task 2.3 定义)→ 2.4/2.5/3.8 一致引用
-- `agent.ToolDef`(Task 3.1 引入)→ 3.11/3.12 复用
-- `localstore.Store`(Task 2.2)→ 2.3/2.5/3.6/3.9 一致
-- `Event`(§0.4.3)→ 2.5 定义、2.6/3.7/3.8/3.9 消费,字段名固定
-- `Confirm(requestID, ok)`(Task 3.7)→ app.go binding 与 ConfirmModal 同签名
+- `createGatewayModel(serverURL, token, modelID)`(Task 2.3 定义)→ 2.5/3.8 一致引用
+- `AgentEvent`(§0.4.3 TS 版)→ 2.3 定义、2.6/3.7/3.8/3.9 消费,字段名固定
+- `buildRunConfig(mode, tools, maxSteps)`(Task 2.5)→ 3.8/3.10 复用
+- `isAllowed(absPath, allowedDirs)`(Task 3.6)→ 3.1/3.2 复用
+- `confirm(requestId, ok)`(Task 3.7)→ preload/ipc 与 ConfirmModal 同签名
+- `store.*` 方法(任务 2.2)→ 2.5/3.9/3.10 一致
+- 服务端 Go 侧签名(阶段 1)不受客户端改动影响,保持任务 1.x 原文
