@@ -172,9 +172,27 @@ func nullIfEmpty(s string) any {
 	return s
 }
 
-// DeleteUser removes a user by id.
+// DeleteUser removes a user and all their FK-referenced rows
+// (api_tokens, usage, admin_sessions, mcp_config_downloads, user_groups)
+// in a single transaction so deletion never trips the FK constraint.
 func DeleteUser(db *sql.DB, id int64) error {
-	res, err := db.Exec("DELETE FROM users WHERE id = ?", id)
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, stmt := range []string{
+		"DELETE FROM api_tokens WHERE user_id = ?",
+		"DELETE FROM usage WHERE user_id = ?",
+		"DELETE FROM admin_sessions WHERE user_id = ?",
+		"DELETE FROM mcp_config_downloads WHERE user_id = ?",
+		"DELETE FROM user_groups WHERE user_id = ?",
+	} {
+		if _, err := tx.Exec(stmt, id); err != nil {
+			return err
+		}
+	}
+	res, err := tx.Exec("DELETE FROM users WHERE id = ?", id)
 	if err != nil {
 		return err
 	}
@@ -182,5 +200,5 @@ func DeleteUser(db *sql.DB, id int64) error {
 	if n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	return tx.Commit()
 }
