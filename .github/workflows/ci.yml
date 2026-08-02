@@ -40,3 +40,45 @@ jobs:
           if [ -d webadmin ] && [ -f webadmin/package.json ]; then
             cd webadmin && npm ci && npm run build
           fi
+
+  package-windows:
+    runs-on: windows-latest
+    needs: [server, desktop, webadmin]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: package
+        run: |
+          cd desktop
+          npm ci
+          npm test
+          npm run typecheck
+          npm run build
+          npx electron-builder --win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: picoaide-windows
+          path: desktop/dist/*.exe
+
+  package-macos:
+    runs-on: macos-latest
+    needs: [server, desktop, webadmin]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: package
+        run: |
+          cd desktop
+          npm ci
+          npm test
+          npm run typecheck
+          npm run build
+          npx electron-builder --mac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: picoaide-macos
+          path: desktop/dist/*.dmg
