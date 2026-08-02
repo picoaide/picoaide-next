@@ -741,7 +741,7 @@ git add -A && git commit -m "feat: bootstrap config and admin business APIs"
 - Login:超管登录(session cookie)
 - Users:列表(分页)/创建(用户名+密码+admin 勾选)/禁用/删除
 - Gateway:上游 provider CRUD(base_url + api_key 输入框,回显掩码)、models 管理、**默认模型设置、web 抓取私有网段开关**
-- Usage:按日/用户/模型的聚合表 + 简单柱状图(纯 CSS,不引图表库)
+- Usage:按日/用户/模型的聚合表 + **柱状图(shadcn `chart` 组件,基于 Recharts,`npx shadcn@latest add chart`)**
 - Marketplace:skills 上架(Git URL 表单)/下架;mcp 插件 CRUD(transport/command/args/url/env/headers/description;无 grants——员工自选安装)+ **凭证下载审计表**
 Run: `cd webadmin && npm install && npm run build`,然后启动服务端访问 `/admin/` 手工验证五个页面 CRUD 与 `make test-server`
 Expected: 页面可用,测试通过
@@ -1082,7 +1082,7 @@ git commit -m "feat: ask-mode engine with ipc bridge"
 - [ ] **Step 1: 安装依赖 + 初始化 shadcn/ui + 状态层准备**
 
 Run: `cd desktop && npm i zustand && npm i -D tailwindcss @tailwindcss/vite && npx shadcn@latest init`(Vite 模式;按 CLI 输出接入 Tailwind 4 + globals.css)
-Run: `cd desktop && npx shadcn@latest add button input textarea card scroll-area dialog`(按需拉取 shadcn 组件到 `components/ui/`)
+Run: `cd desktop && npx shadcn@latest add button input textarea card scroll-area dialog`(按需拉取 shadcn 组件到 `components/ui/`;webadmin 侧另加 `chart`(Recharts)供用量柱状图)
 Expected: 安装成功,Tailwind + shadcn 组件就绪(`components/ui/` 生成)
 
 - [ ] **Step 2: 状态层 + API 封装**
@@ -1752,7 +1752,7 @@ git commit -m "feat: three-platform electron packaging"
 
 - [ ] **Step 1: 用量图表 + 知识库上传**
 
-- Usage:按日柱状图(纯 CSS div 高度)、按模型/用户排行表、日期范围筛选(API:`/api/admin/usage?from=&to=&group=day|model|user`,1.16a 已实现)
+- Usage:**按日柱状图(shadcn chart/Recharts bar chart)**、按模型/用户排行表、日期范围筛选(API:`/api/admin/usage?from=&to=&group=day|model|user`,1.16a 已实现)
 - Knowledge:文档上传(**txt/md 已有;docx/pdf 补文本抽取:选库实施期定,如 `ledongthuc/pdf` + docx 解析库,抽取失败给出明确错误**)、文件夹管理、用户/组授权、搜索预览(API 为 1.16b 的 `/api/admin/kb/*`)
 Run: `cd webadmin && npm run build`,手工验证
 Expected: 正常

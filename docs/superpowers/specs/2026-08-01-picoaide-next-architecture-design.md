@@ -147,7 +147,7 @@ PicoAide(旧)是浏览器 Web UI + 服务端沙箱(overlayfs + netns)模式,存�
 | Agent 引擎 | Vercel AI SDK(`ai` + `@ai-sdk/openai-compatible`) | 最新 |
 | 长任务/审批 | streamText 多步循环(自管步数上限 20)+ 工具 execute 内审批门控 | 消息落库,中断标记 `running` 可重跑;审批 60s 超时拒绝 |
 | 沙盒执行 | `@ai-sdk/sandbox-just-bash` | 本地受限会话,不可信代码/脚本,数据不出本机 |
-| UI 组件 | shadcn/ui(复制粘贴式)+ Tailwind CSS | 聊天/工具卡片/确认弹窗/表格/表单;客户端与 webadmin 统一 |
+| UI 组件 | shadcn/ui(复制粘贴式)+ Tailwind CSS | 聊天/工具卡片/确认弹窗/表格/表单/**图表(chart 基于 Recharts)**;客户端与 webadmin 统一 |
 | 本地数据库 | better-sqlite3 | 最新(主进程同步 API;需 `@electron/rebuild` 匹配 ABI) |
 | 前端 | React 18 + TypeScript + Vite(electron-vite) | 最新 |
 | 本地 MCP | @modelcontextprotocol/sdk(Client) | 最新 |
