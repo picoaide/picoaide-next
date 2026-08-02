@@ -1,9 +1,33 @@
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
+import Login from './pages/Login'
+import Main from './pages/Main'
+import { useAuthStore } from './stores/auth'
+import { useChatStore } from './stores/chat'
+import { useConnectionStore } from './stores/connection'
 
 export default function App() {
-  const [version, setVersion] = useState('')
+  const authStatus = useAuthStore((s) => s.status)
+
   useEffect(() => {
-    window.picoaide.version().then(setVersion)
+    const offAgent = window.picoaide.onAgentEvent((ev) => useChatStore.getState().onAgentEvent(ev))
+    const offConn = window.picoaide.onConnectionStatus((status) => {
+      if (status === 'trusting_cert') return
+      useConnectionStore.getState().setStatus(status)
+      if (status === 'auth_expired') useAuthStore.getState().handleAuthExpired()
+    })
+    const offLoggedIn = window.picoaide.onLoggedIn((session) => {
+      useAuthStore.getState().applySession(session)
+    })
+    void useAuthStore.getState().init()
+    return () => {
+      offAgent()
+      offConn()
+      offLoggedIn()
+    }
   }, [])
-  return <div style={{ padding: 24, fontFamily: 'sans-serif' }}>PicoAide v{version}</div>
+
+  if (authStatus === 'unknown') {
+    return <div className="flex h-screen items-center justify-center text-sm text-muted-foreground">正在连接…</div>
+  }
+  return authStatus === 'loggedIn' ? <Main /> : <Login />
 }
