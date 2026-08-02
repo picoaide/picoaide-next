@@ -21,6 +21,9 @@ type migration struct {
 // migrations is populated in init() from embedded SQL files sorted by name.
 var migrations []migration
 
+// latestMigration is the highest applied version.
+var latestMigration int64
+
 func init() {
 	entries, err := migrationFS.ReadDir("migrations")
 	if err != nil {
@@ -43,6 +46,9 @@ func init() {
 		migrations = append(migrations, migration{version: v, name: e.Name(), sql: string(content)})
 	}
 	sort.Slice(migrations, func(i, j int) bool { return migrations[i].version < migrations[j].version })
+	if len(migrations) > 0 {
+		latestMigration = int64(migrations[len(migrations)-1].version)
+	}
 }
 
 // ApplyMigrations creates the schema_migrations table and applies all pending

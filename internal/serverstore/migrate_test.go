@@ -26,8 +26,8 @@ func TestApplyMigrations(t *testing.T) {
 	if err := db.QueryRow("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").Scan(&version); err != nil {
 		t.Fatalf("schema_migrations: %v", err)
 	}
-	if version != 1 {
-		t.Fatalf("version = %d, want 1", version)
+	if version != latestMigration {
+		t.Fatalf("version = %d, want %d", version, latestMigration)
 	}
 
 	// idempotent
@@ -38,8 +38,8 @@ func TestApplyMigrations(t *testing.T) {
 	if err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&n); err != nil {
 		t.Fatalf("count: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("migration rows = %d, want 1", n)
+	if n != len(migrations) {
+		t.Fatalf("migration rows = %d, want %d", n, len(migrations))
 	}
 }
 
