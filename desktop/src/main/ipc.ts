@@ -84,6 +84,7 @@ export interface IpcHandlers {
   'chat:list': () => ConversationRow[]
   'chat:listRunning': () => ConversationRow[]
   'chat:messages': (input: { conversationId: number }) => MessageRow[]
+  'chat:messagesPaged': (input: { conversationId: number; offset: number; limit: number }) => MessageRow[]
   'chat:artifacts': (input: { conversationId: number }) => ArtifactRow[]
   'chat:delete': (input: { conversationId: number }) => void
   'agent:confirm': (input: { requestId: string; ok: boolean }) => void
@@ -183,6 +184,13 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
     'chat:listRunning': () =>
       deps.store.listConversations().filter((c) => c.status === 'running' || c.status === 'executing'),
     'chat:messages': ({ conversationId }) => deps.store.listMessages(conversationId),
+    // 分页(4.4):offset 从最新消息往前数,offset=0 返回最新 limit 条
+    'chat:messagesPaged': ({ conversationId, offset, limit }) => {
+      const all = deps.store.listMessages(conversationId)
+      const end = all.length - offset
+      const start = Math.max(0, end - limit)
+      return all.slice(start, end)
+    },
     'chat:artifacts': ({ conversationId }) => deps.store.listArtifacts(conversationId),
     'chat:delete': ({ conversationId }) => deps.store.deleteConversation(conversationId),
     'artifact:showInFolder': ({ path }) => {

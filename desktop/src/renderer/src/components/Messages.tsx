@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useDeferredValue, useEffect, useRef } from 'react'
 import { ScrollArea } from './ui/scroll-area'
 import { cn } from '../lib/utils'
 import ToolCalls from './ToolCalls'
@@ -9,12 +9,16 @@ interface MessagesProps {
   streaming: boolean
   streamingText: string
   toolCalls: ToolCallView[]
+  hasMore: boolean
+  onLoadEarlier: () => void
   error: string | null
 }
 
-export default function Messages({ messages, streaming, streamingText, toolCalls, error }: MessagesProps) {
+export default function Messages({ messages, streaming, streamingText, toolCalls, error, hasMore, onLoadEarlier }: MessagesProps) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const nearBottom = useRef(true)
+  // 性能(4.4):流式文本经 useDeferredValue 降级渲染优先级,长回复不阻塞交互
+  const deferredStreaming = useDeferredValue(streamingText)
 
   useEffect(() => {
     if (nearBottom.current) bottomRef.current?.scrollIntoView({ block: 'end' })
@@ -46,7 +50,7 @@ export default function Messages({ messages, streaming, streamingText, toolCalls
           {streaming && (
             <div className="flex justify-start">
               <div className="max-w-[80%] whitespace-pre-wrap rounded-lg border bg-card px-3 py-2 text-sm text-card-foreground">
-                {streamingText}
+                {deferredStreaming}
                 <span className="ml-0.5 inline-block w-1.5 animate-pulse bg-foreground" aria-hidden />
                 <ToolCalls calls={toolCalls} />
               </div>

@@ -7,6 +7,10 @@ import { useConnectionStore } from './connection'
 
 export type Mode = 'ask' | 'plan' | 'craft'
 
+let pendingDelta = ''
+let rafScheduled = false
+const PAGE_SIZE = 100
+
 export interface ChatMessage {
   id: number
   role: string
@@ -48,6 +52,9 @@ interface ChatState {
   toolCalls: ToolCallView[]
   mode: Mode
   localError: string | null
+  hasMoreMessages: boolean
+  loadedTotal: number
+  loadEarlierMessages: () => Promise<void>
   newConversation: () => Promise<number | null>
   loadConversations: () => Promise<void>
   selectConversation: (id: number) => Promise<void>
@@ -75,11 +82,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   toolCalls: [],
   mode: 'ask',
   localError: null,
+  hasMoreMessages: false,
+  loadedTotal: 0,
 
   newConversation: async () => {
     const id = await picoaide().chatNew({ mode: get().mode })
     const conversations = await picoaide().chatList()
-    set({ conversations, activeId: id, messages: [], artifacts: [], streaming: false, streamingText: '', toolCalls: [], localError: null })
+    set({ conversations, activeId: id, messages: [], artifacts: [], streaming: false, streamingText: '', toolCalls: [], localError: null, hasMoreMessages: false, loadedTotal: 0 })
     return id
   },
 
@@ -87,10 +96,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ conversations: await picoaide().chatList() })
   },
 
+  // 分页(4.4):首次加载最近 PAGE_SIZE 条,向上滚动加载更早
   selectConversation: async (id) => {
-    const messages = mapMessages(await picoaide().chatMessages(id))
-    const artifacts = await picoaide().chatArtifacts(id)
-    set({ activeId: id, messages, artifacts, streaming: false, streamingText: '', toolCalls: [], localError: null })
+    const [all, artifacts] = await Promise.all([picoaide().chatMessages(id), picoaide().chatArtifacts(id)])
+    const page = mapMessages(all.slice(-PAGE_SIZE))
+    set({
+      activeId: id,
+      messages: page,
+      artifacts,
+      hasMoreMessages: all.length > PAGE_SIZE,
+      loadedTotal: page.length,
+      streaming: false,
+      streamingText: '',
+      toolCalls: [],
+      localError: null,
+    })
+  },
+
+  loadEarlierMessages: async () => {
+    const { activeId, loadedTotal } = get()
+    if (activeId === null) return
+    const rows = await picoaide().chatMessagesPaged({ conversationId: activeId, offset: loadedTotal, limit: PAGE_SIZE })
+    if (rows.length === 0) {
+      set({ hasMoreMessages: false })
+      return
+    }
+    set((s) => ({
+      messages: [...mapMessages(rows), ...s.messages],
+      loadedTotal: s.loadedTotal + rows.length,
+      hasMoreMessages: rows.length === PAGE_SIZE,
+    }))
   },
 
   deleteConversation: async (id) => {
@@ -175,7 +210,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
   onAgentEvent: (ev) => {
     switch (ev.type) {
       case 'text_delta':
-        set((s) => ({ streamingText: s.streamingText + ev.data }))
+        // 性能(4.4):rAF 合帧渲染,>10 delta/s 的长回复不卡顿;渲染侧再叠 useDeferredValue
+        pendingDelta += ev.data
+        if (!rafScheduled && typeof requestAnimationFrame === 'function') {
+          rafScheduled = true
+          requestAnimationFrame(() => {
+            rafScheduled = false
+            const chunk = pendingDelta
+            pendingDelta = ''
+            if (chunk) set((s) => ({ streamingText: s.streamingText + chunk }))
+          })
+        } else if (typeof requestAnimationFrame !== 'function') {
+          set((s) => ({ streamingText: s.streamingText + ev.data }))
+        }
         break
       case 'tool_start':
         set((s) => ({

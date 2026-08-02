@@ -24,6 +24,8 @@ export default function Main() {
   const streamingText = useChatStore((s) => s.streamingText)
   const toolCalls = useChatStore((s) => s.toolCalls)
   const localError = useChatStore((s) => s.localError)
+  const hasMoreMessages = useChatStore((s) => s.hasMoreMessages)
+  const loadEarlierMessages = useChatStore((s) => s.loadEarlierMessages)
   const connStatus = useConnectionStore((s) => s.status)
   const { newConversation, loadConversations, selectConversation, deleteConversation } = useChatStore.getState()
 
@@ -109,6 +111,8 @@ export default function Main() {
                   streamingText={streamingText}
                   toolCalls={toolCalls}
                   error={localError}
+                  hasMore={hasMoreMessages}
+                  onLoadEarlier={() => void loadEarlierMessages()}
                 />
               </div>
               <ChatInput />
