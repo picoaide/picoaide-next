@@ -830,6 +830,19 @@ kb_folders / kb_documents / kb_folder_users / kb_folder_groups / kb_audit_logs
 
 每个非平凡逻辑模块必须带至少一个可运行测试(Go `_test.go` / TS `*.test.ts`),CI 跑 `make check`。
 
+### 7.1 AI 全自动化测试(测试即代码)
+
+**定位:AI 是测试生成者,CI 是执行者,全链路无人值守自动化。**
+
+- **AI 生成测试**:每个任务完成实现后,由 AI 编码代理读取实现代码,自动生成/补全:单元测试(正常/边界/异常分支)、mock(模型/上游/IdP/进程)、E2E 脚本;生成后必须经"红-绿"验证(先看测试失败于未实现行为,再看实现后通过),禁止"为绿而绿"的测试
+- **执行自动化**:所有测试进 CI(GitHub Actions)——job1 Go 全量、job2 desktop Vitest+typecheck+build、job3 webadmin build、阶段 4 追加三平台测试+打包矩阵(ubuntu/windows/macos runner 各跑本平台 npm test 与打包)
+- **审批测试钩子**:引擎支持 env 钩子(`PICOAI_TEST_AUTO_APPROVE=1` 自动允许 / `=0` 自动拒绝),**仅测试/CI 构建启用,打包产物不含钩子路径**,E2E 无需人工点弹窗;单测仍直接测 `confirm(requestId, ok)` 全分支
+- **浏览器插件 E2E**:Playwright 驱动真实 Chrome/Edge 加载 `browser-extension/`(MV3),连接真实客户端 CDP 端口,断言 tabInfo/getContent/click/navigate 全链路(CI 用 `xvfb-run` 无头)
+- **自动化覆盖边界(保留人工)**:
+  - 真实企业环境联调(真实 LDAP/OIDC 服务器、真实内网系统/页面)——CI 无法复现,阶段验收人工
+  - 手感/视觉体验(真实窗口动画、滚动流畅度)——人工抽查
+  - 其余全部(后端/主进程/renderer/插件/打包产物冒烟)自动
+
 ---
 
 ## 8. 实施阶段(共 4 阶段)

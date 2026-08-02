@@ -132,7 +132,7 @@ Expected: PASS
 
 - [ ] **Step 6: 写 CI 工作流 + embed 占位**
 
-Create: `.github/workflows/ci.yml` — 触发:push/PR;job1(ubuntu):`make test-server` + `go build ./...`;job2(ubuntu):`[ -f desktop/package.json ] && (cd desktop && npm ci && npm test && npm run typecheck && npm run build) || true`(desktop 目录 2.1 才建,未建时跳过,防阶段 1 期间 CI 红);job3(ubuntu):`[ -d webadmin ] && (cd webadmin && npm ci && npm run build) || true`(webadmin 目录 1.16c 才建,**未建时跳过**;阶段 4 追加三平台打包矩阵)
+Create: `.github/workflows/ci.yml` — 触发:push/PR;job1(ubuntu):`make test-server` + `go build ./...`;job2(ubuntu):`[ -f desktop/package.json ] && (cd desktop && npm ci && npm test && npm run typecheck && npm run build) || true`(desktop 目录 2.1 才建,未建时跳过,防阶段 1 期间 CI 红);job3(ubuntu):`[ -d webadmin ] && (cd webadmin && npm ci && npm run build) || true`(webadmin 目录 1.16c 才建,**未建时跳过**;阶段 4 追加三平台**测试+打包**矩阵并启用插件 E2E)
 Create: `webadmin/dist/index.html` **占位文件**(内容为"webadmin 未构建";1.16a 的 go:embed 依赖此文件存在,否则空目录 embed 编译失败;1.16c 构建后自动替换)
 Run: 推送到 GitHub 验证绿
 Expected: 三个 job 全绿(1.1-1.16a 期间 job2/job3 自动跳过)
@@ -1398,6 +1398,7 @@ Expected: FAIL
 // → 主进程缓冲 confirm_required 事件,renderer 就绪后补发(防弹窗丢失)
 // → ConfirmModal 按 request_id 串行排队,一次一个弹窗
 ```
+**审批测试钩子**:引擎读 env `PICOAI_TEST_AUTO_APPROVE`(`1` 自动允许 / `0` 自动拒绝),**仅测试构建生效(打包时剔除),E2E 免人工点弹窗**;单测直接测 `confirm()` 全分支
 `ipc.ts` 增:`agent:confirm` handler;`index.ts` 转发 `confirm_required` 事件到 renderer(带缓冲)
 `ConfirmModal.tsx`:弹窗(操作名 + 目标路径 + 原因 + 允许/拒绝 + 60s 倒计时;队列中待显示条目可见)
 Run: 同上 + 手工验证
@@ -1655,6 +1656,7 @@ Expected: FAIL
 `Settings.tsx`:插件连接状态(已连接/未连接)+ 端口展示(默认 54321,可改)
 `browser-extension/`(Chrome MV3,**零配置**):`manifest.json`(permissions: `tabs`/`activeTab`/`scripting`)+ background service worker(**默认直连 `ws://127.0.0.1:54321`**,断线指数退避重连;转发 CDP 命令到 content script)+ content script(点击/输入/滚动/取文本/执行 JS)+ README(开发者模式加载说明;**无 options 页,安装即用**)
 Run: 同上 + 手工:装插件(开发者模式加载)→ 客户端启动 → 插件自动连上 → Craft 让 Agent 读取当前标签页内容/点击/导航
+**插件 E2E 自动化(本任务内)**:`cd desktop && npm i -D playwright`——Playwright 启动真实 Chrome 并 `--load-extension=browser-extension/`,连真实客户端 CDP 端口,断言 tabInfo/getContent/click/navigate 全链路(CI 用 `xvfb-run`)
 Expected: PASS
 
 - [ ] **Step 3: Commit**
@@ -1807,24 +1809,30 @@ git commit -m "perf: streaming throttle and message pagination"
 
 ---
 
-### Task 4.5: E2E 冒烟
+### Task 4.5: E2E 冒烟(全自动)
 
 **Files:**
-- Create: `scripts/e2e/smoke.sh`(服务端 curl 链路)、`scripts/e2e/smoke_client.sh`(客户端冒烟)
+- Create: `scripts/e2e/smoke.sh`(服务端 curl 链路)、`scripts/e2e/smoke_client.sh`(客户端冒烟)、`scripts/e2e/smoke_plugin.spec.ts`(浏览器插件 Playwright)
 
 - [ ] **Step 1: 服务端冒烟脚本**
 
-复用阶段 1 验收的 curl 链路脚本化,加断言(退出码非 0 即失败):超管引导→登录→网关对话(stream)→技能列表→MCP 列表→知识库搜索
+复用阶段 1 验收的 curl 链路脚本化,加断言(退出码非 0 即失败):超管引导→登录→网关对话(stream,可用 mock 上游)→技能列表→MCP 列表→知识库搜索
 Run: `bash scripts/e2e/smoke.sh`
 Expected: 全绿
 
-- [ ] **Step 2: 客户端冒烟**
+- [ ] **Step 2: 客户端全自动冒烟(审批钩子)**
 
-在打包产物上:**Playwright(Electron)** 驱动启动 → 自动登录(预设 config)→ 发起一次 Ask → 断言收到 done 事件;CI(Linux)用 `xvfb-run` 跑无头 Electron(依赖:`cd desktop && npm i -D playwright`)
-Run: 打包机上执行(CI:xvfb-run)
+在打包产物上:**Playwright(Electron)** 驱动启动 → 自动登录(预设 config)→ 发起一次 Ask → 断言收到 done 事件;**Craft 高危操作:置 `PICOAI_TEST_AUTO_APPROVE=1` 自动允许,断言工具执行结果;`=0` 自动拒绝,断言 Agent 收到拒绝并继续**;CI(Linux)用 `xvfb-run` 跑无头 Electron(依赖:`cd desktop && npm i -D playwright`)
+Run: CI(xvfb-run)与打包机执行
 Expected: 通过
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: 浏览器插件 E2E**
+
+`smoke_plugin.spec.ts`:Playwright 启动真实 Chrome 加载 `browser-extension/`(MV3) → 起真实客户端(或测试模式 CDP 服务)→ 断言插件自动连接、`browser.tabInfo`/`getContent` 返回、`click`/`navigate` 生效
+Run: CI(Linux `xvfb-run`)执行
+Expected: 通过
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add scripts/e2e
@@ -1841,8 +1849,8 @@ git commit -m "test: e2e smoke scripts"
 # 本机(Linux)出 deb + AppImage
 bash scripts/pkg-linux.sh
 # Windows/macOS 由 CI 矩阵产出(.github/workflows/ci.yml 阶段 4 追加:
-#   windows-latest → electron-builder --win → picoaide-setup.exe
-#   macos-latest   → electron-builder --mac → picoaide.dmg;产物上传 artifact/Release)
+#   windows-latest → npm test + electron-builder --win → picoaide-setup.exe
+#   macos-latest   → npm test + electron-builder --mac → picoaide.dmg;产物上传 artifact/Release)
 git checkout master && git merge dev && git tag -a v0.4.0 -m "picoaide desktop 0.4.0"
 ```
 Expected: Linux 安装包在本机 `desktop/dist/`;win/mac 包由 CI 产出,全部可下载;tag 建立
@@ -1880,6 +1888,7 @@ git add CHANGELOG.md && git commit -m "docs: changelog for 0.4.0"
 - §4.7 管理页(全部配置入口)→ Task 1.16a/1.16b/1.16c/4.2
 - §5 安全(审批/越界/加密/TOFU/限流)→ Task 1.5/1.8/1.12/2.4/3.6/3.7/3.12
 - §6 错误边界 → 分散在各任务测试(超时/重连/审批超时/断连 usage)
+- **AI 全自动化测试(§7.1)** → 审批测试钩子(3.7)/插件 Playwright E2E(3.15、4.5 Step 3)/客户端冒烟(4.5 Step 2)/CI 三平台矩阵(1.1、4.6);保留人工:真实企业环境联调、手感验收(3.16)
 - **零配置原则** → Task 2.4(bootstrap)、2.7(登录即用)、3.13(设置页仅本地边界)
 - §8 实施阶段 → 全部映射为 Task 1.1-4.6
 
