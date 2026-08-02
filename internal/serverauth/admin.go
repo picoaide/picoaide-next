@@ -25,6 +25,7 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	a := &AdminAPI{DB: db}
 	g := r.Group("/api/admin")
 	g.POST("/login", a.handleLogin)
+	g.GET("/me", AdminAuth(db), a.handleMe)
 	g.POST("/logout", AdminAuth(db), a.handleLogout)
 	g.GET("/users", AdminAuth(db), a.listUsers)
 	g.POST("/users", AdminAuth(db), a.createUser)
@@ -99,6 +100,15 @@ func (a *AdminAPI) handleLogin(c *gin.Context) {
 		MaxAge:   int(AdminSessionTTL.Seconds()),
 	})
 	c.JSON(http.StatusOK, gin.H{"csrf_token": csrf, "user": userJSON(&u)})
+}
+
+func (a *AdminAPI) handleMe(c *gin.Context) {
+	u := currentAdmin(c)
+	if u == nil {
+		writeError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未登录")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"user": userJSON(u)})
 }
 
 func (a *AdminAPI) handleLogout(c *gin.Context) {

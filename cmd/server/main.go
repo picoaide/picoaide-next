@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -78,10 +79,25 @@ func main() {
 	bootstrap.RegisterRoutes(r, db)
 	serverstore.CleanupPendingUsage(db, time.Now().Add(-time.Hour))
 
-	// webadmin static (placeholder until built; replaced in Task 1.16c)
+	// webadmin SPA: /admin/ serves built assets with index.html fallback.
 	dist, _ := fs.Sub(webadmin.FS, "dist")
+	fileServer := http.FileServer(http.FS(dist))
 	r.NoRoute(func(c *gin.Context) {
-		if c.Request.URL.Path == "/admin" || len(c.Request.URL.Path) >= 7 && c.Request.URL.Path[:7] == "/admin/" {
+		p := c.Request.URL.Path
+		if p == "/admin" {
+			c.Redirect(http.StatusFound, "/admin/")
+			return
+		}
+		if len(p) >= 7 && p[:7] == "/admin/" {
+			rel := strings.TrimPrefix(p, "/admin")
+			if rel == "" {
+				rel = "/"
+			}
+			if strings.HasPrefix(rel, "/assets/") {
+				c.Request.URL.Path = rel
+				fileServer.ServeHTTP(c.Writer, c.Request)
+				return
+			}
 			index, err := dist.Open("index.html")
 			if err != nil {
 				c.String(http.StatusNotFound, "webadmin 未构建")

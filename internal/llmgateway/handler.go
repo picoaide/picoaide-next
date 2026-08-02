@@ -91,10 +91,20 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 	a.serveJSON(c, resp, user.ID, req.Model)
 }
 
+// upstreamURL joins an upstream base URL with the OpenAI chat endpoint.
+// Base URLs may or may not carry the /v1 prefix (admin enters either form).
+func upstreamURL(base string) string {
+	base = strings.TrimSuffix(base, "/")
+	if strings.HasSuffix(base, "/v1") {
+		return base + "/chat/completions"
+	}
+	return base + "/v1/chat/completions"
+}
+
 // forward sends the raw body to the upstream, replacing Authorization with
 // the upstream key; retries once on transport error or 5xx.
 func (a *API) forward(c *gin.Context, up *Upstream, raw []byte, stream bool) (*http.Response, error) {
-	url := strings.TrimSuffix(up.BaseURL, "/") + "/chat/completions"
+	url := upstreamURL(up.BaseURL)
 	client := a.client
 	if stream {
 		client = a.sse

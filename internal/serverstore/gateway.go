@@ -17,11 +17,11 @@ type GatewayProvider struct {
 }
 
 type Model struct {
-	ID            int64
-	Name          string
-	ProviderID    int64
-	DisplayName   string
-	DefaultParams string
+	ID            int64  `json:"id"`
+	Name          string `json:"name"`
+	ProviderID    int64  `json:"provider_id"`
+	DisplayName   string `json:"display_name"`
+	DefaultParams string `json:"default_params"`
 }
 
 func scanProvider(scan interface{ Scan(...any) error }) (*GatewayProvider, error) {
