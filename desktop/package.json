@@ -1,6 +1,6 @@
 {
   "name": "picoaide-desktop",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "PicoAide desktop agent client",
   "main": "out/main/index.js",
   "scripts": {
@@ -50,5 +50,7 @@
     "typescript": "^5.5.4",
     "vite": "^5.4.8",
     "vitest": "^2.1.1"
-  }
+  },
+  "author": "PicoAide Team <picoaide@example.com>",
+  "homepage": "https://example.com/picoaide"
 }
