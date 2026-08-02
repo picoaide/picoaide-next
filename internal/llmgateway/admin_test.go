@@ -122,10 +122,11 @@ func TestAdminModelsAndDefaultModel(t *testing.T) {
 		`{"name":"deepseek","base_url":"https://api.deepseek.com","api_key":"k","models":["deepseek-chat"]}`, hdr); w.Code != http.StatusOK {
 		t.Fatal("create provider failed")
 	}
-	w, _ := adminReq(t, r, "POST", "/api/admin/models",
-		`{"name":"deepseek-chat","provider_id":1,"display_name":"DeepSeek Chat"}`, hdr)
-	if w.Code != http.StatusOK {
-		t.Fatalf("create model: %d %s", w.Code, w.Body.String())
+	// provider models are synced into the models table, so a model is
+	// immediately visible and selectable as default (no double source)
+	w, out := adminReq(t, r, "GET", "/api/admin/models", "", hdr)
+	if w.Code != http.StatusOK || len(out["models"].([]any)) != 1 {
+		t.Fatalf("models not synced from provider: %d %v", w.Code, out)
 	}
 	// default model must be in enabled models
 	w, _ = adminReq(t, r, "PUT", "/api/admin/gateway", `{"default_model":"bogus-model"}`, hdr)
@@ -141,7 +142,7 @@ func TestAdminModelsAndDefaultModel(t *testing.T) {
 		t.Fatalf("default_model = %q ok=%v", v, ok)
 	}
 	// read back
-	w, out := adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	w, out = adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
 	if w.Code != http.StatusOK || out["default_model"] != "deepseek-chat" || out["allow_private"] != true {
 		t.Fatalf("gateway config: %d %v", w.Code, out)
 	}
