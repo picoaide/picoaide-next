@@ -6,10 +6,13 @@ export function picoaide(): PicoaideAPI {
 }
 
 // ipc invoke 的错误跨进程只保留 message,code 以 "code: message" 前缀编码(main/ipc.ts authIpcError)
+// Electron 还会包装一层 "Error invoking remote method '<ch>': ...",这里先剥离再取前缀。
 export function errCode(e: unknown): string {
   const err = e as { code?: string; message?: string }
   if (err.code) return err.code
-  const m = err.message ?? ''
+  let m = err.message ?? ''
+  const wrapper = /^Error invoking remote method '[^']+': /
+  if (wrapper.test(m)) m = m.replace(wrapper, '')
   const i = m.indexOf(': ')
   return i > 0 ? m.slice(0, i) : m
 }
