@@ -150,4 +150,3 @@ func TestAdminModelsAndDefaultModel(t *testing.T) {
 		t.Fatalf("delete model: %d", w.Code)
 	}
 }
-

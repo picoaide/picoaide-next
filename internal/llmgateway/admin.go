@@ -157,9 +157,9 @@ func deleteProvider(c *gin.Context, db *sql.DB) {
 }
 
 type modelReq struct {
-	Name         string `json:"name"`
-	ProviderID   int64  `json:"provider_id"`
-	DisplayName  string `json:"display_name"`
+	Name          string `json:"name"`
+	ProviderID    int64  `json:"provider_id"`
+	DisplayName   string `json:"display_name"`
 	DefaultParams string `json:"default_params"`
 }
 
@@ -255,19 +255,19 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 	}
 	allowPrivate := settings["web.allow_private"] == "true"
 	c.JSON(http.StatusOK, gin.H{
-		"default_model":    settings["gateway.default_model"],
-		"rate_limit":       rateLimit,
-		"allow_private":    allowPrivate,
-		"search_endpoint":  settings["web.search_endpoint"],
+		"default_model":   settings["gateway.default_model"],
+		"rate_limit":      rateLimit,
+		"allow_private":   allowPrivate,
+		"search_endpoint": settings["web.search_endpoint"],
 	})
 }
 
 // setGatewayConfig validates default_model against enabled models and saves.
 func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	var req struct {
-		DefaultModel  string `json:"default_model"`
-		RateLimit     string `json:"rate_limit"`
-		AllowPrivate  bool   `json:"allow_private"`
+		DefaultModel   string `json:"default_model"`
+		RateLimit      string `json:"rate_limit"`
+		AllowPrivate   bool   `json:"allow_private"`
 		SearchEndpoint string `json:"search_endpoint"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
