@@ -41,6 +41,7 @@ webadmin/ docs/ scripts/ data/
 | `make webadmin` | `cd webadmin && npm run build` |
 | `make build-server` | 编译 `bin/picoaide-server` |
 | `make build-desktop` | `cd desktop && npm run build && npx electron-builder --dir`(本地调试包,产出 `desktop/dist/`) |
+| `make docker-image` | `docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/picoaide/picoaide-server .`(多平台镜像,阶段 4) |
 | `make check` | format + lint(go vet + tsc)+ test |
 | `make pkg-linux` / `pkg-windows` / `pkg-macos` | 阶段 4 打包(Linux 本机;Windows/macOS 走 CI 矩阵) |
 
@@ -132,7 +133,7 @@ Expected: PASS
 
 - [ ] **Step 6: 写 CI 工作流 + embed 占位**
 
-Create: `.github/workflows/ci.yml` — 触发:push/PR;job1(ubuntu):`make test-server` + `go build ./...`;job2(ubuntu):`[ -f desktop/package.json ] && (cd desktop && npm ci && npm test && npm run typecheck && npm run build) || true`(desktop 目录 2.1 才建,未建时跳过,防阶段 1 期间 CI 红);job3(ubuntu):`[ -d webadmin ] && (cd webadmin && npm ci && npm run build) || true`(webadmin 目录 1.16c 才建,**未建时跳过**;阶段 4 追加三平台**测试+打包**矩阵并启用插件 E2E)
+Create: `.github/workflows/ci.yml` — 触发:push/PR;job1(ubuntu):`make test-server` + `go build ./...` + **交叉编译验证 `GOOS=linux GOARCH=amd64 go build ./cmd/server` 与 `GOOS=linux GOARCH=arm64 go build ./cmd/server`**;job2(ubuntu):`[ -f desktop/package.json ] && (cd desktop && npm ci && npm test && npm run typecheck && npm run build) || true`(desktop 目录 2.1 才建,未建时跳过,防阶段 1 期间 CI 红);job3(ubuntu):`[ -d webadmin ] && (cd webadmin && npm ci && npm run build) || true`(webadmin 目录 1.16c 才建,**未建时跳过**;阶段 4 追加三平台**测试+打包**矩阵、Docker 多平台镜像构建与插件 E2E)
 Create: `webadmin/dist/index.html` **占位文件**(内容为"webadmin 未构建";1.16a 的 go:embed 依赖此文件存在,否则空目录 embed 编译失败;1.16c 构建后自动替换)
 Run: 推送到 GitHub 验证绿
 Expected: 三个 job 全绿(1.1-1.16a 期间 job2/job3 自动跳过)
@@ -1702,7 +1703,7 @@ git checkout master && git merge dev && git tag -a v0.3.0 -m "local capabilities
 
 ---
 
-### Task 4.1: 三平台打包
+### Task 4.1: 三平台打包(客户端)
 
 **Files:**
 - Create: `desktop/electron-builder.yml`(完善)、`scripts/pkg-linux.sh`、`scripts/pkg-windows.sh`、`scripts/pkg-macos.sh`、`Makefile` 增 `pkg-*` 目标
@@ -1723,26 +1724,26 @@ asarUnpack:                              # 原生模块与 wasm/模型必须解�
   - "**/tesseract.js-core/**/*.wasm"
   - "resources/tessdata/**"
 linux: { target: [deb, AppImage], category: Utility }
-win: { target: [nsis] }
+win: { target: [nsis], arch: [x64] }
 nsis: { oneClick: false, allowToChangeInstallationDirectory: true }
-mac: { target: [dmg], category: public.app-category.productivity }
+mac: { target: [dmg], category: public.app-category.productivity, arch: [arm64, x64] }
 ```
-- 注:`protocols` 用于 OIDC 登录回调(1.7);`asarUnpack` 用于 better-sqlite3 原生模块与 tesseract.js 的 wasm/traineddata(2.2/3.4 依赖);electron-builder 会自动 npmRebuild 原生模块
+- 注:`protocols` 用于 OIDC 登录回调(1.7);`asarUnpack` 用于 better-sqlite3 原生模块与 tesseract.js 的 wasm/traineddata(2.2/3.4 依赖);electron-builder 会自动 npmRebuild 原生模块;**mac `arch: [arm64, x64]` 覆盖 Apple Silicon(M 系列)与 Intel;CI 用 `macos-14`(arm64 runner)原生产出 arm64 dmg**
 - **签名/公证(企业内部分发注意)**:macOS 未签名 dmg 会被 Gatekeeper 拦截——需 Developer ID 证书 + notarize 配置(有证书则加 `mac.notarize`,无证书企业内用"右键打开"并文档说明);Windows 同理需代码签名证书(无证书则 SmartScreen 警告,企业内可接受并说明)
 - [ ] **Step 2: 打包脚本**
 
-- Linux:`npm run build && electron-builder --linux` → `dist/picoaide_0.4.0_amd64.deb` + AppImage
-- Windows:`electron-builder --win` → `dist/picoaide-setup.exe`(CI 或 Windows 机器)
-- macOS:`electron-builder --mac` → `dist/picoaide.dmg`(CI 或 mac 机器)
+- Linux:`npm run build && electron-builder --linux` → `dist/picoaide_0.4.0_amd64.deb` + AppImage(arm64 可选)
+- Windows:`electron-builder --win` → `dist/picoaide-setup.exe`(CI windows-latest)
+- macOS:`electron-builder --mac` → `dist/picoaide-arm64.dmg` + `picoaide-x64.dmg`(CI macos-14 arm64 原生 + x64 交叉;M 系列即装 arm64)
 - 版本号从 `package.json` version 注入
 Run: `bash scripts/pkg-linux.sh`
-Expected: Linux 安装包产出,安装后可启动登录(Windows/macOS 在 CI 或对应机器验证)
+Expected: Linux 安装包产出,安装后可启动登录(Windows/macOS 在 CI 对应 runner 验证)
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add desktop/electron-builder.yml scripts/ Makefile
-git commit -m "feat: three-platform electron packaging"
+git commit -m "feat: three-platform electron packaging with arm64"
 ```
 
 ---
@@ -1841,7 +1842,11 @@ git commit -m "test: e2e smoke scripts"
 
 ---
 
-### Task 4.6: 发布
+### Task 4.6: 发布(客户端三平台 + 服务端 Docker 镜像 + 插件包)
+
+**Files:**
+- Create: `Dockerfile`(服务端多阶段:golang 构建 → distroless/alpine 运行,ARG TARGETARCH 交叉编译)、`scripts/pkg-extension.sh`(浏览器插件 zip:打包 `browser-extension/` 为 `picoaide-extension.zip`)
+- Modify: `.github/workflows/ci.yml`(阶段 4 追加发布矩阵)
 
 - [ ] **Step 1: 版本与发布**
 
@@ -1850,21 +1855,38 @@ git commit -m "test: e2e smoke scripts"
 bash scripts/pkg-linux.sh
 # Windows/macOS 由 CI 矩阵产出(.github/workflows/ci.yml 阶段 4 追加:
 #   windows-latest → npm test + electron-builder --win → picoaide-setup.exe
-#   macos-latest   → npm test + electron-builder --mac → picoaide.dmg;产物上传 artifact/Release)
+#   macos-14(arm64)→ npm test + electron-builder --mac(arm64/x64)→ picoaide-arm64.dmg + picoaide-x64.dmg
+#   ubuntu         → docker buildx build --platform linux/amd64,linux/arm64 \
+#                      -t ghcr.io/picoaide/picoaide-server:<tag> --push(双架构镜像)
+#                    + bash scripts/pkg-extension.sh → picoaide-extension.zip
+#  全部产物上传 artifact/Release)
 git checkout master && git merge dev && git tag -a v0.4.0 -m "picoaide desktop 0.4.0"
 ```
-Expected: Linux 安装包在本机 `desktop/dist/`;win/mac 包由 CI 产出,全部可下载;tag 建立
+Expected: Linux 安装包在本机 `desktop/dist/`;win/mac(含 M 系列 arm64)包、服务端双架构 Docker 镜像、浏览器插件 zip 由 CI 产出,全部可下载;tag 建立
 
-- [ ] **Step 2: 发布说明**
+- [ ] **Step 2: 服务端 Docker 镜像**
+
+`Dockerfile`:多阶段——`golang:1.24` 构建(`CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH` + `go:embed webadmin/dist` 预构建传入)→ 运行镜像 `distroless` 或 `alpine`(含 `-data` 目录挂载卷、0700 权限说明);CI 用 `docker/build-push-action` + buildx QEMU 交叉构建双平台
+Run: `make docker-image` 本地验证单平台 + CI 验证双平台
+Expected: `ghcr.io/picoaide/picoaide-server` 出现 `linux/amd64` 与 `linux/arm64` 两个平台标签
+
+- [ ] **Step 3: 浏览器插件包**
+
+`scripts/pkg-extension.sh`:`zip -r picoaide-extension.zip browser-extension/`(剔除 README/测试,含 manifest.json/background/content);产物上传 Release
+Run: `bash scripts/pkg-extension.sh`
+Expected: `picoaide-extension.zip` 产出,解压后 `chrome://extensions` 开发者模式可直接加载
+
+- [ ] **Step 4: 发布说明**
 
 Create: `CHANGELOG.md`(汇总四阶段功能)
 Run: 通读核对
 Expected: 完成
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add CHANGELOG.md && git commit -m "docs: changelog for 0.4.0"
+git add Dockerfile scripts/pkg-extension.sh CHANGELOG.md
+git commit -m "docs: changelog for 0.4.0"
 ```
 
 ---
@@ -1891,6 +1913,7 @@ git add CHANGELOG.md && git commit -m "docs: changelog for 0.4.0"
 - **AI 全自动化测试(§7.1)** → 审批测试钩子(3.7)/插件 Playwright E2E(3.15、4.5 Step 3)/客户端冒烟(4.5 Step 2)/CI 三平台矩阵(1.1、4.6);保留人工:真实企业环境联调、手感验收(3.16)
 - **零配置原则** → Task 2.4(bootstrap)、2.7(登录即用)、3.13(设置页仅本地边界)
 - §8 实施阶段 → 全部映射为 Task 1.1-4.6
+- **发布产物(三平台客户端 + 双架构服务端镜像 + 插件包)** → Task 4.1(mac arm64)/4.6(Docker buildx + 插件 zip)/1.1(CI 交叉编译验证)
 
 **待实施时确认的选型**(不影响任务结构,在每个任务内决策并记录):OCR 语言包加载路径(tesseract.js langPath)、MCP TS SDK 版本 API(@modelcontextprotocol/sdk v1 构造签名)、中文 FTS5(unicode61 前缀 vs trigram)、web_search 端点、@ai-sdk/sandbox-just-bash 实际 API 形状、docx/pdf 抽取库、electron-vite 当前版本约定、bootstrap 响应结构字段名、浏览器插件分发方式(开发者模式 vs 组策略)。
 
