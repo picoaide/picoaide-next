@@ -1,0 +1,16 @@
+bin/
+build/
+node_modules/
+dist/
+data/
+*.db
+*.db-wal
+*.db-shm
+desktop/dist/
+desktop/out/
+desktop/node_modules/
+webadmin/node_modules/
+!webadmin/dist/index.html
+webadmin/dist/
+*.log
+.DS_Store

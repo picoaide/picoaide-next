@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - run: make test-server
+      - run: go build ./...
+
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: desktop tests
+        run: |
+          if [ -f desktop/package.json ]; then
+            cd desktop && npm ci && npm test && npm run typecheck && npm run build
+          fi
+
+  webadmin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: webadmin build
+        run: |
+          if [ -d webadmin ] && [ -f webadmin/package.json ]; then
+            cd webadmin && npm ci && npm run build
+          fi
