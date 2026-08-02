@@ -71,3 +71,21 @@ func stripPrefix(m map[string]string, prefix string) map[string]string {
 	}
 	return out
 }
+
+// ConfiguredAPI bundles the auth API with its configured browser provider.
+type ConfiguredAPI struct {
+	API *API
+	OIDC BrowserProvider
+}
+
+// NewConfiguredAPI builds the auth API registering exactly the providers that
+// ConfigureProviders returns. In ldap-only mode the local provider is NOT
+// registered, so stale local accounts cannot log in.
+func NewConfiguredAPI(db *sql.DB) *ConfiguredAPI {
+	api := New(db)
+	pwds, browser := ConfigureProviders(db)
+	for _, p := range pwds {
+		api.RegisterProvider(p)
+	}
+	return &ConfiguredAPI{API: api, OIDC: browser}
+}

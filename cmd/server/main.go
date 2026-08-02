@@ -58,14 +58,12 @@ func main() {
 		return util.Decrypt(key, s)
 	}
 
-	auth := serverauth.New(db)
-	auth.RegisterProvider(serverauth.NewLocalProvider(db))
-	pwds, browser := serverauth.ConfigureProviders(db)
-	for _, p := range pwds {
-		auth.RegisterProvider(p)
-	}
-	if browser != nil {
-		auth.RegisterOIDC(browser)
+	// 认证 provider 只按 ConfigureProviders 注册:auth.mode=ldap 时不注册 local,
+	// 防止过期本地账号(含管理员)仍可登录
+	authCfg := serverauth.NewConfiguredAPI(db)
+	auth := authCfg.API
+	if authCfg.OIDC != nil {
+		auth.RegisterOIDC(authCfg.OIDC)
 	}
 	auth.RegisterRoutes(r)
 
