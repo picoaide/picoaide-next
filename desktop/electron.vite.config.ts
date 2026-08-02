@@ -11,7 +11,14 @@ export default defineConfig({
       }),
     ],
     resolve: { alias: { '@renderer': resolve('src/renderer/src') } },
-    build: { rollupOptions: { output: { inlineDynamicImports: false } } }
+    build: {
+      rollupOptions: {
+        output: { inlineDynamicImports: false },
+        // just-bash 惰性 import 的原生压缩 codec(xz/zstd,默认禁用);
+        // 声明 external 避免 rollup 在 CI 干净安装下尝试解析原生模块
+        external: ['node-liblzma', '@mongodb-js/zstd'],
+      },
+    },
   },
   preload: {
     plugins: [externalizeDepsPlugin()]
