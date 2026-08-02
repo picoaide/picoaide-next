@@ -66,6 +66,34 @@ func TestConfigureProvidersBothMode(t *testing.T) {
 	}
 }
 
+// TestLDAPModeExcludesLocal verifies the wiring used by cmd/server/main.go:
+// the API registers exactly what ConfigureProviders returns. In ldap mode a
+// stale local account must not be able to log in.
+func TestLDAPModeExcludesLocal(t *testing.T) {
+	db := newStoreDB(t)
+	if err := serverstore.SetSetting(db, "auth.mode", "ldap"); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.SetSetting(db, "ldap.server_url", "ldap://x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.SetSetting(db, "ldap.base_dn", "dc=x"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.CreateUserWithPassword(db, "legacy", "pw123456"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := NewConfiguredAPI(db)
+	// local provider must NOT be registered in ldap-only mode
+	if _, ok := cfg.API.providers["local"]; ok {
+		t.Fatal("local provider registered in ldap mode")
+	}
+	// and the legacy local account cannot authenticate
+	if _, err := cfg.API.authenticate("legacy", "pw123456"); err == nil {
+		t.Fatal("local account authenticated in ldap-only mode")
+	}
+}
+
 func TestConfigureProvidersOIDC(t *testing.T) {
 	idp := newFakeIDP(t)
 	db := newStoreDB(t)
