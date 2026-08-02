@@ -172,7 +172,9 @@ func (a *API) authenticate(username, password string) (UserInfo, error) {
 }
 
 // provisionUser creates a local users row for an external (ldap/oidc) identity
-// on first login, and syncs group membership.
+// on first login, and syncs group membership. An external identity whose
+// username collides with an existing local account is rejected — it must never
+// adopt the local row (which would inherit is_admin/status/credentials).
 func (a *API) provisionUser(ui UserInfo) (*serverstore.User, error) {
 	u, err := serverstore.GetUserByUsername(a.DB, ui.Username)
 	if errors.Is(err, serverstore.ErrNotFound) {
@@ -180,7 +182,7 @@ func (a *API) provisionUser(ui UserInfo) (*serverstore.User, error) {
 			Username:    ui.Username,
 			DisplayName: ui.DisplayName,
 			Email:       ui.Email,
-			Source:      "external",
+			Source:      sourceOf(ui.Source),
 			Status:      1,
 		})
 		if err != nil {
@@ -194,6 +196,10 @@ func (a *API) provisionUser(ui UserInfo) (*serverstore.User, error) {
 	if err != nil && !errors.Is(err, serverstore.ErrNotFound) {
 		return nil, err
 	}
+	// 防提权:外部身份不得接管本地账号行
+	if ui.Source == "external" && u.Source != "external" {
+		return nil, errors.New("username belongs to a local account")
+	}
 	// sync groups (no-op for local provider with no groups)
 	if len(ui.Groups) > 0 {
 		if err := serverstore.SyncUserGroups(a.DB, u.ID, ui.Groups); err != nil {
@@ -201,6 +207,14 @@ func (a *API) provisionUser(ui UserInfo) (*serverstore.User, error) {
 		}
 	}
 	return u, nil
+}
+
+// sourceOf maps a provider identity source to the users.Source column value.
+func sourceOf(s string) string {
+	if s == "external" {
+		return "external"
+	}
+	return "local"
 }
 
 func (a *API) handleLogout(c *gin.Context) {

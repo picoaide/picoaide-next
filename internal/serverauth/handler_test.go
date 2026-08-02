@@ -135,6 +135,43 @@ func TestLoginRateLimit(t *testing.T) {
 	}
 }
 
+func TestProvisionUserRejectsLocalAccountTakeover(t *testing.T) {
+	db, err := serverstore.EnsureMigrated(tempPath(t, "takeover.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	createUser(t, db, "admin", "Admin@123", true) // local admin
+
+	api := New(db)
+
+	// external identity (LDAP/OIDC) colliding with a local account must NOT adopt it
+	if _, err := api.provisionUser(UserInfo{Username: "admin", Source: "external"}); err == nil {
+		t.Fatal("external identity adopted the local admin account")
+	}
+
+	// external identity creates its own row on first login
+	ext, err := api.provisionUser(UserInfo{Username: "alice", DisplayName: "Alice", Source: "external"})
+	if err != nil {
+		t.Fatalf("provision external: %v", err)
+	}
+	if ext.Source != "external" {
+		t.Fatalf("source = %q, want external", ext.Source)
+	}
+
+	// second external login adopts the external row (not local)
+	ext2, err := api.provisionUser(UserInfo{Username: "alice", Source: "external"})
+	if err != nil {
+		t.Fatalf("re-provision external: %v", err)
+	}
+	if ext2.ID != ext.ID {
+		t.Fatalf("external re-login created a new row: %d != %d", ext2.ID, ext.ID)
+	}
+	if ext2.Source != "external" {
+		t.Fatalf("external re-login source = %q", ext2.Source)
+	}
+}
+
 func TestBootstrapAdmin(t *testing.T) {
 	db, err := serverstore.EnsureMigrated(tempPath(t, "boot.db"))
 	if err != nil {

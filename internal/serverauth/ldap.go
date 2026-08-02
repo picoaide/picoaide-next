@@ -95,6 +95,7 @@ func (p *LDAPProvider) Authenticate(username, password string) (UserInfo, error)
 		Username:    username,
 		DisplayName: entry.GetAttributeValue("cn"),
 		Email:       entry.GetAttributeValue("mail"),
+		Source:      "external",
 	}
 	if p.GroupFilter != "" {
 		gres, err := conn.Search(&ldap.SearchRequest{

@@ -6,6 +6,10 @@ type UserInfo struct {
 	DisplayName string
 	Email       string
 	Groups      []string
+	// Source identifies the identity source: "local" for the local users
+	// table, "external" for ldap/oidc. provisionUser refuses to let an
+	// external identity adopt a local account row.
+	Source string
 }
 
 // PasswordProvider authenticates via username/password (local/ldap).
