@@ -1,0 +1,25 @@
+appId: com.picoaide.desktop
+productName: PicoAide
+directories:
+  output: dist
+  buildResources: resources
+files:
+  - out/**
+  - resources/**
+npmRebuild: true
+protocols:
+  - name: PicoAide
+    schemes: [picoaide]
+asarUnpack:
+  - "**/*.node"
+linux:
+  target: [deb, AppImage]
+  category: Utility
+win:
+  target: [nsis]
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+mac:
+  target: [dmg]
+  category: public.app-category.productivity
