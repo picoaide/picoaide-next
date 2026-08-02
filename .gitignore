@@ -14,3 +14,4 @@ webadmin/node_modules/
 webadmin/dist/
 *.log
 .DS_Store
+desktop/test-results/
