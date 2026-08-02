@@ -28,31 +28,26 @@ export function createBrowserTools(opts: { port?: number } = {}): Record<string,
     browser_click: {
       description: '点击页面中匹配 CSS 选择器的元素(高危,需审批)',
       inputSchema: z.object({ selector: z.string() }),
-      needsApproval: true,
       execute: async (input: { selector: string }) => call('browser.click')(input),
     },
     browser_type: {
       description: '向匹配 CSS 选择器的输入框输入文本(高危,需审批)',
       inputSchema: z.object({ selector: z.string(), text: z.string() }),
-      needsApproval: true,
       execute: async (input: { selector: string; text: string }) => call('browser.type')(input),
     },
     browser_navigate: {
       description: '将浏览器当前标签页导航到指定 URL(高危,需审批)',
       inputSchema: z.object({ url: z.string() }),
-      needsApproval: true,
       execute: async (input: { url: string }) => call('browser.navigate')(input),
     },
     browser_scroll: {
       description: '滚动当前页面(direction: up/down)(高危,需审批)',
       inputSchema: z.object({ direction: z.enum(['up', 'down']) }),
-      needsApproval: true,
       execute: async (input: { direction: 'up' | 'down' }) => call('browser.scroll')(input),
     },
     browser_execute_js: {
       description: '在当前页面执行任意 JavaScript 代码(最高风险,需审批)',
       inputSchema: z.object({ code: z.string() }),
-      needsApproval: true,
       execute: async (input: { code: string }) => call('browser.executeScript')(input),
     },
   }

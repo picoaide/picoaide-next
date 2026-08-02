@@ -34,8 +34,8 @@ describe('captureScreen', () => {
 })
 
 describe('screenCaptureTool registration', () => {
-  it('marks screen_capture as high risk (needsApproval)', () => {
-    expect(screenCaptureTool.needsApproval).toBe(true)
+  it('marks screen_capture as high risk via HIGH_RISK_TOOLS (not SDK needsApproval)', () => {
     expect(HIGH_RISK_TOOLS).toContain('screen_capture')
+    expect(screenCaptureTool.needsApproval).toBeUndefined()
   })
 })

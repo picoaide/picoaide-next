@@ -21,10 +21,10 @@ export async function captureScreen(): Promise<{ pngBase64: string; width: numbe
   return { pngBase64: thumbnail.toPNG().toString('base64'), ...thumbnail.getSize() }
 }
 
-// 截屏含密码/OTP 等敏感信息 → 标记 needsApproval:true(引擎层审批门控按 HIGH_RISK_TOOLS 识别)
+// 截屏含密码/OTP 等敏感信息 → 高危工具(引擎层按 HIGH_RISK_TOOLS 审批门控;
+// 不能用 SDK 保留名 needsApproval,否则 SDK 拦截执行、引擎门控永不触发)
 export const screenCaptureTool: Tool = {
   description: '截取整个屏幕,返回 PNG base64(含敏感信息,需审批)',
   inputSchema: z.object({}),
-  needsApproval: true,
   execute: async () => captureScreen(),
 }

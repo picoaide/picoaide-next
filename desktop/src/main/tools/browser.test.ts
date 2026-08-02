@@ -20,9 +20,9 @@ describe('browser tool registration', () => {
     expect(tools.browser_get_content.needsApproval).toBeUndefined()
   })
 
-  it('operation tools require approval', () => {
+  it('operation tools are high risk via HIGH_RISK_TOOLS (not SDK needsApproval)', () => {
     const tools = createBrowserTools()
-    for (const name of HIGH_RISK_TOOLS) expect(tools[name].needsApproval).toBe(true)
+    for (const name of HIGH_RISK_TOOLS) expect(tools[name].needsApproval).toBeUndefined()
   })
 })
 

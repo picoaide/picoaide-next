@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { clipboardReadTool, clipboardWriteTool, HIGH_RISK_TOOLS } from './clipboard'
 
 describe('clipboard tool registration', () => {
-  it('marks clipboard_read as high risk (needsApproval)', () => {
-    expect(clipboardReadTool.needsApproval).toBe(true)
+  it('marks clipboard_read as high risk via HIGH_RISK_TOOLS (not SDK needsApproval)', () => {
+    expect(clipboardReadTool.needsApproval).toBeUndefined()
     expect(HIGH_RISK_TOOLS).toContain('clipboard_read')
   })
 
