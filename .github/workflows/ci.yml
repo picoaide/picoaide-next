@@ -34,7 +34,7 @@ jobs:
       - name: desktop tests
         run: |
           if [ -f desktop/package.json ]; then
-            cd desktop && npm ci && npm test && npm run typecheck && npm run build
+            cd desktop && npm ci --ignore-scripts && npm run postinstall && npm test && npm run typecheck && npm run build
           fi
 
   webadmin:
@@ -67,7 +67,9 @@ jobs:
       - name: package
         run: |
           cd desktop
-          npm ci
+          npm ci --ignore-scripts   # 跳过 better-sqlite3 的 node-ABI 编译(Windows 需 VS);
+                                     # 原生模块由 install-app-deps 按 Electron ABI 处理
+          npm run postinstall        # electron-builder install-app-deps:下载/编译 Electron ABI 原生模块
           npm test
           npm run typecheck
           npm run build
@@ -88,7 +90,8 @@ jobs:
       - name: package
         run: |
           cd desktop
-          npm ci
+          npm ci --ignore-scripts
+          npm run postinstall
           npm test
           npm run typecheck
           npm run build
