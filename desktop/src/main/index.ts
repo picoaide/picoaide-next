@@ -218,6 +218,23 @@ app.whenReady().then(async () => {
   const db = openDb(dbPath())
   migrate(db)
 
+  // 浏览器插件桥(3.15):固定监听 127.0.0.1:54321(可经 settings cdp.port 调整),退出时关闭
+  let cdpServer: import('./cdp_server').CdpServer | null = null
+  const cdpPort = Number(getSetting(db, 'cdp.port') ?? '') || 54321
+  import('./cdp_server').then((m) => m.startCdpServer({ port: cdpPort })).then(
+    (srv) => {
+      cdpServer = srv
+      console.log(`CDP bridge listening on 127.0.0.1:${srv.port}`)
+    },
+    (err: unknown) => {
+      console.error('CDP bridge failed to start:', err instanceof Error ? err.message : err)
+      mainWindow?.webContents.send('cdp:status', { running: false, port: cdpPort, error: err instanceof Error ? err.message : String(err) })
+    },
+  )
+  app.on('will-quit', () => {
+    void cdpServer?.close()
+  })
+
   installCertificateVerification(join(dataDir(), 'fingerprints.json'), {
     onUnknownFingerprint: () => {
       // 首次连接自签证书:自动信任并记录(UI 提示由 renderer 呈现)
@@ -262,6 +279,7 @@ app.whenReady().then(async () => {
 
   registerIpcHandlers({
     ...buildHandlers(),
+    'cdp:status': () => ({ running: cdpServer !== null, port: cdpPort }),
     ...buildAuthHandlers(authDeps),
     ...buildPluginHandlers({
       store: { getSetting: (k) => getSetting(db, k), setSetting: (k, v) => setSetting(db, k, v) },

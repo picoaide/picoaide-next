@@ -30,17 +30,19 @@ export default function Settings() {
   const [busy, setBusy] = useState('')
   const [allowedDirs, setAllowedDirs] = useState<string[]>([])
   const [newDir, setNewDir] = useState('')
+  const [cdp, setCdp] = useState<{ running: boolean; port: number } | null>(null)
 
   const load = useCallback(async () => {
     const api = pluginApi()
     try {
-      const [i, s, m, dirs] = await Promise.all([
-        api.settingsInfo(), api.pluginSkillsList(), api.pluginMcpList(), api.allowedDirs(),
+      const [i, s, m, dirs, c] = await Promise.all([
+        api.settingsInfo(), api.pluginSkillsList(), api.pluginMcpList(), api.allowedDirs(), api.cdpStatus(),
       ])
       setInfo(i)
       setSkills(s)
       setMcp(m)
       setAllowedDirs(dirs)
+      setCdp(c)
       setError('')
     } catch (e) {
       setError(errCode(e) === 'NETWORK' ? '无法连接服务器' : '加载失败,请重试')
@@ -250,6 +252,22 @@ export default function Settings() {
               ))}
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      {/* 浏览器插件桥(3.15):本地 CDP 服务状态 */}
+      <Card>
+        <CardHeader>
+          <CardTitle>浏览器插件桥</CardTitle>
+          <CardDescription>
+            Chrome/Edge 扩展直连本端口(默认 54321),即装即用;插件未连接时浏览器工具返回明确错误
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex items-center gap-3">
+          <Badge variant={cdp?.running ? 'success' : 'destructive'}>
+            {cdp?.running ? '服务已启动' : '服务未启动'}
+          </Badge>
+          <span className="text-sm text-muted-foreground">端口 {cdp?.port ?? 54321}(仅本机回环地址)</span>
         </CardContent>
       </Card>
 
