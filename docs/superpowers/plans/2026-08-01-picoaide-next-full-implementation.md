@@ -1632,6 +1632,8 @@ git commit -m "feat: web fetch and search tools"
 
 ### Task 3.15: 浏览器插件桥(CDP)
 
+**定位:纯本地客户端功能(客户端 ↔ 员工本机浏览器 WebSocket 直连,不经服务端、离线可用)——让 AI Agent 控制浏览器,操作员工自己浏览器中已登录的系统/页面。**
+
 **Files:**
 - Create: `desktop/src/main/cdp_server.ts`、`desktop/src/main/cdp_server.test.ts`、`desktop/src/main/tools/browser.ts`、`desktop/src/main/tools/browser.test.ts`、`browser-extension/manifest.json`、`browser-extension/background.js`、`browser-extension/content.js`、`browser-extension/README.md`
 - Modify: `desktop/src/main/index.ts`(启动/关闭 CDP 服务)、`desktop/src/main/agent/engine.ts`(注册 browser_* 工具)、`desktop/src/renderer/src/pages/Settings.tsx`(插件连接状态展示)
