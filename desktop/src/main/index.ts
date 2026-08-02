@@ -39,6 +39,8 @@ let poller: ReturnType<typeof createHealthPoller> | null = null
 let lastServerURL: string | null = null
 // 启动扫描未完成任务用(架构设计 §3.3.1a):whenReady 内注入 store
 let appStore: StoreLike | null = null
+// 引擎重置钩子:登出/换账号时丢弃缓存的 AgentEngine(持有旧会话 model/token)
+let resetAgentEngine: () => void = () => {}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -272,7 +274,10 @@ app.whenReady().then(async () => {
       setSetting(db, 'last_server_url', session.serverURL)
       mainWindow?.webContents.send('auth:logged-in', session)
     },
-    onSessionCleared: () => stopPoller(),
+    onSessionCleared: () => {
+      stopPoller()
+      resetAgentEngine()
+    },
   }
 
   lastServerURL = getSetting(db, 'last_server_url')
@@ -312,6 +317,9 @@ app.whenReady().then(async () => {
       },
       getTools: () => buildToolsRegistry(db),
       getWindow: () => mainWindow,
+      registerEngineReset: (reset) => {
+        resetAgentEngine = reset
+      },
       addAllowedDir: (dir) => {
         const current = getAllowedDirsFromSettings((k) => getSetting(db, k))
         if (!current.includes(dir)) {

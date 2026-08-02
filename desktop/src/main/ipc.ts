@@ -71,6 +71,9 @@ export interface AgentIpcDeps {
   getWindow: () => { webContents: { send(channel: string, payload: unknown): void } } | null
   // 越界引导:确认后将目录加入可访问目录(settings allowed_dirs)
   addAllowedDir?: (dir: string) => void
+  // 引擎重置钩子:登出/换账号时由宿主(index.ts)调用,丢弃缓存的
+  // AgentEngine(它持有旧会话的 model/token,跨登入残留会导致 401)
+  registerEngineReset?: (reset: () => void) => void
 }
 
 export interface IpcHandlers {
@@ -110,6 +113,10 @@ export type ChatHandlers = Omit<IpcHandlers, 'auth:login' | 'auth:loadSession' |
 export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
   // 引擎单例(持有 currentAbort/审批队列);模型经 createModel 惰性创建(登录后 token 就绪)
   let engine: AgentEngine | null = null
+  const resetEngine = (): void => {
+    engine = null
+  }
+  deps.registerEngineReset?.(resetEngine)
   const getEngine = async (): Promise<AgentEngine> => {
     if (!engine) {
       const sysPrompt = typeof deps.sysPrompt === 'function' ? await deps.sysPrompt() : deps.sysPrompt

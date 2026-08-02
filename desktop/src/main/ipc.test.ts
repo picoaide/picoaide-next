@@ -159,18 +159,26 @@ function makeDeps(script: 'text' | 'throw' | 'hang' | 'tool-call' = 'text') {
   const sent: Array<{ channel: string; payload: unknown }> = []
   const store = makeStore()
   const model = new FakeProvider(script)
+  let modelCalls = 0
+  let onEngineReset: (() => void) | null = null
   const deps: AgentIpcDeps = {
     store,
     sysPrompt: 'sys',
-    createModel: () => model as unknown as LanguageModel,
+    createModel: () => {
+      modelCalls++
+      return model as unknown as LanguageModel
+    },
     getTools: async () => ({ tools: {} as Record<string, Tool>, highRiskTools: new Set<string>() }),
     getWindow: () => ({
       webContents: {
         send: (channel: string, payload: unknown) => sent.push({ channel, payload }),
       },
     }),
+    registerEngineReset: (fn: () => void) => {
+      onEngineReset = fn
+    },
   }
-  return { sent, store, deps, model }
+  return { sent, store, deps, model, modelCalls: () => modelCalls, resetEngine: () => onEngineReset?.() }
 }
 
 function eventsOf(sent: Array<{ channel: string; payload: unknown }>) {
@@ -207,6 +215,23 @@ describe('chat:new / chat:delete', () => {
     const id = handlers['chat:new']({})
     handlers['chat:delete']({ conversationId: id })
     expect(store.getConversation(id)).toBeNull()
+  })
+})
+
+describe('engine lifecycle', () => {
+  it('rebuilds the engine after logout (fresh model for a new session)', async () => {
+    const { deps, store, resetEngine, modelCalls } = makeDeps('text')
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({})
+    await handlers['chat:ask']({ conversationId: id, content: 'hi' })
+    expect(modelCalls()).toBe(1)
+
+    // 登出 → 引擎重置;再登录后新的 chat 必须用新 model(旧 token 不再滞留)
+    resetEngine()
+    const id2 = handlers['chat:new']({})
+    await handlers['chat:ask']({ conversationId: id2, content: 'hi again' })
+    expect(modelCalls()).toBe(2)
+    expect(store.getConversation(id2)?.status).toBe('done')
   })
 })
 
