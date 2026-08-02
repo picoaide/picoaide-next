@@ -277,6 +277,7 @@ picoaide-next/
 ├── browser-extension/            # 浏览器插件(Chrome MV3):manifest + service worker + content script + 设置页
 ├── webadmin/                     # 服务端管理页(独立小 React 应用)
 │   └── src/                      # Login/Users/Gateway/Usage/Marketplace/Knowledge
+├── Dockerfile                    # 服务端多阶段构建(amd64/arm64,多平台镜像)
 ├── docs/
 ├── scripts/                      # 打包脚本(NSIS/dmg/deb/AppImage)
 └── data/                         # 服务端运行时数据(库/缓存,gitignore)
@@ -849,7 +850,7 @@ kb_folders / kb_documents / kb_folder_users / kb_folder_groups / kb_audit_logs
 
 ### 阶段 1 — 服务端网关(约 2-3 周)
 
-1. 仓库骨架:go.mod、Makefile、目录、CI(GitHub Actions:go test + 客户端 test/typecheck/build)
+1. 仓库骨架:go.mod、Makefile、目录、CI(GitHub Actions:go test + 客户端 test/typecheck/build + **服务端交叉编译验证 amd64/arm64**)
 2. serverstore:迁移框架 + users/groups/settings/tokens/usage 表
 3. serverauth:local + LDAP + OIDC + token 颁发/校验(过期)+ 超管引导(--bootstrap-admin)
 4. llmgateway:OpenAI 兼容代理(openai 系直通)+ 限流 + 计量 + 模型列表
@@ -882,13 +883,13 @@ kb_folders / kb_documents / kb_folder_users / kb_folder_groups / kb_audit_logs
 
 ### 阶段 4 — 产品化(约 2-3 周)
 
-1. 三平台打包(NSIS / dmg / deb+AppImage;Windows/macOS 由 CI 矩阵产出)
+1. 三平台打包(NSIS / dmg(**含 Apple Silicon arm64**)/ deb+AppImage;Windows/macOS 由 CI 矩阵产出)+ **服务端 Docker 镜像(`linux/amd64` + `linux/arm64`,ghcr.io 分发)** + **浏览器插件 zip 产物**
 2. webadmin 用量/管理完善(含知识库页)
 3. 文档全套(docs/)
 4. 性能优化:OCR 惰性加载、流式渲染节流、SQLite WAL 检查点、消息分页
 5. E2E 冒烟测试
 
-**验收**:全新机器下载→安装→登录→完成真实办公任务;CI 一键出三平台包。
+**验收**:全新机器下载→安装→登录→完成真实办公任务;CI 一键出三平台客户端包 + 双架构服务端镜像 + 插件包。
 
 ---
 
@@ -917,8 +918,7 @@ kb_folders / kb_documents / kb_folder_users / kb_folder_groups / kb_audit_logs
 3. anthropic 上游转换一期还是二期(默认二期)
 4. web_search 端点选型(可配置搜索 API,实施期定)
 5. docx/pdf 文本抽取库选型(阶段 4 实现,默认 txt/md 先行)
-6. 服务端部署形态(Docker 镜像)
-7. 浏览器插件分发方式(开发者模式加载 vs 组策略;插件商店不上架)
+6. 浏览器插件分发方式(开发者模式加载 vs 组策略;插件商店不上架)
 
 ---
 
