@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -34,8 +36,35 @@ func main() {
 			return
 		}
 		last := ""
-		if len(req.Messages) > 0 {
-			last = req.Messages[len(req.Messages)-1].Content
+		hasTool := false
+		for _, m := range req.Messages {
+			last = m.Content
+			if m.Role == "tool" {
+				hasTool = true
+			}
+		}
+
+		// 脚本化工具调用(E2E 用):用户消息含 TOOLCALL:<name> 且本轮无 tool 结果 → 回工具调用;
+		// 下一轮(带 tool 结果)回正常文本。支持 file_write/file_delete(带参数模板)。
+		var scriptedTool *map[string]any
+		if !hasTool {
+			switch {
+			case strings.Contains(last, "TOOLCALL:file_write"):
+				scriptedTool = &map[string]any{
+					"name": "file_write",
+					"arguments": `{"path":"test.txt","content":"hello e2e ` + strconv.FormatInt(time.Now().UnixMilli(), 10) + `"}`,
+				}
+			case strings.Contains(last, "TOOLCALL:file_delete"):
+				scriptedTool = &map[string]any{
+					"name": "file_delete",
+					"arguments": `{"path":"delete-me.txt"}`,
+				}
+			case strings.Contains(last, "TOOLCALL:command_exec"):
+				scriptedTool = &map[string]any{
+					"name": "command_exec",
+					"arguments": `{"command":"echo e2e-cmd-ok"}`,
+				}
+			}
 		}
 		content := fmt.Sprintf("mock upstream echo: %q (model=%s)", last, req.Model)
 
@@ -44,6 +73,32 @@ func main() {
 			w.Header().Set("Cache-Control", "no-cache")
 			w.WriteHeader(200)
 			flusher, _ := w.(http.Flusher)
+			if scriptedTool != nil {
+				chunk := map[string]any{
+					"id": "mock-1", "object": "chat.completion.chunk", "model": req.Model,
+					"choices": []map[string]any{{
+						"index": 0,
+						"delta": map[string]any{
+							"tool_calls": []map[string]any{{
+								"index": 0,
+								"id":    "call-mock-1",
+								"type":  "function",
+								"function": map[string]string{
+									"name":      (*scriptedTool)["name"].(string),
+									"arguments": (*scriptedTool)["arguments"].(string),
+								},
+							}},
+						},
+					}},
+				}
+				b, _ := json.Marshal(chunk)
+				fmt.Fprintf(w, "data: %s\n\n", b)
+				if flusher != nil {
+					flusher.Flush()
+				}
+				fmt.Fprint(w, "data: [DONE]\n\n")
+				return
+			}
 			for _, ch := range content {
 				chunk := map[string]any{
 					"id": "mock-1", "object": "chat.completion.chunk", "model": req.Model,

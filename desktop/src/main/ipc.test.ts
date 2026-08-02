@@ -8,6 +8,7 @@ import type { AppendMessageInput } from './agent/engine'
 import { AuthError } from './gateway/auth'
 import type { Session } from './gateway/config'
 import { clearCaches, getBootstrapCache, getCurrentSession } from './session_cache'
+import { registerIpcHandlers } from './ipc'
 
 vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn() },
@@ -478,4 +479,23 @@ describe('auth handlers', () => {
   })
 
   afterEach(clearCaches)
+})
+
+describe('registerIpcHandlers event stripping', () => {
+  it('strips the IpcMainInvokeEvent so handlers receive the real payload', async () => {
+    // 回归测试:ipcMain.handle 回调签名是 (event, ...args),若直接传 handler,
+    // 第一个参数会是事件对象而非调用方 payload(真实应用登录失败的根因)。
+    const received: unknown[] = []
+    const fakeIpc = {
+      handle: (channel: string, fn: (...args: unknown[]) => unknown) => {
+        // 模拟 Electron:事件对象作为第一个参数
+        fn({ _replyChannel: {}, senderFrame: {} }, { serverURL: 'https://srv', username: 'a', password: 'b' })
+      },
+    }
+    registerIpcHandlers(
+      { 'test:echo': (input: unknown) => { received.push(input); return input } } as any,
+      fakeIpc as any,
+    )
+    expect(received).toEqual([{ serverURL: 'https://srv', username: 'a', password: 'b' }])
+  })
 })

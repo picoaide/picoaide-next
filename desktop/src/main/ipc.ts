@@ -255,7 +255,7 @@ export function buildAuthHandlers(deps: AuthIpcDeps): Pick<IpcHandlers, 'auth:lo
       return config
     },
     'auth:oidcLogin': async ({ serverURL }) => {
-      const url = validateServerURL(serverURL)
+      const url = validateServerURL(serverURL ?? '')
       if (!url.ok) throw authIpcError('INVALID_URL', url.error)
       await deps.openExternal(`${url.url}/api/auth/oidc/login`)
     },
@@ -265,11 +265,13 @@ export function buildAuthHandlers(deps: AuthIpcDeps): Pick<IpcHandlers, 'auth:lo
 export type IpcMainLike = { handle(channel: string, listener: (...args: any[]) => unknown): void }
 
 // registerIpcHandlers wires all handlers onto ipcMain (ipc 可注入,便于测试/隔离).
+// 注意:ipcMain.handle 的回调签名是 (event, ...args)——必须剥离事件对象,
+// 否则 handler 收到的第一个参数是 IpcMainInvokeEvent 而非调用方 payload。
 export function registerIpcHandlers(
   handlers: Record<string, any> = buildHandlers(),
   ipc: IpcMainLike = ipcMain,
 ): void {
   for (const [channel, fn] of Object.entries(handlers)) {
-    ipc.handle(channel, fn)
+    ipc.handle(channel, (_event: unknown, ...args: unknown[]) => fn(...args))
   }
 }
