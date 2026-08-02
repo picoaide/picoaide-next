@@ -737,7 +737,7 @@ git add -A && git commit -m "feat: bootstrap config and admin business APIs"
 
 - [ ] **Step 1: 前端五个核心页**
 
-`webadmin` 依赖仅:`react`、`react-dom`、`react-router-dom`、`fetch`(不引 UI 库,极简表格+表单);页面:
+`webadmin` 依赖:`react`、`react-dom`、`react-router-dom`、**shadcn/ui + Tailwind(与客户端统一,Table/Button/Dialog/Input/Card 等现成组件)**;页面:
 - Login:超管登录(session cookie)
 - Users:列表(分页)/创建(用户名+密码+admin 勾选)/禁用/删除
 - Gateway:上游 provider CRUD(base_url + api_key 输入框,回显掩码)、models 管理、**默认模型设置、web 抓取私有网段开关**
@@ -1073,16 +1073,17 @@ git commit -m "feat: ask-mode engine with ipc bridge"
 
 ---
 
-### Task 2.6: React 聊天 UI(自研极简组件)
+### Task 2.6: React 聊天 UI(shadcn/ui)
 
 **Files:**
-- Create: `desktop/src/renderer/src/api/picoaide.ts`、`desktop/src/renderer/src/stores/chat.ts`、`desktop/src/renderer/src/stores/auth.ts`、`desktop/src/renderer/src/pages/Main.tsx`、`desktop/src/renderer/src/components/{ChatInput,Messages}.tsx`
+- Create: `desktop/src/renderer/src/api/picoaide.ts`、`desktop/src/renderer/src/stores/chat.ts`、`desktop/src/renderer/src/stores/auth.ts`、`desktop/src/renderer/src/pages/Main.tsx`、`desktop/src/renderer/src/components/{ChatInput,Messages}.tsx`、`desktop/src/renderer/src/components/ui/(shadcn 生成的组件)`
 - Modify: `desktop/src/renderer/App.tsx`、`desktop/package.json`
 
-- [ ] **Step 1: 安装依赖 + 状态层准备**
+- [ ] **Step 1: 安装依赖 + 初始化 shadcn/ui + 状态层准备**
 
-Run: `cd desktop && npm i zustand`
-Expected: 安装成功
+Run: `cd desktop && npm i zustand && npm i -D tailwindcss @tailwindcss/vite && npx shadcn@latest init`(Vite 模式;按 CLI 输出接入 Tailwind 4 + globals.css)
+Run: `cd desktop && npx shadcn@latest add button input textarea card scroll-area dialog`(按需拉取 shadcn 组件到 `components/ui/`)
+Expected: 安装成功,Tailwind + shadcn 组件就绪(`components/ui/` 生成)
 
 - [ ] **Step 2: 状态层 + API 封装**
 
@@ -1092,11 +1093,12 @@ Create: `desktop/src/renderer/src/stores/auth.ts`:`status/login/logout`
 Run: `cd desktop && npm run build`
 Expected: 编译通过
 
-- [ ] **Step 3: 组件(自研极简,不引 UI 库)**
+- [ ] **Step 3: 组件(基于 shadcn/ui)**
 
-- `Messages.tsx`:渲染消息列表,streaming 时展示流式增量,自动滚动(尾随 `scrollIntoView`)
-- `ChatInput.tsx`:多行 textarea + Enter 发送 + 模式切换(Ask/Plan/Craft 按钮,阶段 3 前仅 Ask 可用)
-- `Main.tsx`:左侧会话列表 + 右侧聊天区;样式纯 CSS(组件保持极简,shadcn 风格二期可选)
+- `Messages.tsx`:渲染消息列表(shadcn `card`/`scroll-area`),streaming 时展示流式增量,自动滚动(尾随 `scrollIntoView`)
+- `ChatInput.tsx`:`textarea` + Enter 发送 + 模式切换(Ask/Plan/Craft 按钮,阶段 3 前仅 Ask 可用)
+- `Main.tsx`:左侧会话列表 + 右侧聊天区;样式走 Tailwind + shadcn 主题变量
+- 后续阶段 3 组件(ConfirmModal/ToolCalls/ArtifactsPanel/Login/Settings)同样基于 shadcn(`dialog`/`alert-dialog` 等)
 Run: `cd desktop && npm run build`
 Expected: 编译通过,`npx electron .` 手工验证(需本机服务端 + 已登录,阶段 2.7 后联调)
 
@@ -1104,7 +1106,7 @@ Expected: 编译通过,`npx electron .` 手工验证(需本机服务端 + 已登
 
 ```bash
 git add desktop/src/renderer desktop/package.json desktop/package-lock.json
-git commit -m "feat: react chat ui with zustand"
+git commit -m "feat: react chat ui with shadcn and zustand"
 ```
 
 ---

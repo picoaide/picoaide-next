@@ -33,7 +33,7 @@
 | D20 | 客户端本地 MCP | 官方 @modelcontextprotocol/sdk(Client) | MCP 标准 TypeScript SDK,stdio + HTTP 双传输 |
 | D21 | 客户端 OCR | tesseract.js | 纯 JS/WASM,三平台免系统依赖,惰性加载 |
 | D22 | 长任务与恢复 | streamText 多步循环(自管步数上限)+ 消息落库 | 办公任务分钟级,失败主因是 LLM/工具错误而非进程崩溃;消息即状态——中断任务标记 `status=running`,恢复 = 从最后一条用户消息重跑历史,零额外运行时;高危审批在工具 `execute` 内门控(60s 超时拒绝),不依赖 AI SDK 审批 API(版本差异风险) |
-| D23 | UI 组件 | 自研极简 React 组件(纯 CSS) | 聊天/工具卡片/确认弹窗工作量小;ai-elements 要求 Next.js+shadcn+Tailwind 前置,与裸 Vite renderer 不兼容,且处被 shadcn 官方 chat 组件替代轨道 |
+| D23 | UI 组件 | shadcn/ui + Tailwind(客户端 renderer 与 webadmin 统一使用) | 官方 shadcn AI 组件已发布(替代 ai-elements 轨道);Vite + React 官方支持;复制粘贴式、样式全可控;聊天/表格/表单/弹窗组件开箱即用 |
 | D24 | 网关接入 | 自研 Go 网关;AI SDK provider baseURL 直连 | 不用 Vercel AI Gateway 云服务;客户端零密钥,计量在服务端 |
 | D25 | 浏览器操作 | 自研浏览器插件桥:客户端主进程**固定监听 127.0.0.1:54321**,Chrome/Edge 插件默认直连该端口,即装即用零配置 | 免 Playwright 系统依赖;插件以最小权限(MV3)桥接真实浏览器;仅回环地址;操作类工具审批兜底 |
 
@@ -147,7 +147,7 @@ PicoAide(旧)是浏览器 Web UI + 服务端沙箱(overlayfs + netns)模式,存�
 | Agent 引擎 | Vercel AI SDK(`ai` + `@ai-sdk/openai-compatible`) | 最新 |
 | 长任务/审批 | streamText 多步循环(自管步数上限 20)+ 工具 execute 内审批门控 | 消息落库,中断标记 `running` 可重跑;审批 60s 超时拒绝 |
 | 沙盒执行 | `@ai-sdk/sandbox-just-bash` | 本地受限会话,不可信代码/脚本,数据不出本机 |
-| UI 组件 | 自研极简组件(纯 CSS) | 聊天/工具卡片/确认弹窗/产物面板 |
+| UI 组件 | shadcn/ui(复制粘贴式)+ Tailwind CSS | 聊天/工具卡片/确认弹窗/表格/表单;客户端与 webadmin 统一 |
 | 本地数据库 | better-sqlite3 | 最新(主进程同步 API;需 `@electron/rebuild` 匹配 ABI) |
 | 前端 | React 18 + TypeScript + Vite(electron-vite) | 最新 |
 | 本地 MCP | @modelcontextprotocol/sdk(Client) | 最新 |
@@ -259,7 +259,7 @@ picoaide-next/
 │   │       ├── src/
 │   │       │   ├── App.tsx / main.tsx
 │   │       │   ├── api/picoaide.ts        # preload API 封装
-│   │       │   ├── components/            # ChatInput/Messages/ToolCalls/Artifacts/ConfirmModal
+│   │       │   ├── components/            # ui/(shadcn)+ ChatInput/Messages/ToolCalls/Artifacts/ConfirmModal
 │   │       │   ├── pages/                # Login/Main/Settings
 │   │       │   └── stores/               # Zustand:chat/auth/connection
 │   │       └── index.html
@@ -749,7 +749,7 @@ kb_folders / kb_documents / kb_folder_users / kb_folder_groups / kb_audit_logs
 
 ### 4.7 极简 Web 管理页
 
-独立小 React 应用(`webadmin/`),打包后由服务端静态服务:
+独立小 React 应用(`webadmin/`,**与客户端统一使用 shadcn/ui + Tailwind**,Table/Button/Dialog/Input 等现成组件),打包后由服务端静态服务:
 
 | 页面 | 功能 |
 |------|------|
