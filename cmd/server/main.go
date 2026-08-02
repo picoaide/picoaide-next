@@ -67,6 +67,7 @@ func main() {
 	}
 	auth.RegisterRoutes(r)
 
+	serverauth.RegisterAdminRoutes(r, db)
 	llmgateway.RegisterRoutes(r, db)
 	marketplace.RegisterRoutes(r, db, *dataDir+"/skills-cache")
 	knowledge.RegisterRoutes(r, db)

@@ -171,3 +171,16 @@ func nullIfEmpty(s string) any {
 	}
 	return s
 }
+
+// DeleteUser removes a user by id.
+func DeleteUser(db *sql.DB, id int64) error {
+	res, err := db.Exec("DELETE FROM users WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}

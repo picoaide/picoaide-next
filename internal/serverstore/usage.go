@@ -77,3 +77,52 @@ func CleanupPendingUsage(db *sql.DB, cutoff time.Time) error {
 		cutoff.Format(sqliteTimeFmt))
 	return err
 }
+
+// UsageAggregateRow is one aggregated usage row.
+type UsageAggregateRow struct {
+	Label            string `json:"label"`
+	PromptTokens     int64  `json:"prompt_tokens"`
+	CompletionTokens int64  `json:"completion_tokens"`
+	Requests         int64  `json:"requests"`
+}
+
+// UsageAggregate aggregates usage by day | model | user between from/to
+// (zero time means unbounded).
+func UsageAggregate(db *sql.DB, from, to time.Time, group string) ([]UsageAggregateRow, error) {
+	var selectExpr, groupExpr string
+	switch group {
+	case "day":
+		selectExpr, groupExpr = "date(created_at)", "date(created_at)"
+	case "model":
+		selectExpr, groupExpr = "model", "model"
+	default:
+		selectExpr, groupExpr = "CAST(user_id AS TEXT)", "user_id"
+	}
+	q := `SELECT ` + selectExpr + ` AS label,
+		SUM(prompt_tokens) AS pt, SUM(completion_tokens) AS ct, COUNT(*) AS req
+		FROM usage WHERE 1=1`
+	var args []any
+	if !from.IsZero() {
+		q += " AND created_at >= ?"
+		args = append(args, from.Format("2006-01-02"))
+	}
+	if !to.IsZero() {
+		q += " AND created_at < ?"
+		args = append(args, to.Add(24*time.Hour).Format("2006-01-02"))
+	}
+	q += " GROUP BY " + groupExpr + " ORDER BY label"
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UsageAggregateRow
+	for rows.Next() {
+		var r UsageAggregateRow
+		if err := rows.Scan(&r.Label, &r.PromptTokens, &r.CompletionTokens, &r.Requests); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
