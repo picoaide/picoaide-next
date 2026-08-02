@@ -15,9 +15,9 @@ export function setCsrf(token: string) {
 }
 
 export async function request<T = any>(path: string, init: RequestInit = {}): Promise<T> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...(init.headers as Record<string, string>),
+  const headers: Record<string, string> = { ...(init.headers as Record<string, string>) }
+  if (!(init.body instanceof FormData)) {
+    headers['Content-Type'] = 'application/json'
   }
   if (csrfToken && (init.method === undefined || !['GET', 'HEAD'].includes(init.method))) {
     headers['X-CSRF-Token'] = csrfToken

@@ -210,6 +210,11 @@ async function loadMcpTools(db: ReturnType<typeof openDb>): Promise<{ tools: Rec
 }
 
 app.whenReady().then(async () => {
+  const fs = await import('node:fs')
+  fs.mkdirSync(dataDir(), { recursive: true })
+  fs.mkdirSync(join(dataDir(), 'workspaces'), { recursive: true })
+  fs.mkdirSync(join(dataDir(), 'skills'), { recursive: true })
+  fs.mkdirSync(join(dataDir(), 'mcp'), { recursive: true })
   const db = openDb(dbPath())
   migrate(db)
 

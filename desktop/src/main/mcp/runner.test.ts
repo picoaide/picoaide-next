@@ -5,9 +5,13 @@ import { createMcpRunner, validateArgs, validateStdioCommand } from './runner'
 
 const FIXTURE = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..', 'tests', 'fixtures', 'mock-mcp-server.js')
 const NODE = process.execPath
+// 测试跑在 ELECTRON_RUN_AS_NODE 下时,execPath 是 electron 二进制,spawn 子进程需带上该环境变量
+const SPAWN_ENV: Record<string, string> = process.execPath.includes('electron')
+  ? { ...(process.env as Record<string, string>), ELECTRON_RUN_AS_NODE: '1' }
+  : (process.env as Record<string, string>)
 
 function stdioRunner() {
-  return createMcpRunner({ transport: 'stdio', command: NODE, args: [FIXTURE] })
+  return createMcpRunner({ transport: 'stdio', command: NODE, args: [FIXTURE], env: SPAWN_ENV })
 }
 
 describe('validateStdioCommand', () => {

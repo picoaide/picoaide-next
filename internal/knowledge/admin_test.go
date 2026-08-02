@@ -1,9 +1,12 @@
 package knowledge
 
 import (
+	"archive/zip"
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -116,5 +119,130 @@ func TestAdminKB(t *testing.T) {
 	// non-admin → 401 on login, and direct kb call without session → 401
 	if w, _ := kbReq(t, r, "GET", "/api/admin/kb/folders", "", nil); w.Code != http.StatusUnauthorized {
 		t.Fatalf("no session: %d", w.Code)
+	}
+}
+
+// kbMultipart posts a multipart upload to /api/admin/kb/upload.
+func kbMultipart(t *testing.T, r http.Handler, fields map[string]string, fileName string, data []byte, hdr map[string]string) (*httptest.ResponseRecorder, map[string]any) {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for k, v := range fields {
+		if err := mw.WriteField(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fw, err := mw.CreateFormFile("file", fileName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fw.Write(data)
+	mw.Close()
+	req := httptest.NewRequest("POST", "/api/admin/kb/upload", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	var out map[string]any
+	json.Unmarshal(w.Body.Bytes(), &out)
+	return w, out
+}
+
+// minimalDocx builds a docx archive containing one word/document.xml.
+func minimalDocx(t *testing.T, body string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	f, err := zw.Create("word/document.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestAdminKBUploadMultipartTxt(t *testing.T) {
+	r, db, hdr := kbAdminSetup(t)
+	defer db.Close()
+
+	content := "第一条需求是支持多文件上传"
+	w, out := kbMultipart(t, r, map[string]string{"title": "需求文档", "folder_id": "0"}, "需求.txt", []byte(content), hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("txt upload: %d %s", w.Code, w.Body.String())
+	}
+	docID := int64(out["doc"].(map[string]any)["id"].(float64))
+	doc, err := serverstore.GetKBDocument(db, docID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Content != content || doc.Size != int64(len(content)) {
+		t.Fatalf("doc = %+v", doc)
+	}
+	// title missing → defaults to filename
+	w, out = kbMultipart(t, r, map[string]string{"folder_id": "0"}, "默认标题.txt", []byte("备用内容"), hdr)
+	if w.Code != http.StatusOK || out["doc"].(map[string]any)["title"] != "默认标题.txt" {
+		t.Fatalf("default title: %d %s", w.Code, w.Body.String())
+	}
+	// extractable via admin search (LIKE fallback)
+	if w, out = kbReq(t, r, "GET", "/api/admin/kb/search?q=多文件上传", "", hdr); w.Code != http.StatusOK {
+		t.Fatalf("search: %d", w.Code)
+	}
+	if len(out["results"].([]any)) == 0 {
+		t.Fatal("search found nothing")
+	}
+}
+
+func TestAdminKBUploadMultipartDocx(t *testing.T) {
+	r, db, hdr := kbAdminSetup(t)
+	defer db.Close()
+
+	docx := minimalDocx(t, `<?xml version="1.0"?><w:document><w:body>
+		<w:p><w:r><w:t>Docx 第一段内容</w:t></w:r></w:p>
+		<w:p><w:r><w:t>A &amp; B 第二段</w:t></w:r></w:p>
+	</w:body></w:document>`)
+	w, out := kbMultipart(t, r, map[string]string{"title": "产品说明", "folder_id": "0"}, "说明.docx", docx, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("docx upload: %d %s", w.Code, w.Body.String())
+	}
+	docID := int64(out["doc"].(map[string]any)["id"].(float64))
+	doc, err := serverstore.GetKBDocument(db, docID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(doc.Content, "Docx 第一段内容") || !strings.Contains(doc.Content, "A & B 第二段") {
+		t.Fatalf("extracted = %q", doc.Content)
+	}
+	if doc.ContentType != "docx" {
+		t.Fatalf("content type = %q", doc.ContentType)
+	}
+	// broken zip → clear validation error
+	if w, _ := kbMultipart(t, r, map[string]string{"title": "坏文件"}, "坏.docx", []byte("not a zip"), hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("bad docx: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAdminKBUploadMultipartPDFErrors(t *testing.T) {
+	r, _, hdr := kbAdminSetup(t)
+	// a garbage pdf must fail with a clear VALIDATION error, not a 500
+	// (a hand-built pdf with a valid xref table is not worth maintaining;
+	// ledongthuc/pdf's text path is exercised in its own repo)
+	w, out := kbMultipart(t, r, map[string]string{"title": "假pdf"}, "假.pdf", []byte("%PDF-1.4\ngarbage"), hdr)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("bad pdf: %d %s", w.Code, w.Body.String())
+	}
+	errObj, ok := out["error"].(map[string]any)
+	if !ok || errObj["code"] != "VALIDATION" || !strings.Contains(errObj["message"].(string), "pdf") {
+		t.Fatalf("bad pdf error = %v", out)
+	}
+	// unsupported extension
+	if w, _ := kbMultipart(t, r, map[string]string{"title": "病毒"}, "evil.exe", []byte("MZ"), hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("bad ext: %d", w.Code)
 	}
 }

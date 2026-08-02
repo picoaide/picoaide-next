@@ -4,8 +4,14 @@ import { resolve } from 'path'
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
-    resolve: { alias: { '@renderer': resolve('src/renderer/src') } }
+    // ai SDK v7 及 zod 为 ESM-only,Node CJS require 会 ERR_REQUIRE_ESM → 排除外置,由 Rollup 打进 CJS 包
+    plugins: [
+      externalizeDepsPlugin({
+        exclude: ['ai', '@ai-sdk/openai-compatible', '@ai-sdk/sandbox-just-bash', 'zod'],
+      }),
+    ],
+    resolve: { alias: { '@renderer': resolve('src/renderer/src') } },
+    build: { rollupOptions: { output: { inlineDynamicImports: false } } }
   },
   preload: {
     plugins: [externalizeDepsPlugin()]

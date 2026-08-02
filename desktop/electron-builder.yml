@@ -12,6 +12,8 @@ protocols:
     schemes: [picoaide]
 asarUnpack:
   - "**/*.node"
+  - "**/tesseract.js-core/**/*.wasm"
+  - "resources/tessdata/**"
 linux:
   target: [deb, AppImage]
   category: Utility
