@@ -8,7 +8,7 @@
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "ELECTRON_RUN_AS_NODE=1 electron ./node_modules/vitest/vitest.mjs run",
-    "postinstall": "electron-rebuild -f -w better-sqlite3 && node scripts/clean-better-sqlite3-prebuilds.js"
+    "postinstall": "electron-builder install-app-deps && node scripts/clean-better-sqlite3-prebuilds.js"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.20",
@@ -43,7 +43,7 @@
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
     "electron": "33.4.11",
-    "electron-builder": "^25.1.8",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^2.3.0",
     "playwright": "^1.62.1",
     "tailwindcss": "^4.3.3",
