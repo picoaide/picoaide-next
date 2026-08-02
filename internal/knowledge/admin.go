@@ -3,6 +3,7 @@ package knowledge
 import (
 	"database/sql"
 	"errors"
+	"mime/multipart"
 	"net/http"
 	"strconv"
 	"strings"
@@ -41,25 +42,49 @@ type kbUploadReq struct {
 }
 
 func uploadDoc(c *gin.Context, db *sql.DB) {
-	var req kbUploadReq
-	if err := c.ShouldBindJSON(&req); err != nil || req.Title == "" {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "标题必填")
-		return
+	title := ""
+	folderID := int64(0)
+	var content, contentType string
+	var err error
+
+	if strings.HasPrefix(c.ContentType(), "multipart/form-data") {
+		// file upload: txt/md/docx/pdf, text extracted server-side
+		var fh *multipart.FileHeader
+		if fh, err = c.FormFile("file"); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "缺少 file 文件字段")
+			return
+		}
+		title = c.PostForm("title")
+		if title == "" {
+			title = fh.Filename
+		}
+		folderID, _ = strconv.ParseInt(c.PostForm("folder_id"), 10, 64)
+		if content, contentType, err = extractFile(fh); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", err.Error())
+			return
+		}
+	} else {
+		var req kbUploadReq
+		if err := c.ShouldBindJSON(&req); err != nil || req.Title == "" {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "标题必填")
+			return
+		}
+		title, content, contentType = req.Title, req.Content, req.ContentType
+		if contentType == "" {
+			contentType = "text"
+		}
+		folderID = req.FolderID
 	}
-	contentType := req.ContentType
-	if contentType == "" {
-		contentType = "text"
+	if folderID < 0 {
+		folderID = 0
 	}
-	if req.FolderID < 0 {
-		req.FolderID = 0
-	}
-	id, err := IndexDocument(db, req.FolderID, req.Title, req.Content, contentType, "admin", adminUsername(c))
+	id, err := IndexDocument(db, folderID, title, content, contentType, "admin", adminUsername(c))
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "上传失败")
 		return
 	}
-	_ = serverstore.AuditLog(db, adminUsername(c), "kb_upload", "doc#"+strconv.FormatInt(id, 10)+" "+req.Title)
-	c.JSON(http.StatusOK, gin.H{"doc": gin.H{"id": id, "title": req.Title}})
+	_ = serverstore.AuditLog(db, adminUsername(c), "kb_upload", "doc#"+strconv.FormatInt(id, 10)+" "+title)
+	c.JSON(http.StatusOK, gin.H{"doc": gin.H{"id": id, "title": title}})
 }
 
 func createFolder(c *gin.Context, db *sql.DB) {
