@@ -118,7 +118,7 @@ func (a *API) handleLogin(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "认证服务未配置")
 		return
 	}
-	ui, err := auth.Authenticate(req.Username, req.Password)
+	ui, err := a.authenticate(req.Username, req.Password)
 	if err != nil {
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "用户名或密码错误")
 		return
@@ -150,6 +150,25 @@ func (a *API) resolvePasswordProvider() PasswordProvider {
 		return p
 	}
 	return nil
+}
+
+// authenticate tries providers in order (ldap first in "both" mode, then local).
+func (a *API) authenticate(username, password string) (UserInfo, error) {
+	order := []string{"ldap", "local"}
+	var lastErr error
+	for _, name := range order {
+		if p, ok := a.providers[name]; ok {
+			ui, err := p.Authenticate(username, password)
+			if err == nil {
+				return ui, nil
+			}
+			lastErr = err
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no provider")
+	}
+	return UserInfo{}, lastErr
 }
 
 // provisionUser creates a local users row for an external (ldap/oidc) identity

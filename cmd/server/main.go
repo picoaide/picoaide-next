@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/picoaide/picoaide/internal/marketplace"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/util"
 	"github.com/picoaide/picoaide/webadmin"
 )
 
@@ -42,13 +44,33 @@ func main() {
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
 
+	if _, err := util.EnsureMasterKey(*dataDir); err != nil {
+		log.Fatalf("master key: %v", err)
+	}
+	// Upstream API keys are AES-GCM encrypted with the master key (Task 1.12).
+	llmgateway.DecryptSecret = func(s string) (string, error) {
+		key, err := util.GetMasterKey()
+		if err != nil {
+			return "", err
+		}
+		return util.Decrypt(key, s)
+	}
+
 	auth := serverauth.New(db)
 	auth.RegisterProvider(serverauth.NewLocalProvider(db))
+	pwds, browser := serverauth.ConfigureProviders(db)
+	for _, p := range pwds {
+		auth.RegisterProvider(p)
+	}
+	if browser != nil {
+		auth.RegisterOIDC(browser)
+	}
 	auth.RegisterRoutes(r)
 
 	llmgateway.RegisterRoutes(r, db)
 	marketplace.RegisterRoutes(r, db, *dataDir+"/skills-cache")
 	knowledge.RegisterRoutes(r, db)
+	serverstore.CleanupPendingUsage(db, time.Now().Add(-time.Hour))
 
 	// webadmin static (placeholder until built; replaced in Task 1.16c)
 	dist, _ := fs.Sub(webadmin.FS, "dist")
