@@ -52,5 +52,9 @@
     "vitest": "^2.1.1"
   },
   "author": "PicoAide Team <picoaide@example.com>",
-  "homepage": "https://example.com/picoaide"
+  "homepage": "https://example.com/picoaide",
+  "overrides": {
+    "node-liblzma": "npm:noop-package@1.0.0",
+    "@mongodb-js/zstd": "npm:noop-package@1.0.0"
+  }
 }
