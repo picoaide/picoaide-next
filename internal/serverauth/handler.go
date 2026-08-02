@@ -43,10 +43,13 @@ func (a *API) RegisterOIDC(p BrowserProvider) {
 	a.oidc = p
 }
 
-// writeError writes the standard error envelope.
-func writeError(c *gin.Context, status int, code, msg string) {
+// WriteError writes the standard error envelope (contract §0.4.1).
+func WriteError(c *gin.Context, status int, code, msg string) {
 	c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"code": code, "message": msg}})
 }
+
+// writeError is a short alias used within this package.
+func writeError(c *gin.Context, status int, code, msg string) { WriteError(c, status, code, msg) }
 
 // BearerAuth authenticates the request via Authorization: Bearer <token>.
 func BearerAuth(db *sql.DB) gin.HandlerFunc {

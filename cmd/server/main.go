@@ -9,6 +9,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/knowledge"
+	"github.com/picoaide/picoaide/internal/llmgateway"
+	"github.com/picoaide/picoaide/internal/marketplace"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/webadmin"
@@ -42,6 +45,10 @@ func main() {
 	auth := serverauth.New(db)
 	auth.RegisterProvider(serverauth.NewLocalProvider(db))
 	auth.RegisterRoutes(r)
+
+	llmgateway.RegisterRoutes(r, db)
+	marketplace.RegisterRoutes(r, db, *dataDir+"/skills-cache")
+	knowledge.RegisterRoutes(r, db)
 
 	// webadmin static (placeholder until built; replaced in Task 1.16c)
 	dist, _ := fs.Sub(webadmin.FS, "dist")
