@@ -27,7 +27,7 @@ build-desktop:
 webadmin:
 	cd webadmin && npm run build
 
-# 服务端 Docker 镜像(计划 Task 4.6):本地验证单平台;CI 用 buildx 出 amd64/arm64
+# 服务端 Docker 镜像(计划 Task 4.6):本地验证单平台;CI 用 buildx 出 amd64
 # 用法:make docker-image 或 make docker-image IMAGE=ghcr.io/picoaide/picoaide-server TAG=v0.4.0
 docker-image:
 	docker build -t $(IMAGE):$(TAG) .

@@ -1,5 +1,5 @@
 # PicoAide 服务端 Docker Compose 部署
-# 镜像:ghcr.io/picoaide/picoaide-server(amd64 + arm64)+ Caddy HTTPS 反代
+# 镜像:ghcr.io/picoaide/picoaide-server(amd64)+ Caddy HTTPS 反代
 #
 # 快速开始:
 #   1. 编辑 Caddyfile,把 picoaide.example.com 换成你的真实域名
