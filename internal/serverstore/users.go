@@ -31,17 +31,26 @@ func CreateUserWithPassword(db *sql.DB, username, password string) (int64, error
 	return CreateUser(db, &User{Username: username, PasswordHash: hash, Source: "local", Status: 1})
 }
 
+// dummyPasswordHash is verified against when the account is missing,
+// non-local, or disabled, so response time does not reveal username/state.
+var dummyPasswordHash = func() string {
+	h, err := util.HashPassword("picoaide-dummy-constant")
+	if err != nil {
+		panic(err)
+	}
+	return h
+}()
+
 // AuthenticateLocal verifies username/password against the users table.
 // Returns ErrNotFound for unknown users or wrong password.
 func AuthenticateLocal(db *sql.DB, username, password string) (User, error) {
 	u, err := GetUserByUsername(db, username)
 	if err != nil {
-		return User{}, err
-	}
-	if u.Source != "local" || u.PasswordHash == "" {
+		util.VerifyPassword(dummyPasswordHash, password)
 		return User{}, ErrNotFound
 	}
-	if u.Status != 1 {
+	if u.Source != "local" || u.PasswordHash == "" || u.Status != 1 {
+		util.VerifyPassword(dummyPasswordHash, password)
 		return User{}, ErrNotFound
 	}
 	if !util.VerifyPassword(u.PasswordHash, password) {

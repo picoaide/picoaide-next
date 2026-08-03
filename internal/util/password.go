@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -58,6 +57,3 @@ func VerifyPassword(hash, pw string) bool {
 	got := argon2.IDKey([]byte(pw), salt, uint32(iter), uint32(mem), uint8(par), uint32(len(want)))
 	return subtle.ConstantTimeCompare(got, want) == 1
 }
-
-// ErrInvalidHash is returned when the stored hash format is unsupported.
-var ErrInvalidHash = errors.New("invalid password hash format")
