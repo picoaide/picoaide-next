@@ -64,8 +64,8 @@ func TestModelsList(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}
-	// {"models":[{"id":"gpt-4o","display_name":"GPT-4o"}]} — disabled provider excluded
-	want := `{"models":[{"id":"gpt-4o","display_name":"GPT-4o"}]}`
+	// {"models":[{"id":"gpt-4o","display_name":"GPT-4o","default_params":"{}"}]} — disabled provider excluded
+	want := `{"models":[{"id":"gpt-4o","display_name":"GPT-4o","default_params":"{}"}]}`
 	if w.Body.String() != want {
 		t.Fatalf("body = %s", w.Body.String())
 	}

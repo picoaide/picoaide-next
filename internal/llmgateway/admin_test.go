@@ -114,6 +114,30 @@ func TestAdminProviders(t *testing.T) {
 	}
 }
 
+func TestAdminProviderChannel(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+		`{"name":"deepseek","base_url":"https://api.deepseek.com","api_key":"sk","models":[],"channel":"deepseek"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create channel provider: %d %s", w.Code, w.Body.String())
+	}
+	p := out["provider"].(map[string]any)
+	if p["channel"] != "deepseek" {
+		t.Fatalf("channel = %v", p["channel"])
+	}
+
+	w, out = adminReq(t, r, "GET", "/api/admin/channels", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("channels: %d %s", w.Code, w.Body.String())
+	}
+	arr, ok := out["channels"].([]any)
+	if !ok || len(arr) == 0 {
+		t.Fatalf("channels = %v", out)
+	}
+}
+
 func TestAdminModelsAndDefaultModel(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
