@@ -102,3 +102,51 @@ func TestSyncProviderModelAndRemoveMissing(t *testing.T) {
 		t.Fatalf("default_model = %q ok=%v", v, ok)
 	}
 }
+
+func TestSyncProviderModelPerProvider(t *testing.T) {
+	db := openTestDB(t)
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	p1 := &GatewayProvider{Name: "a", BaseURL: "http://a", APIKeyEnc: "enc", Enabled: 1}
+	p2 := &GatewayProvider{Name: "b", BaseURL: "http://b", APIKeyEnc: "enc", Enabled: 1}
+	id1, err := AddGatewayProvider(db, p1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := AddGatewayProvider(db, p2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 两个 provider 提供同名模型
+	if err := SyncProviderModel(db, id1, "gpt-4o", `{}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncProviderModel(db, id2, "gpt-4o", `{"max_output":100}`); err != nil {
+		t.Fatal(err)
+	}
+	// 应有两行,分属两个 provider
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM models WHERE name = 'gpt-4o'").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("rows for gpt-4o = %d, want 2", n)
+	}
+	// 每个 provider 都能删除自己的
+	removed, err := RemoveMissingProviderModels(db, id1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d", removed)
+	}
+	var remains int
+	if err := db.QueryRow("SELECT COUNT(*) FROM models WHERE name = 'gpt-4o' AND provider_id = ?", id2).Scan(&remains); err != nil {
+		t.Fatal(err)
+	}
+	if remains != 1 {
+		t.Fatalf("provider2 row remains = %d, want 1", remains)
+	}
+}
