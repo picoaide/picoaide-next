@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, NavLink } from 'react-router-dom'
-import { Users, Settings2, BarChart3, Store, FolderOpen, LogOut } from 'lucide-react'
-import { me, logout } from './api'
+import { Users, Settings2, BarChart3, Store, FolderOpen, LogOut, Globe } from 'lucide-react'
+import { me, logout, request } from './api'
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
 import Login from './pages/Login'
@@ -21,6 +21,7 @@ const nav = [
 
 export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null)
+  const [baseURL, setBaseURL] = useState('')
 
   useEffect(() => {
     me().then(
@@ -28,6 +29,13 @@ export default function App() {
       () => setAuthed(false)
     )
   }, [])
+
+  useEffect(() => {
+    if (!authed) return
+    request('/api/admin/gateway')
+      .then((g) => setBaseURL(g?.server_base_url ?? ''))
+      .catch(() => setBaseURL(''))
+  }, [authed])
 
   if (authed === null) return <div className="flex h-screen items-center justify-center text-muted-foreground">加载中…</div>
 
@@ -38,6 +46,14 @@ export default function App() {
       <div className="flex h-screen">
         <aside className="flex w-48 flex-col border-r bg-muted/30">
           <div className="px-4 py-4 text-lg font-bold">PicoAide 管理</div>
+          {baseURL && (
+            <div className="flex items-center gap-1.5 px-4 pb-3 text-xs text-muted-foreground">
+              <Globe className="h-3 w-3 shrink-0" />
+              <a href={baseURL} target="_blank" rel="noreferrer" className="truncate hover:text-foreground" title={baseURL}>
+                {baseURL}
+              </a>
+            </div>
+          )}
           <nav className="flex-1 space-y-1 px-2">
             {nav.map((n) => (
               <NavLink
