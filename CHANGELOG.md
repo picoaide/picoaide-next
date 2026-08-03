@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### 修复
+- 客户端渲染层启用 `@tailwindcss/vite` 插件:此前 CSS 未编译、界面无样式
+- 所有服务端 HTTP 统一走 `session.defaultSession.fetch`(TOFU 生效):LLM 网关请求与 MCP HTTP 传输此前绕过证书校验
+
 ## v0.4.0 — PicoAide Desktop 0.4.0
 
 ### 服务端网关(阶段 1)
