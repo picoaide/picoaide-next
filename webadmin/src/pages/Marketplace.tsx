@@ -92,8 +92,13 @@ export default function Marketplace() {
       let env: Record<string, string> = {}
       let headers: Record<string, string> = {}
       try { args = JSON.parse(mcpForm.args || '[]') } catch { args = mcpForm.args.split(',').map((s) => s.trim()).filter(Boolean) }
-      try { env = JSON.parse(mcpForm.env || '{}') } catch { /* ignore */ }
-      try { headers = JSON.parse(mcpForm.headers || '{}') } catch { /* ignore */ }
+      let parseErr = ''
+      try { env = JSON.parse(mcpForm.env || '{}') } catch { parseErr = 'env 必须是合法 JSON' }
+      try { headers = JSON.parse(mcpForm.headers || '{}') } catch { parseErr = parseErr || 'headers 必须是合法 JSON' }
+      if (parseErr) {
+        setError(parseErr)
+        return
+      }
       await request('/api/admin/mcp', {
         method: 'POST',
         body: JSON.stringify({
