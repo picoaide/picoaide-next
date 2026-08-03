@@ -31,6 +31,11 @@ async function launchApp(autoApprove: boolean): Promise<{ app: ElectronApplicati
 test('登录 → Ask 对话 → Craft 工具循环 → 产物落盘', async () => {
   const { app, page, home } = await launchApp(true)
   try {
+    // 0. 样式加载检查:Tailwind 编译产物生效(body 背景非透明,regression:css 未加载)
+    await page.waitForTimeout(800)
+    const bg = await page.evaluate(() => getComputedStyle(document.body).backgroundColor)
+    expect(bg).not.toBe('rgba(0, 0, 0, 0)')
+
     // 1. 登录页
     await page.getByLabel('服务器地址').fill(SERVER_URL)
     await page.getByLabel('用户名').fill(USERNAME)
