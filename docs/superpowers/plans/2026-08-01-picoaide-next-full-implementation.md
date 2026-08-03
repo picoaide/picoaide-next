@@ -41,7 +41,7 @@ webadmin/ docs/ scripts/ data/
 | `make webadmin` | `cd webadmin && npm run build` |
 | `make build-server` | 编译 `bin/picoaide-server` |
 | `make build-desktop` | `cd desktop && npm run build && npx electron-builder --dir`(本地调试包,产出 `desktop/dist/`) |
-| `make docker-image` | `docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/picoaide/picoaide-server .`(多平台镜像,阶段 4) |
+| `make docker-image` | `docker buildx build --platform linux/amd64 -t ghcr.io/picoaide/picoaide-server .`(amd64 镜像,阶段 4) |
 | `make check` | format + lint(go vet + tsc)+ test |
 | `make pkg-linux` / `pkg-windows` / `pkg-macos` | 阶段 4 打包(Linux 本机;Windows/macOS 走 CI 矩阵) |
 
@@ -133,7 +133,7 @@ Expected: PASS
 
 - [ ] **Step 6: 写 CI 工作流 + embed 占位**
 
-Create: `.github/workflows/ci.yml` — 触发:push/PR;job1(ubuntu):`make test-server` + `go build ./...` + **交叉编译验证 `GOOS=linux GOARCH=amd64 go build ./cmd/server` 与 `GOOS=linux GOARCH=arm64 go build ./cmd/server`**;job2(ubuntu):`[ -f desktop/package.json ] && (cd desktop && npm ci && npm test && npm run typecheck && npm run build) || true`(desktop 目录 2.1 才建,未建时跳过,防阶段 1 期间 CI 红);job3(ubuntu):`[ -d webadmin ] && (cd webadmin && npm ci && npm run build) || true`(webadmin 目录 1.16c 才建,**未建时跳过**;阶段 4 追加三平台**测试+打包**矩阵、Docker 多平台镜像构建与插件 E2E)
+Create: `.github/workflows/ci.yml` — 触发:push/PR;job1(ubuntu):`make test-server` + `go build ./...` + **交叉编译验证 `GOOS=linux GOARCH=amd64 go build ./cmd/server` 与 `GOOS=linux GOARCH=arm64 go build ./cmd/server`**;job2(ubuntu):`[ -f desktop/package.json ] && (cd desktop && npm ci && npm test && npm run typecheck && npm run build) || true`(desktop 目录 2.1 才建,未建时跳过,防阶段 1 期间 CI 红);job3(ubuntu):`[ -d webadmin ] && (cd webadmin && npm ci && npm run build) || true`(webadmin 目录 1.16c 才建,**未建时跳过**;阶段 4 追加三平台**测试+打包**矩阵、Docker amd64 镜像构建与插件 E2E)
 Create: `webadmin/dist/index.html` **占位文件**(内容为"webadmin 未构建";1.16a 的 go:embed 依赖此文件存在,否则空目录 embed 编译失败;1.16c 构建后自动替换)
 Run: 推送到 GitHub 验证绿
 Expected: 三个 job 全绿(1.1-1.16a 期间 job2/job3 自动跳过)
@@ -1856,8 +1856,8 @@ bash scripts/pkg-linux.sh
 # Windows/macOS 由 CI 矩阵产出(.github/workflows/ci.yml 阶段 4 追加:
 #   windows-latest → npm test + electron-builder --win → picoaide-setup.exe
 #   macos-14(arm64)→ npm test + electron-builder --mac(arm64/x64)→ picoaide-arm64.dmg + picoaide-x64.dmg
-#   ubuntu         → docker buildx build --platform linux/amd64,linux/arm64 \
-#                      -t ghcr.io/picoaide/picoaide-server:<tag> --push(双架构镜像)
+#   ubuntu         → docker buildx build --platform linux/amd64 \
+#                      -t ghcr.io/picoaide/picoaide-server:<tag> --push(amd64 镜像)
 #                    + bash scripts/pkg-extension.sh → picoaide-extension.zip
 #  全部产物上传 artifact/Release)
 git checkout master && git merge dev && git tag -a v0.4.0 -m "picoaide desktop 0.4.0"

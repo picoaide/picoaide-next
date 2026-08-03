@@ -2,7 +2,7 @@
 
 # PicoAide 服务端多阶段构建(架构设计 §2 目录、计划 Task 4.6)
 # 运行镜像含 /data 挂载卷;密钥/数据库落在 /data,部署时以 volume 持久化。
-# 构建:docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/picoaide/picoaide-server:<tag> .
+# 构建:docker buildx build --platform linux/amd64 -t ghcr.io/picoaide/picoaide-server:<tag> .
 
 # --- Stage 1: webadmin(go:embed dist 需要预构建产物) ---
 FROM node:24-alpine AS webadmin
