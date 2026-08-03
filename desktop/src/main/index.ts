@@ -28,6 +28,7 @@ import { clipboardReadTool, clipboardWriteTool, HIGH_RISK_TOOLS as CLIPBOARD_HIG
 import { createWebTools } from './tools/web'
 import { getAllowedDirsFromSettings, resolveAllowedDirs } from './tools/paths'
 import { login, saveSession, loadSession, clearSession, gatewayFetch } from './gateway/auth'
+import { generateTitle, fallbackTitle } from './agent/title'
 import { getBootstrap } from './gateway/bootstrap'
 import { createHealthPoller } from './gateway/health'
 import type { Session } from './gateway/config'
@@ -384,6 +385,30 @@ app.whenReady().then(async () => {
       getWindow: () => mainWindow,
       listAllowedDirs: () => resolveAllowedDirs(workspaceDir(), getAllowedDirsFromSettings((k) => getSetting(db, k))),
       listProjectPaths: () => listProjects(db).map((p) => p.path),
+      autoTitle: async ({ conversationId }) => {
+        const conv = store.getConversation(conversationId)
+        if (!conv || conv.title !== '') return
+        const msgs = store.listMessages(conversationId)
+        const firstUser = msgs.find((m) => m.role === 'user')
+        if (!firstUser || !firstUser.content) return
+        const session = getCurrentSession()
+        if (!session) return
+        const bootstrap = getBootstrapCache()
+        const model = bootstrap.models.find((m) => m.id === bootstrap.default_model) ?? bootstrap.models[0]
+        if (!model) return
+        try {
+          const title = await generateTitle(
+            { serverURL: session.serverURL, token: session.token },
+            model.id,
+            firstUser.content,
+            gatewayFetch,
+          )
+          if (title) store.setConversationTitle(conversationId, title)
+        } catch {
+          // 网关失败兜底:截取首条用户消息
+          store.setConversationTitle(conversationId, fallbackTitle(firstUser.content))
+        }
+      },
       registerEngineReset: (reset) => {
         resetAgentEngine = reset
       },

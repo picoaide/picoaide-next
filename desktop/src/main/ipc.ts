@@ -90,6 +90,8 @@ export interface AgentIpcDeps {
   // @ 文件选择器:枚举目录由主进程组装(可访问目录 + 全部项目目录),renderer 不可指定任意路径
   listAllowedDirs?: () => string[]
   listProjectPaths?: () => string[]
+  // 自动标题(后台 fire-and-forget):chat:ask 引擎完成且会话标题为空时生成
+  autoTitle?: (input: { conversationId: number }) => Promise<void>
   // 越界引导:确认后将目录加入可访问目录(settings allowed_dirs)
   addAllowedDir?: (dir: string) => void
   // 引擎重置钩子:登出/换账号时由宿主(index.ts)调用,丢弃缓存的
@@ -224,6 +226,8 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
       } else {
         await (await getEngine()).ask({ conversationId, content })
       }
+      // 自动标题:后台生成,不阻塞对话完成;内部处理兜底与去重
+      if (deps.autoTitle) void deps.autoTitle({ conversationId })
     },
     // 重跑恢复(架构设计 §3.3.1a):ask 会话无工具重跑;craft/plan 带全量工具
     'chat:continue': async ({ conversationId }) => {

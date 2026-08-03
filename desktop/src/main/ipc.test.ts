@@ -320,6 +320,26 @@ describe('chat:ask', () => {  it('persists user+assistant messages and streams e
     expect(store.getConversation(id)?.status).toBe('failed')
   })
 
+  it('chat:ask 完成后后台触发 autoTitle(不阻塞)', async () => {
+    const autoTitle = vi.fn(async () => undefined)
+    const { deps, store, sent } = makeDeps('text')
+    deps.autoTitle = autoTitle
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({})
+    await handlers['chat:ask']({ conversationId: id, content: 'hi' })
+    expect(autoTitle).toHaveBeenCalledWith({ conversationId: id })
+  })
+
+  it('chat:ask 引擎报错时不触发 autoTitle', async () => {
+    const autoTitle = vi.fn(async () => undefined)
+    const { deps, store } = makeDeps('throw')
+    deps.autoTitle = autoTitle
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({})
+    await expect(handlers['chat:ask']({ conversationId: id, content: 'hi' })).rejects.toThrow()
+    expect(autoTitle).not.toHaveBeenCalled()
+  })
+
   it('cancel mid-stream emits canceled and marks the conversation failed', async () => {
     const { deps, store, sent } = makeDeps('hang')
     const handlers = buildAgentHandlers(deps)
