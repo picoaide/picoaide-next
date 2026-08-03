@@ -20,6 +20,7 @@ import ArtifactsPanel from '../components/ArtifactsPanel'
 import ChatInput from '../components/ChatInput'
 import Messages from '../components/Messages'
 import ConfirmModal from '../components/ConfirmModal'
+import SearchDialog from '../components/SearchDialog'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore, type ProjectView } from '../stores/chat'
 import { useConnectionStore } from '../stores/connection'
@@ -50,7 +51,20 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
   const [renamingId, setRenamingId] = useState<number | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [showArchived, setShowArchived] = useState(false)
+  const [showSearch, setShowSearch] = useState(false)
   const { newConversation, loadConversations, selectConversation, deleteConversation, loadProjects, createProject, deleteProject, moveConversation, setActiveProject, toggleProjectCollapsed } = useChatStore.getState()
+
+  useEffect(() => {
+    // Cmd/Ctrl+P 全局搜索(chatbox SearchDialog)
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'p') {
+        e.preventDefault()
+        setShowSearch(true)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   useEffect(() => {
     void loadConversations()
@@ -389,6 +403,7 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <SearchDialog open={showSearch} onClose={() => setShowSearch(false)} />
       <ConfirmModal />
     </div>
   )

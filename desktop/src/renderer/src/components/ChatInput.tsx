@@ -102,6 +102,12 @@ export default function ChatInput() {
   }
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Ctrl/Cmd+Enter 发送(chatbox 快捷键)
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault()
+      send()
+      return
+    }
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault()
       // Enter 直接选择首个 / 命令(Codex 式快捷确认)

@@ -28,6 +28,7 @@ import { screenCaptureTool, HIGH_RISK_TOOLS as SCREEN_HIGH_RISK } from './tools/
 import { clipboardReadTool, clipboardWriteTool, HIGH_RISK_TOOLS as CLIPBOARD_HIGH_RISK } from './tools/clipboard'
 import { createWebTools } from './tools/web'
 import { getAllowedDirsFromSettings, resolveAllowedDirs, resolveWorkspace } from './tools/paths'
+import { initOperationLog, logOperation } from './tools/operation-log'
 import { login, saveSession, loadSession, clearSession, gatewayFetch } from './gateway/auth'
 import { generateTitle, fallbackTitle } from './agent/title'
 import { getBootstrap } from './gateway/bootstrap'
@@ -176,7 +177,9 @@ async function buildToolsRegistry(db: ReturnType<typeof openDb>, workspace?: str
         timeoutSec: z.number().optional(),
       }),
       execute: async ({ command, timeoutSec }) => {
+        logOperation('command_exec', `${command.slice(0, 200)} cwd=${cwd}`)
         const r = await commandExec(command, { cwd, allowedDirs, timeoutSec })
+        logOperation('command_exec.done', `code=${r.code} stdout=${r.stdout.length}B stderr=${r.stderr.length}B`)
         return { stdout: r.stdout, stderr: r.stderr, code: r.code, timedOut: r.timedOut ?? false }
       },
     }),
@@ -279,6 +282,7 @@ app.whenReady().then(async () => {
   fs.mkdirSync(join(dataDir(), 'workspaces'), { recursive: true })
   fs.mkdirSync(join(dataDir(), 'skills'), { recursive: true })
   fs.mkdirSync(join(dataDir(), 'mcp'), { recursive: true })
+  initOperationLog()
   const db = openDb(dbPath())
   migrate(db)
 
@@ -442,6 +446,23 @@ app.whenReady().then(async () => {
 
   buildMenu()
   createWindow()
+
+  // 窗口状态记忆(chatbox window_state):重启恢复位置/尺寸
+  const savedBounds = getSetting(db, 'window_bounds')
+  if (savedBounds) {
+    try {
+      const b = JSON.parse(savedBounds) as { x?: number; y?: number; width?: number; height?: number }
+      if (typeof b.width === 'number' && typeof b.height === 'number') {
+        mainWindow?.setBounds({ x: b.x ?? 0, y: b.y ?? 0, width: b.width, height: b.height })
+      }
+    } catch {
+      // 损坏的状态忽略
+    }
+  }
+  mainWindow?.on('close', () => {
+    const b = mainWindow?.getBounds()
+    if (b) setSetting(db, 'window_bounds', JSON.stringify(b))
+  })
 
   // 深色模式跟随系统(HIG):nativeTheme 变化时广播给所有窗口
   nativeTheme.on('updated', () => {

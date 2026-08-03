@@ -63,6 +63,8 @@ const api = {
   chatSetArchived: (conversationId: number, archived: boolean): Promise<void> =>
     ipcRenderer.invoke('chat:setArchived', { conversationId, archived }),
   chatExport: (conversationId: number): Promise<string> => ipcRenderer.invoke('chat:export', { conversationId }),
+  chatSearch: (query: string): Promise<{ conversationId: number; title: string; snippet: string }[]> =>
+    ipcRenderer.invoke('chat:search', { query }),
   confirm: (requestId: string, ok: boolean): Promise<void> =>
     ipcRenderer.invoke('agent:confirm', { requestId, ok }),
   artifactShowInFolder: (path: string): Promise<void> => ipcRenderer.invoke('artifact:showInFolder', { path }),

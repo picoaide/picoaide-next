@@ -130,6 +130,7 @@ export interface IpcHandlers {
   'chat:setStarred': (input: { conversationId: number; starred: boolean }) => void
   'chat:setArchived': (input: { conversationId: number; archived: boolean }) => void
   'chat:export': (input: { conversationId: number }) => string
+  'chat:search': (input: { query: string }) => { conversationId: number; title: string; snippet: string }[]
   'agent:confirm': (input: { requestId: string; ok: boolean }) => void
   'artifact:showInFolder': (input: { path: string }) => void
   'project:list': () => ProjectRow[]
@@ -297,6 +298,33 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
     'chat:rename': ({ conversationId, title }) => deps.store.setConversationTitle(conversationId, title),
     'chat:setStarred': ({ conversationId, starred }) => deps.store.setConversationStarred(conversationId, starred),
     'chat:setArchived': ({ conversationId, archived }) => deps.store.setConversationArchived(conversationId, archived),
+    // 全局搜索(Cmd+P,chatbox SearchDialog 轻量版):标题 LIKE + 消息内容 LIKE,各取前 20 条
+    'chat:search': ({ query }) => {
+      const q = query.trim()
+      if (!q) return []
+      const like = `%${q}%`
+      const byTitle = (deps.store.listConversations() as (ConversationRow & { starred?: number; archived?: number })[])
+        .filter((c) => c.archived !== 1 && c.title.toLowerCase().includes(q.toLowerCase()))
+        .slice(0, 20)
+        .map((c) => ({ conversationId: c.id, title: c.title || '新会话', snippet: '' }))
+      const byMsg: { conversationId: number; title: string; snippet: string }[] = []
+      const convs = deps.store.listConversations()
+      for (const c of convs) {
+        const rows = deps.store.listMessages(c.id)
+        for (const m of rows) {
+          if (m.role !== 'user' && m.role !== 'assistant') continue
+          const idx = m.content.toLowerCase().indexOf(q.toLowerCase())
+          if (idx >= 0) {
+            const start = Math.max(0, idx - 30)
+            const snippet = (start > 0 ? '…' : '') + m.content.slice(start, idx + q.length + 30) + '…'
+            byMsg.push({ conversationId: c.id, title: c.title || '新会话', snippet })
+            if (byMsg.length >= 20) break
+          }
+        }
+        if (byMsg.length >= 20) break
+      }
+      return [...byTitle, ...byMsg]
+    },
     // 导出会话为 Markdown(chatbox ExportChat 轻量版:文本导出,复制到剪贴板)
     'chat:export': ({ conversationId }) => {
       const conv = deps.store.getConversation(conversationId)
