@@ -36,6 +36,13 @@ const migrations: string[] = [
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );`,
+  `CREATE TABLE projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL UNIQUE,
+    created_at DATETIME DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now','localtime'))
+  );
+  ALTER TABLE conversations ADD COLUMN project_id INTEGER;`,
 ]
 
 export function migrate(db: Database.Database): void {

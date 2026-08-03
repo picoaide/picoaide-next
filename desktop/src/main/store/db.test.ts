@@ -49,7 +49,22 @@ describe('db', () => {
       migrate(db)
       migrate(db)
       const rows = db.prepare('SELECT version FROM schema_migrations ORDER BY version').all() as { version: number }[]
-      expect(rows).toEqual([{ version: 1 }])
+      expect(rows).toEqual([{ version: 1 }, { version: 2 }])
+    } finally {
+      db.close()
+      cleanup()
+    }
+  })
+
+  it('migration 0010 adds projects table and conversations.project_id', () => {
+    const { dbPath, cleanup } = tmpDb()
+    const db = openDb(dbPath)
+    try {
+      migrate(db)
+      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]
+      expect(tables.map((t) => t.name)).toContain('projects')
+      const cols = db.prepare('PRAGMA table_info(conversations)').all() as { name: string }[]
+      expect(cols.map((c) => c.name)).toContain('project_id')
     } finally {
       db.close()
       cleanup()
