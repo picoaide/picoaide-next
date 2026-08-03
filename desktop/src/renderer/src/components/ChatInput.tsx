@@ -1,9 +1,11 @@
-import { useState } from 'react'
-import { Square, Send } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { FileText, Square, Send, Sparkles } from 'lucide-react'
 import { Button } from './ui/button'
 import { Textarea } from './ui/textarea'
 import { cn } from '../lib/utils'
 import { useChatStore, type Mode } from '../stores/chat'
+import { useAuthStore } from '../stores/auth'
+import { parseCommandLine, parseMentionLine, type ChatboxLine } from '../lib/chatbox'
 
 const MODES: { id: Mode; label: string; available: boolean }[] = [
   { id: 'ask', label: 'Ask', available: true },
@@ -11,9 +13,15 @@ const MODES: { id: Mode; label: string; available: boolean }[] = [
   { id: 'craft', label: 'Craft', available: true },
 ]
 
+const MAX_ROWS = 8
+const LINE_HEIGHT = 24
+
 export default function ChatInput() {
   const [value, setValue] = useState('')
   const [busy, setBusy] = useState(false)
+  const [history, setHistory] = useState<string[]>([])
+  const [historyIdx, setHistoryIdx] = useState(-1)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
   const streaming = useChatStore((s) => s.streaming)
   const mode = useChatStore((s) => s.mode)
   const setMode = useChatStore((s) => s.setMode)
@@ -22,14 +30,51 @@ export default function ChatInput() {
   const approvePlan = useChatStore((s) => s.approvePlan)
   const loadConversations = useChatStore((s) => s.loadConversations)
   const activeId = useChatStore((s) => s.activeId)
+  const activeProjectId = useChatStore((s) => s.activeProjectId)
   const conversations = useChatStore((s) => s.conversations)
-  // Plan 状态驱动 UI(架构设计 §3.3.4):status='planning' 时显示 执行计划/取消
+  const bootstrap = useAuthStore((s) => s.bootstrap)
+  const [files, setFiles] = useState<string[]>([])
+  const [installedSkills, setInstalledSkills] = useState<string[]>([])
   const activeStatus = activeId === null ? null : (conversations.find((c) => c.id === activeId)?.status ?? null)
   const planning = activeStatus === 'planning' && !streaming
+
+  // @ 文件候选:项目目录 + 可访问目录文件(主进程组装,懒加载)
+  useEffect(() => {
+    void window.picoaide
+      .workspaceListFiles()
+      .then(setFiles)
+      .catch(() => setFiles([]))
+  }, [activeProjectId])
+
+  // 已装技能(用于 @ 技能提及)
+  useEffect(() => {
+    void window.picoaide
+      .pluginSkillsList()
+      .then((r) => setInstalledSkills(Object.keys(r.installed)))
+      .catch(() => setInstalledSkills([]))
+  }, [])
+
+  const commandItems = (bootstrap?.skills ?? []).map((s) => s.name)
+  const line: ChatboxLine =
+    value.trim() === '' ? null : (parseCommandLine(value, commandItems) ?? parseMentionLine(value, files, installedSkills))
+
+  const applySuggestion = (l: ChatboxLine, text: string) => {
+    if (!l) return
+    if (l.kind === 'command') {
+      setValue(`使用技能 ${text}:`)
+    } else {
+      // 替换行尾 @查询
+      const base = value.replace(/@[^\s]*$/, '')
+      setValue(`${base}@${text} `)
+    }
+    textareaRef.current?.focus()
+  }
 
   const send = () => {
     const text = value.trim()
     if (!text) return
+    setHistory((h) => [...h, text].slice(-20))
+    setHistoryIdx(-1)
     setValue('')
     void sendMessage(text)
   }
@@ -41,6 +86,52 @@ export default function ChatInput() {
     await loadConversations()
     setBusy(false)
   }
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+      e.preventDefault()
+      // Enter 直接选择首个 / 命令(Codex 式快捷确认)
+      if (line && line.kind === 'command' && line.items.length > 0) {
+        applySuggestion(line, line.items[0])
+        return
+      }
+      send()
+      return
+    }
+    // ↑ 空输入时找回历史
+    if (e.key === 'ArrowUp' && !e.shiftKey && value === '' && history.length > 0) {
+      e.preventDefault()
+      const idx = historyIdx === -1 ? history.length - 1 : Math.max(0, historyIdx - 1)
+      setHistoryIdx(idx)
+      setValue(history[idx])
+      return
+    }
+    // ↓ 遍历到末尾后回到空输入
+    if (e.key === 'ArrowDown' && historyIdx !== -1) {
+      e.preventDefault()
+      if (historyIdx === history.length - 1) {
+        setHistoryIdx(-1)
+        setValue('')
+      } else {
+        setHistoryIdx(historyIdx + 1)
+        setValue(history[historyIdx + 1])
+      }
+    }
+  }
+
+  const autoResize = (el: HTMLTextAreaElement) => {
+    el.style.height = 'auto'
+    el.style.height = Math.min(el.scrollHeight, MAX_ROWS * LINE_HEIGHT) + 'px'
+  }
+
+  const suggestions = line
+    ? line.kind === 'command'
+      ? line.items.map((i) => ({ id: `cmd-${i}`, text: i, icon: <Sparkles className="h-3.5 w-3.5" /> }))
+      : [
+          ...line.files.map((f) => ({ id: `f-${f}`, text: f, icon: <FileText className="h-3.5 w-3.5" /> })),
+          ...line.skills.map((s) => ({ id: `s-${s}`, text: s, icon: <Sparkles className="h-3.5 w-3.5" /> })),
+        ]
+    : []
 
   return (
     <div className="border-t bg-background px-4 py-3">
@@ -71,29 +162,45 @@ export default function ChatInput() {
             </Button>
           </div>
         ) : (
-          <div className="flex items-end gap-2">
-            <Textarea
-              value={value}
-              rows={2}
-              placeholder="输入消息,Enter 发送,Shift+Enter 换行"
-              className="resize-none"
-              onChange={(e) => setValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                  e.preventDefault()
-                  send()
-                }
-              }}
-            />
-            {streaming ? (
-              <Button type="button" variant="outline" size="icon" title="停止" onClick={() => void cancel()}>
-                <Square className="h-4 w-4" />
-              </Button>
-            ) : (
-              <Button type="button" size="icon" disabled={!value.trim()} onClick={send} title="发送">
-                <Send className={cn('h-4 w-4')} />
-              </Button>
+          <div className="relative">
+            {line && suggestions.length > 0 && (
+              <div className="absolute bottom-full left-0 z-10 mb-1 max-h-48 w-full overflow-y-auto rounded-md border bg-popover shadow-md">
+                {suggestions.map((s) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-accent"
+                    onClick={() => applySuggestion(line, s.text)}
+                  >
+                    {s.icon}
+                    <span className="truncate">{s.text}</span>
+                  </button>
+                ))}
+              </div>
             )}
+            <div className="flex items-end gap-2">
+              <Textarea
+                ref={textareaRef}
+                value={value}
+                rows={2}
+                placeholder="输入消息,Enter 发送,Shift+Enter 换行;/ 使用技能,@ 提及文件或技能"
+                className="resize-none overflow-hidden"
+                onChange={(e) => {
+                  setValue(e.target.value)
+                  autoResize(e.target)
+                }}
+                onKeyDown={onKeyDown}
+              />
+              {streaming ? (
+                <Button type="button" variant="outline" size="icon" title="停止" onClick={() => void cancel()}>
+                  <Square className="h-4 w-4" />
+                </Button>
+              ) : (
+                <Button type="button" size="icon" disabled={!value.trim()} onClick={send} title="发送">
+                  <Send className={cn('h-4 w-4')} />
+                </Button>
+              )}
+            </div>
           </div>
         )}
       </div>

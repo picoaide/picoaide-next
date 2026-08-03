@@ -14,6 +14,9 @@ import {
 } from './skill/installer'
 import { installPlugin, installedMcpList, setMcpEnabled, uninstallPlugin, type McpInstalledRecord } from './mcp/installer'
 
+export type { InstalledSkillRecord } from './skill/installer'
+export type { McpInstalledRecord } from './mcp/installer'
+
 // ---- 对外类型(renderer 与 preload 接线方共用) ----
 
 export interface SettingsInfo {

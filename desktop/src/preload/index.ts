@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import type { Session, BootstrapConfig } from '../main/gateway/config'
 import type { AgentEvent } from '../main/agent/events'
 import type { ArtifactRow, ConversationRow, MessageRow, ProjectRow } from '../main/ipc'
+import type { McpInstalledRecord, McpListResult, McpRiskInfo, SettingsInfo, SkillRiskInfo, SkillsListResult, InstalledSkillRecord } from '../main/plugin_ipc'
 
 type Unsub = () => void
 
@@ -60,6 +61,20 @@ const api = {
   onThemeChanged: (cb: (t: 'dark' | 'light') => void): Unsub => subscribe('theme:changed', cb),
   onMenuCommand: (cb: (cmd: 'settings' | 'new-chat' | 'new-project') => void): Unsub =>
     subscribe('menu:command', cb),
+  // 设置页(plugin 通道):技能/MCP 建议清单、安装、可访问目录、服务器信息
+  settingsInfo: (): Promise<SettingsInfo> => ipcRenderer.invoke('settings:info'),
+  allowedDirs: (dirs?: string[]): Promise<string[]> => ipcRenderer.invoke('settings:allowedDirs', { dirs }),
+  pluginSkillsList: (): Promise<SkillsListResult> => ipcRenderer.invoke('plugin:skills.list'),
+  pluginSkillsInstall: (input: { name: string; confirmed?: boolean }): Promise<InstalledSkillRecord | { risk: SkillRiskInfo }> =>
+    ipcRenderer.invoke('plugin:skills.install', input),
+  pluginSkillsRemove: (input: { name: string }): Promise<void> => ipcRenderer.invoke('plugin:skills.remove', input),
+  pluginMcpList: (): Promise<McpListResult> => ipcRenderer.invoke('plugin:mcp.list'),
+  pluginMcpInstall: (input: { id: number; confirmed?: boolean }): Promise<McpInstalledRecord | { risk: McpRiskInfo }> =>
+    ipcRenderer.invoke('plugin:mcp.install', input),
+  pluginMcpRemove: (input: { id: number }): Promise<void> => ipcRenderer.invoke('plugin:mcp.remove', input),
+  pluginMcpToggle: (input: { id: number; enabled: boolean }): Promise<McpInstalledRecord> =>
+    ipcRenderer.invoke('plugin:mcp.toggle', input),
+  cdpStatus: (): Promise<{ running: boolean; port: number }> => ipcRenderer.invoke('cdp:status'),
   onAgentEvent: (cb: (ev: AgentEvent) => void): Unsub => subscribe('agent:event', cb),
   onInterrupted: (cb: (list: ConversationRow[]) => void): Unsub => subscribe('chat:interrupted', cb),
   onConnectionStatus: (cb: (status: 'online' | 'offline' | 'auth_expired' | 'trusting_cert') => void): Unsub =>
