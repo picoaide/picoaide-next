@@ -4,12 +4,16 @@ export type ConnectionStatus = 'online' | 'offline' | 'auth_expired'
 
 interface ConnectionState {
   status: ConnectionStatus
+  browserConnected: boolean
   setStatus: (s: ConnectionStatus) => void
+  setBrowserConnected: (connected: boolean) => void
   reset: () => void
 }
 
 export const useConnectionStore = create<ConnectionState>((set) => ({
   status: 'online',
+  browserConnected: false,
   setStatus: (status) => set({ status }),
-  reset: () => set({ status: 'online' }),
+  setBrowserConnected: (browserConnected) => set({ browserConnected }),
+  reset: () => set({ status: 'online', browserConnected: false }),
 }))

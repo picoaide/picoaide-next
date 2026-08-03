@@ -26,15 +26,21 @@ interface Pending {
   id: number
 }
 
-export function startCdpServer(opts: { port?: number; handler?: CdpHandler } = {}): Promise<CdpServer> {
+export function startCdpServer(opts: { port?: number; handler?: CdpHandler; onExtensionChange?: (connected: boolean) => void } = {}): Promise<CdpServer> {
   const port = opts.port ?? DEFAULT_CDP_PORT
   const handler: CdpHandler = opts.handler ?? {}
+  const onExtensionChange = opts.onExtensionChange
   return new Promise<CdpServer>((resolve, reject) => {
     const wss = new WebSocketServer({ port, host: '127.0.0.1' })
     const clients = new Set<WebSocket>()
     const pending = new Map<number, Pending>()
     let extension: WebSocket | null = null
     let settled = false
+
+    const setExtension = (ws: WebSocket | null) => {
+      extension = ws
+      onExtensionChange?.(ws !== null)
+    }
 
     const fail = (err: Error) => {
       if (settled) return
@@ -110,12 +116,12 @@ export function startCdpServer(opts: { port?: number; handler?: CdpHandler } = {
 
     wss.on('connection', (ws) => {
       clients.add(ws)
-      if (!extension) extension = ws // 第一个连入 = 插件(代理目标)
+      if (!extension) setExtension(ws) // 第一个连入 = 插件(代理目标)
       ws.on('message', (raw: Buffer) => handleMessage(ws, raw))
       ws.on('close', () => {
         clients.delete(ws)
         if (extension === ws) {
-          extension = null
+          setExtension(null)
           for (const [, p] of pending) {
             safeSend(p.ws, JSON.stringify({ id: p.id, error: { code: -32000, message: '浏览器插件未连接' } }))
           }

@@ -289,8 +289,12 @@ app.whenReady().then(async () => {
 
   // 浏览器插件桥(3.15):固定监听 127.0.0.1:54321(可经 settings cdp.port 调整),退出时关闭
   let cdpServer: import('./cdp_server').CdpServer | null = null
+  let cdpExtension = false
   const cdpPort = Number(getSetting(db, 'cdp.port') ?? '') || 54321
-  import('./cdp_server').then((m) => m.startCdpServer({ port: cdpPort })).then(
+  import('./cdp_server').then((m) => m.startCdpServer({ port: cdpPort, onExtensionChange: (connected) => {
+    cdpExtension = connected
+    mainWindow?.webContents.send('cdp:extension', { connected })
+  } })).then(
     (srv) => {
       cdpServer = srv
       console.log(`CDP bridge listening on 127.0.0.1:${srv.port}`)
@@ -362,7 +366,7 @@ app.whenReady().then(async () => {
 
   registerIpcHandlers({
     ...buildHandlers(),
-    'cdp:status': () => ({ running: cdpServer !== null, port: cdpPort }),
+    'cdp:status': () => ({ running: cdpServer !== null, port: cdpPort, extension: cdpExtension }),
     ...buildAuthHandlers(authDeps),
     ...buildPluginHandlers({
       store: { getSetting: (k) => getSetting(db, k), setSetting: (k, v) => setSetting(db, k, v) },

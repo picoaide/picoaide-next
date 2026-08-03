@@ -87,7 +87,8 @@ const api = {
   pluginMcpRemove: (input: { id: number }): Promise<void> => ipcRenderer.invoke('plugin:mcp.remove', input),
   pluginMcpToggle: (input: { id: number; enabled: boolean }): Promise<McpInstalledRecord> =>
     ipcRenderer.invoke('plugin:mcp.toggle', input),
-  cdpStatus: (): Promise<{ running: boolean; port: number }> => ipcRenderer.invoke('cdp:status'),
+  cdpStatus: (): Promise<{ running: boolean; port: number; extension: boolean }> => ipcRenderer.invoke('cdp:status'),
+  onCdpExtension: (cb: (payload: { connected: boolean }) => void): Unsub => subscribe('cdp:extension', cb),
   onAgentEvent: (cb: (ev: AgentEvent) => void): Unsub => subscribe('agent:event', cb),
   onInterrupted: (cb: (list: ConversationRow[]) => void): Unsub => subscribe('chat:interrupted', cb),
   onChatTitle: (cb: (payload: { conversationId: number; title: string }) => void): Unsub =>

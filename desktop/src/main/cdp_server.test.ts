@@ -4,7 +4,7 @@ import { startCdpServer, type CdpServer } from './cdp_server'
 
 const servers: CdpServer[] = []
 
-async function start(opts: { port?: number; handler?: Record<string, (params: unknown) => unknown> } = {}): Promise<CdpServer> {
+async function start(opts: { port?: number; handler?: Record<string, (params: unknown) => unknown>; onExtensionChange?: (connected: boolean) => void } = {}): Promise<CdpServer> {
   const s = await startCdpServer(opts)
   servers.push(s)
   return s
@@ -70,6 +70,17 @@ describe('startCdpServer', () => {
   it('rejects startup with a clear message when the port is occupied', async () => {
     const srv = await start({ port: 0 })
     await expect(startCdpServer({ port: srv.port })).rejects.toThrow(/端口 \d+ 被占用,请关闭占用程序/)
+  })
+
+  it('notifies onExtensionChange when the first client connects and disconnects', async () => {
+    const changes: boolean[] = []
+    const srv = await start({ port: 0, onExtensionChange: (c) => changes.push(c) })
+    const ws = await connect(srv.port)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(changes).toEqual([true])
+    ws.close()
+    await new Promise((r) => setTimeout(r, 20))
+    expect(changes).toEqual([true, false])
   })
 
   it('forwards browser.* requests to the extension client and relays the reply', async () => {

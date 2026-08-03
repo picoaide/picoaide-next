@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
-  Archive, Check, ChevronDown, ChevronRight, Copy, Download, FolderPlus, LogOut, MoreHorizontal, Pencil, Pin,
+  Archive, Check, ChevronDown, ChevronRight, Copy, Download, FolderPlus, Globe, LogOut, MoreHorizontal, Pencil, Pin,
   Plus, Settings as SettingsIcon, Trash2, Trash,
 } from 'lucide-react'
 import { Badge } from '../components/ui/badge'
@@ -44,6 +44,7 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
   const hasMoreMessages = useChatStore((s) => s.hasMoreMessages)
   const loadEarlierMessages = useChatStore((s) => s.loadEarlierMessages)
   const connStatus = useConnectionStore((s) => s.status)
+  const browserConnected = useConnectionStore((s) => s.browserConnected)
   const [showNewProject, setShowNewProject] = useState(false)
   const [projectName, setProjectName] = useState('')
   const [projectPath, setProjectPath] = useState('')
@@ -71,7 +72,13 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
     // 启动扫描中断会话(架构设计 §3.3.1a 重跑恢复):主进程推送 + 拉取兜底(去重由 store 保证)
     void useChatStore.getState().checkInterrupted()
     const off = window.picoaide.onInterrupted((list) => useChatStore.getState().onInterrupted(list))
-    return () => off()
+    // 浏览器插件桥状态:启动拉取一次 + 订阅实时变化
+    void window.picoaide.cdpStatus().then((s) => useConnectionStore.getState().setBrowserConnected(s.extension))
+    const offExt = window.picoaide.onCdpExtension(({ connected }) => useConnectionStore.getState().setBrowserConnected(connected))
+    return () => {
+      off()
+      offExt()
+    }
   }, [loadConversations, loadProjects])
 
   const model = bootstrap?.models.find((m) => m.id === bootstrap.default_model) ?? bootstrap?.models[0]
@@ -322,9 +329,15 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
               {activeProject ? `${activeProject.name} · ` : ''}
               {modelName}
             </span>
-            <Badge variant={connStatus === 'online' ? 'success' : 'destructive'}>
-              {connStatus === 'online' ? '在线' : connStatus === 'offline' ? '离线' : '已过期'}
-            </Badge>
+            <div className="flex items-center gap-2">
+              <Badge variant={browserConnected ? 'success' : 'outline'} title="浏览器插件桥(127.0.0.1:54321)">
+                <Globe className="mr-1 h-3 w-3" />
+                {browserConnected ? '浏览器已连接' : '浏览器未连接'}
+              </Badge>
+              <Badge variant={connStatus === 'online' ? 'success' : 'destructive'}>
+                {connStatus === 'online' ? '在线' : connStatus === 'offline' ? '离线' : '已过期'}
+              </Badge>
+            </div>
           </header>
           <div className="flex min-h-0 flex-1">
             <div className="flex min-w-0 flex-1 flex-col">
