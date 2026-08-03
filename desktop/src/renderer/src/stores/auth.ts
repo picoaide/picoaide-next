@@ -21,7 +21,7 @@ interface AuthState {
   init: () => Promise<void>
   login: (serverURL: string, username: string, password: string) => Promise<boolean>
   logout: () => Promise<void>
-  applySession: (session: Session, bootstrap?: BootstrapConfig | null) => void
+  applySession: (session: Session, bootstrap?: BootstrapConfig | null) => Promise<void>
   handleAuthExpired: () => void
 }
 
@@ -69,9 +69,14 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
   },
 
-  applySession: (session, bootstrap) => {
+  applySession: async (session, bootstrap) => {
     set((s) => ({ status: 'loggedIn', session, bootstrap: bootstrap ?? s.bootstrap }))
     useConnectionStore.getState().reset()
+    // OIDC 深链回跳的会话没有 bootstrap;后台补拉,否则模型名/技能推荐为空
+    if (!bootstrap) {
+      const b = await picoaide().refreshBootstrap().catch(() => null)
+      if (b) set({ bootstrap: b })
+    }
   },
 
   handleAuthExpired: () => {

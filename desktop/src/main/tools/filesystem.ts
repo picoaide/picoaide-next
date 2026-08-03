@@ -60,6 +60,43 @@ function decodeBuffer(buf: Buffer, forced?: string): string {
   }
 }
 
+// detectEncoding:与 decodeBuffer 同源判定,供编辑/追加时按原编码回写,
+// 避免 GBK/UTF-16 文件被静默改成 UTF-8 造成乱码。
+function detectEncoding(buf: Buffer): string {
+  if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) return 'utf8-bom'
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) return 'utf-16le'
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) return 'utf-16be'
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(buf)
+    return 'utf8'
+  } catch {
+    return 'gbk'
+  }
+}
+
+// encodeForWrite:把编辑结果按源文件编码回写(含 BOM 还原)。
+function encodeForWrite(text: string, enc: string): Buffer {
+  switch (enc) {
+    case 'utf8-bom':
+      return Buffer.concat([UTF8_BOM, Buffer.from(text, 'utf8')])
+    case 'utf-16le':
+      return Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, 'utf16le')])
+    case 'utf-16be': {
+      const le = Buffer.from(text, 'utf16le')
+      const be = Buffer.allocUnsafe(le.length)
+      for (let i = 0; i + 1 < le.length; i += 2) {
+        be[i] = le[i + 1]
+        be[i + 1] = le[i]
+      }
+      return Buffer.concat([Buffer.from([0xfe, 0xff]), be])
+    }
+    case 'gbk':
+      return iconv.encode(text, 'gbk')
+    default:
+      return Buffer.from(text, 'utf8')
+  }
+}
+
 async function extractDocxText(buf: Buffer): Promise<string> {
   try {
     // 惰性加载:仅 .docx 时才引入 mammoth
@@ -125,11 +162,13 @@ export function createFileTools(ctx: FileToolContext): Record<string, Tool> {
       }),
       execute: async ({ path: p, oldText, newText }) => {
         const abs = resolvePath(ctx, p)
-        const text = decodeBuffer(fs.readFileSync(abs))
+        const buf = fs.readFileSync(abs)
+        const enc = detectEncoding(buf)
+        const text = decodeBuffer(buf)
         const idx = text.indexOf(oldText)
         if (idx === -1) throw new ToolError(`未找到要替换的内容: ${oldText.slice(0, 50)}`)
         const out = text.slice(0, idx) + newText + text.slice(idx + oldText.length)
-        fs.writeFileSync(abs, out, 'utf8')
+        fs.writeFileSync(abs, encodeForWrite(out, enc))
         return `已替换 1 处`
       },
     }),
@@ -142,7 +181,14 @@ export function createFileTools(ctx: FileToolContext): Record<string, Tool> {
       }),
       execute: async ({ path: p, content }) => {
         const abs = resolvePath(ctx, p)
-        fs.appendFileSync(abs, content, 'utf8')
+        let enc = 'utf8'
+        try {
+          const detected = detectEncoding(fs.readFileSync(abs))
+          enc = detected === 'utf8-bom' ? 'utf8' : detected // 追加不带 BOM 前缀
+        } catch {
+          enc = 'utf8' // 文件不存在:按 UTF-8 创建
+        }
+        fs.appendFileSync(abs, encodeForWrite(content, enc))
         return `已追加到 ${abs}`
       },
     }),

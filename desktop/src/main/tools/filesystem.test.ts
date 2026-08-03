@@ -203,6 +203,17 @@ describe('file_edit', () => {
     )
   })
 
+  it('writes back a GBK file in GBK (no mojibake corruption)', async () => {
+    const { ctx, dir } = makeCtx()
+    fs.writeFileSync(path.join(dir, 'gbk.txt'), iconv.encode('中文测试', 'gbk'))
+    const tools = createFileTools(ctx)
+    await exec(tools.file_edit, { path: 'gbk.txt', oldText: '测试', newText: '编辑' })
+    const raw = fs.readFileSync(path.join(dir, 'gbk.txt'))
+    expect(iconv.decode(raw, 'gbk')).toBe('中文编辑')
+    // 字节仍是 GBK:按 UTF-8 严格解码必然失败
+    expect(() => new TextDecoder('utf-8', { fatal: true }).decode(raw)).toThrow()
+  })
+
   it('rejects an out-of-boundary path', async () => {
     const { ctx } = makeCtx()
     const tools = createFileTools(ctx)
