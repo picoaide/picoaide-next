@@ -15,4 +15,4 @@ webadmin/dist/
 *.log
 .DS_Store
 desktop/test-results/
-.env
+.picoaide-data/
