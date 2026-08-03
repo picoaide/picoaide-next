@@ -24,7 +24,7 @@ func ListModels(db *sql.DB) ([]Model, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var ms []Model
+	ms := []Model{}
 	for rows.Next() {
 		var m Model
 		if err := rows.Scan(&m.ID, &m.DisplayName); err != nil {

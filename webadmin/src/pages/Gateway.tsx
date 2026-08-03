@@ -43,8 +43,8 @@ export default function Gateway() {
         request('/api/admin/models'),
         request('/api/admin/gateway'),
       ])
-      setProviders(p.providers)
-      setModels(m.models)
+      setProviders(p.providers ?? [])
+      setModels(m.models ?? [])
       setCfg(g)
     } catch (err: any) {
       setError(err.message)

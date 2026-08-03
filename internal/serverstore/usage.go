@@ -116,7 +116,7 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string) ([]UsageAggreg
 		return nil, err
 	}
 	defer rows.Close()
-	var out []UsageAggregateRow
+	out := []UsageAggregateRow{}
 	for rows.Next() {
 		var r UsageAggregateRow
 		if err := rows.Scan(&r.Label, &r.PromptTokens, &r.CompletionTokens, &r.Requests); err != nil {

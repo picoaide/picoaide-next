@@ -171,3 +171,15 @@ func TestCleanupPendingUsage(t *testing.T) {
 		}
 	}
 }
+
+func TestUsageAggregateEmptyReturnsNonNil(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	rows, err := UsageAggregate(db, time.Time{}, time.Time{}, "day")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows == nil {
+		t.Fatal("UsageAggregate returned nil slice on empty table (must be [] for JSON)")
+	}
+}

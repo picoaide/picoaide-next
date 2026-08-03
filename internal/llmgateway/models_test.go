@@ -78,3 +78,30 @@ func TestModelsUnauthorized(t *testing.T) {
 		t.Fatalf("status = %d", w.Code)
 	}
 }
+
+func TestModelsEmptyReturnsArray(t *testing.T) {
+	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/empty.db", t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	uid, err := serverstore.CreateUser(db, &serverstore.User{Username: "bob", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := serverauth.IssueToken(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	RegisterRoutes(r, db)
+	// 空 models 表:JSON 必须序列化为 [] 而非 null(webadmin 依赖 .map)
+	w := getModels(t, r, token)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if w.Body.String() != `{"models":[]}` {
+		t.Fatalf("empty models body = %s, want {\"models\":[]}", w.Body.String())
+	}
+}
