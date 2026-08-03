@@ -127,6 +127,35 @@ func doPost(t *testing.T, r http.Handler, path, body, token string, ctx context.
 	return w
 }
 
+func TestApplyChannelOverrides(t *testing.T) {
+	body := []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"temperature":0.7}`)
+	overrides := map[string]any{"thinking": map[string]any{"type": "enabled"}, "reasoning_effort": "max"}
+	removeKeys := []string{"temperature"}
+	out, err := applyChannelOverrides(body, overrides, removeKeys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["reasoning_effort"] != "max" {
+		t.Fatalf("reasoning_effort = %v", m["reasoning_effort"])
+	}
+	if _, ok := m["temperature"]; ok {
+		t.Fatal("temperature should be removed")
+	}
+	th, _ := m["thinking"].(map[string]any)
+	if th["type"] != "enabled" {
+		t.Fatalf("thinking = %v", m["thinking"])
+	}
+	// messages preserved
+	msgs, _ := m["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("messages = %v", m["messages"])
+	}
+}
+
 func TestProxyNonStream(t *testing.T) {
 	f := newFakeUpstream(t)
 	r, _, token := newGateway(t, f)
@@ -293,6 +322,55 @@ func TestProxyRateLimited(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &out)
 	if code := out["error"].(map[string]any)["code"]; code != "RATE_LIMITED" {
 		t.Fatalf("code = %v", code)
+	}
+}
+
+func TestProxyInjectsChannelOverrides(t *testing.T) {
+	f := newFakeUpstream(t)
+	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/inject.db", t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	uid, err := serverstore.CreateUser(db, &serverstore.User{Username: "alice", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := serverauth.IssueToken(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models, enabled, channel) VALUES ('deepseek', ?, ?, '[]', 1, 'deepseek')`, f.baseURL, upstreamKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := res.LastInsertId()
+	if _, err := db.Exec(`INSERT INTO models (name, provider_id, display_name) VALUES ('deepseek-v4-flash', ?, 'DeepSeek V4 Flash')`, pid); err != nil {
+		t.Fatal(err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	RegisterRoutes(r, db)
+
+	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"temperature":0.7}`, token, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(f.gotBody.Load().(string)), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["reasoning_effort"] != "max" {
+		t.Fatalf("reasoning_effort = %v", got["reasoning_effort"])
+	}
+	if _, ok := got["temperature"]; ok {
+		t.Fatal("temperature should be removed")
+	}
+	th, _ := got["thinking"].(map[string]any)
+	if th["type"] != "enabled" {
+		t.Fatalf("thinking = %v", got["thinking"])
 	}
 }
 
