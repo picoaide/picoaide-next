@@ -80,6 +80,13 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		}
 	}
 
+	// max_tokens 默认注入(客户端未传时用模型 default_params.max_output)
+	if params, err := serverstore.ModelDefaultParams(a.DB, req.Model); err == nil && params != "" {
+		if raw2, err := applyMaxTokensDefault(raw, params); err == nil {
+			raw = raw2
+		}
+	}
+
 	// streaming path: insert a pending usage row first, backfilled on the
 	// final SSE chunk; a client disconnect leaves it pending (no rollback).
 	var usageID int64
@@ -100,6 +107,42 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		return
 	}
 	a.serveJSON(c, resp, user.ID, req.Model)
+}
+
+// maxOutputFromDefaultParams 从模型 default_params JSON 读取 max_output。
+// ok=false 表示 JSON 里没有该字段;解析失败返回 err。
+func maxOutputFromDefaultParams(params string) (int64, bool, error) {
+	if params == "" {
+		return 0, false, nil
+	}
+	var p struct {
+		MaxOutput int64 `json:"max_output"`
+	}
+	if err := json.Unmarshal([]byte(params), &p); err != nil {
+		return 0, false, err
+	}
+	if p.MaxOutput == 0 {
+		return 0, false, nil
+	}
+	return p.MaxOutput, true, nil
+}
+
+// applyMaxTokensDefault:客户端未传 max_tokens 时,从模型 default_params.max_output 注入。
+// 无 default_params/解析失败时原样返回。
+func applyMaxTokensDefault(raw []byte, defaultParams string) ([]byte, error) {
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return raw, err
+	}
+	if _, ok := body["max_tokens"]; ok {
+		return raw, nil
+	}
+	v, ok, err := maxOutputFromDefaultParams(defaultParams)
+	if err != nil || !ok {
+		return raw, nil
+	}
+	body["max_tokens"] = v
+	return json.Marshal(body)
 }
 
 // applyChannelOverrides 深合并 overrides 进请求体,并删除 removeKeys 中的键。

@@ -79,6 +79,24 @@ func TestModelsUnauthorized(t *testing.T) {
 	}
 }
 
+func TestMaxOutputFromModelDefaultParams(t *testing.T) {
+	// from JSON default_params
+	v, ok, err := maxOutputFromDefaultParams(`{"context_length":1048576,"max_output":393216}`)
+	if err != nil || !ok || v != 393216 {
+		t.Fatalf("got %d %v %v", v, ok, err)
+	}
+	// missing -> ok=false, no error
+	v, ok, err = maxOutputFromDefaultParams(`{"context_length":1048576}`)
+	if err != nil || ok {
+		t.Fatalf("missing max_output: got %d %v %v", v, ok, err)
+	}
+	// bad JSON -> error
+	_, _, err = maxOutputFromDefaultParams(`not-json`)
+	if err == nil {
+		t.Fatal("bad json should error")
+	}
+}
+
 func TestModelsEmptyReturnsArray(t *testing.T) {
 	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/empty.db", t.TempDir()))
 	if err != nil {

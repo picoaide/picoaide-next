@@ -239,6 +239,16 @@ func GetModel(db *sql.DB, id int64) (*Model, error) {
 	return m, err
 }
 
+// ModelDefaultParams loads a model's default_params by name.
+func ModelDefaultParams(db *sql.DB, name string) (string, error) {
+	var params string
+	err := db.QueryRow(`SELECT default_params FROM models WHERE name = ?`, name).Scan(&params)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return params, err
+}
+
 // AddModel inserts a model row.
 func AddModel(db *sql.DB, m *Model) (int64, error) {
 	if m.DefaultParams == "" {

@@ -156,6 +156,31 @@ func TestApplyChannelOverrides(t *testing.T) {
 	}
 }
 
+func TestApplyMaxTokensDefault(t *testing.T) {
+	// client provided max_tokens -> untouched
+	body := []byte(`{"model":"m","max_tokens":100}`)
+	out, err := applyMaxTokensDefault(body, `{"max_output":393216}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	json.Unmarshal(out, &m)
+	if m["max_tokens"].(float64) != 100 {
+		t.Fatalf("max_tokens = %v", m["max_tokens"])
+	}
+
+	// client omitted -> inject from default_params
+	body2 := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	out2, err := applyMaxTokensDefault(body2, `{"context_length":1048576,"max_output":393216}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	json.Unmarshal(out2, &m)
+	if m["max_tokens"].(float64) != 393216 {
+		t.Fatalf("max_tokens = %v", m["max_tokens"])
+	}
+}
+
 func TestProxyNonStream(t *testing.T) {
 	f := newFakeUpstream(t)
 	r, _, token := newGateway(t, f)
@@ -371,6 +396,45 @@ func TestProxyInjectsChannelOverrides(t *testing.T) {
 	th, _ := got["thinking"].(map[string]any)
 	if th["type"] != "enabled" {
 		t.Fatalf("thinking = %v", got["thinking"])
+	}
+}
+
+func TestProxyInjectsMaxTokensFromModelDefaultParams(t *testing.T) {
+	f := newFakeUpstream(t)
+	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/maxout.db", t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	uid, err := serverstore.CreateUser(db, &serverstore.User{Username: "alice", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := serverauth.IssueToken(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models, enabled) VALUES ('p', ?, ?, '["m"]', 1)`, f.baseURL, upstreamKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO models (name, provider_id, display_name, default_params) VALUES ('m', 1, 'M', '{"context_length":1048576,"max_output":393216}')`); err != nil {
+		t.Fatal(err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	RegisterRoutes(r, db)
+
+	w := doPost(t, r, "/v1/chat/completions", `{"model":"m","messages":[{"role":"user","content":"hi"}]}`, token, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(f.gotBody.Load().(string)), &got); err != nil {
+		t.Fatal(err)
+	}
+	if v := got["max_tokens"].(float64); v != 393216 {
+		t.Fatalf("max_tokens = %v, want 393216", v)
 	}
 }
 
