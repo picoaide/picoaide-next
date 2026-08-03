@@ -132,7 +132,7 @@ func ListUsers(db *sql.DB, offset, limit int) ([]User, int64, error) {
 		return nil, 0, err
 	}
 	defer rows.Close()
-	var users []User
+	var users []User = []User{}
 	for rows.Next() {
 		u, err := scanUser(rows)
 		if err != nil {

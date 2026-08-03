@@ -28,7 +28,7 @@ export default function Usage() {
       if (from) params.set('from', from)
       if (to) params.set('to', to)
       const data = await request(`/api/admin/usage?${params}`)
-      setRows(data.rows)
+      setRows(data.rows ?? [])
     } catch (err: any) {
       setError(err.message)
     }
