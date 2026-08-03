@@ -95,11 +95,28 @@ describe('messages', () => {
       const m1 = appendMessage(db, { conversationId: convId, role: 'user', content: 'edited' })
       const m2 = appendMessage(db, { conversationId: convId, role: 'assistant', content: 'old answer' })
       const m3 = appendMessage(db, { conversationId: convId, role: 'user', content: 'followup' })
-      deleteMessagesAfter(db, m1)
+      deleteMessagesAfter(db, convId, m1)
       const left = listMessages(db, convId)
       expect(left.map((m) => m.id)).toEqual([m1])
       void m2
       void m3
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('deleteMessagesAfter does not touch other conversations (cross-conversation safety)', () => {
+    const { db, convId, cleanup } = openTestDb()
+    try {
+      const otherId = createConversation(db, { title: 'other' })
+      const m1 = appendMessage(db, { conversationId: convId, role: 'user', content: 'edited' })
+      const m2 = appendMessage(db, { conversationId: convId, role: 'assistant', content: 'old answer' })
+      const o1 = appendMessage(db, { conversationId: otherId, role: 'user', content: 'keep me' })
+      const o2 = appendMessage(db, { conversationId: otherId, role: 'assistant', content: 'also keep me' })
+      deleteMessagesAfter(db, convId, m1)
+      expect(listMessages(db, convId).map((m) => m.id)).toEqual([m1])
+      expect(listMessages(db, otherId).map((m) => m.id)).toEqual([o1, o2])
+      void m2
     } finally {
       cleanup()
     }

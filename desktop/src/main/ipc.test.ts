@@ -186,9 +186,9 @@ function makeStore(): StoreLike {
       const m = messages.find((m) => m.id === id)
       if (m) m.content = content
     },
-    deleteMessagesAfter: (id: number) => {
+    deleteMessagesAfter: (conversationId: number, id: number) => {
       for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].id > id) messages.splice(i, 1)
+        if (messages[i].conversationId === conversationId && messages[i].id > id) messages.splice(i, 1)
       }
     },
     deleteMessage: (id: number) => {

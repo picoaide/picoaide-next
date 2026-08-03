@@ -64,7 +64,7 @@ export interface StoreLike extends EngineStore {
   // 覆写为完整行:chat:messages 需要读回全字段(MessageRow 是 DBMessage 的超集,兼容引擎)
   listMessages(conversationId: number): MessageRow[]
   updateMessageContent(id: number, content: string): void
-  deleteMessagesAfter(id: number): void
+  deleteMessagesAfter(conversationId: number, id: number): void
   deleteMessage(id: number): void
   addArtifact(a: { conversationId: number; path: string; type: string; size: number }): number
   listArtifacts(conversationId: number): ArtifactRow[]
@@ -274,7 +274,7 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
     'chat:editAndRerun': async ({ conversationId, messageId, content }) => {
       const mode = deps.store.getConversation(conversationId)?.mode ?? 'ask'
       deps.store.updateMessageContent(messageId, content)
-      deps.store.deleteMessagesAfter(messageId)
+      deps.store.deleteMessagesAfter(conversationId, messageId)
       // 引擎仅允许 running/executing/planning/failed 状态重跑,编辑场景先把 done 置为 failed
       deps.store.updateConversationStatus(conversationId, 'failed')
       if (mode === 'ask') {
