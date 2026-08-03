@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"time"
 )
 
 // ModelInfo 是从上游拉取的单个模型信息。长度字段 0 表示未知,用渠道预设兜底。
@@ -46,14 +47,15 @@ func All() []string {
 	return names
 }
 
-// HTTPFetch 默认 fetchFn:GET url + Bearer key,返回响应体。
-func HTTPFetch(url, apiKey string) ([]byte, error) {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+// HTTPFetch 默认 fetchFn:GET url + Bearer key,返回响应体。ctx 控制取消,client 带超时。
+func HTTPFetch(ctx context.Context, url, apiKey string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
