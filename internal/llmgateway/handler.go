@@ -18,6 +18,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/llmgateway/channels"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
@@ -69,6 +70,16 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		return
 	}
 
+	// 渠道参数注入:思考模式等;注入失败不阻塞请求(原样转发)
+	if up.Channel != "" {
+		if ch, ok := channels.Get(up.Channel); ok {
+			ov, rm := ch.RequestOverrides(req.Model)
+			if raw2, err := applyChannelOverrides(raw, ov, rm); err == nil {
+				raw = raw2
+			}
+		}
+	}
+
 	// streaming path: insert a pending usage row first, backfilled on the
 	// final SSE chunk; a client disconnect leaves it pending (no rollback).
 	var usageID int64
@@ -89,6 +100,36 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		return
 	}
 	a.serveJSON(c, resp, user.ID, req.Model)
+}
+
+// applyChannelOverrides 深合并 overrides 进请求体,并删除 removeKeys 中的键。
+func applyChannelOverrides(raw []byte, overrides map[string]any, removeKeys []string) ([]byte, error) {
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return raw, err
+	}
+	for _, k := range removeKeys {
+		delete(body, k)
+	}
+	deepMerge(body, overrides)
+	return json.Marshal(body)
+}
+
+// deepMerge 将 src 合并进 dst(嵌套 map 递归合并,标量覆盖)。
+func deepMerge(dst, src map[string]any) {
+	for k, v := range src {
+		if sv, ok := v.(map[string]any); ok {
+			if dv, ok := dst[k].(map[string]any); ok {
+				deepMerge(dv, sv)
+				continue
+			}
+			cp := map[string]any{}
+			deepMerge(cp, sv)
+			dst[k] = cp
+			continue
+		}
+		dst[k] = v
+	}
 }
 
 // upstreamURL joins an upstream base URL with the OpenAI chat endpoint.
