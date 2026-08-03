@@ -189,6 +189,17 @@ export class AgentEngine {
     }
   }
 
+  // 引擎同一时刻只允许一个运行(共享 currentAbort 单槽);第二个并发运行直接拒绝,
+  // 避免 chat:ask/chat:continue 双发时 abort 句柄互踩、写入交错。
+  private beginRun(): AbortController {
+    if (this.currentAbort) {
+      throw new Error('已有任务在运行,请先取消或等待完成')
+    }
+    const abort = new AbortController()
+    this.currentAbort = abort
+    return abort
+  }
+
   // Ask 与 Plan 首轮共用的单步无工具循环(重试 1 次;cancel → failed)
   private async runAskLoop(
     conversationId: number,
@@ -203,8 +214,7 @@ export class AgentEngine {
     store.appendMessage({ conversationId, role: 'user', content })
     const messages: ModelMessage[] = [...lastN(history, DEFAULT_CONTEXT_WINDOW), { role: 'user', content }]
 
-    const abort = new AbortController()
-    this.currentAbort = abort
+    const abort = this.beginRun()
     let fullText = ''
     let usage: { prompt_tokens: number; completion_tokens: number } = { prompt_tokens: 0, completion_tokens: 0 }
 
@@ -366,8 +376,7 @@ export class AgentEngine {
     maxSteps: number,
   ): Promise<void> {
     const store = this.deps.store as StoreLike
-    const abort = new AbortController()
-    this.currentAbort = abort
+    const abort = this.beginRun()
     const wrapped = this.wrapTools(tools, conversationId) as ToolSet
 
     let canceled = false
@@ -442,97 +451,101 @@ export class AgentEngine {
     // SDK v7 原生审批(v7 工具审批:模型执行不暂停,本轮返回 tool-approval-request part;
     // 应用层回传 tool-approval-response 消息后再次调用模型继续)。
     // 外层手动循环:每轮 streamText(1 步),轮末若有审批请求则挂起等用户回执再续跑。
-    while (steps < maxSteps) {
-      try {
-        const result = streamText({
-          model: this.cfg.model,
-          system: this.cfg.sysPrompt,
-          messages,
-          tools: wrapped,
-          toolApproval: this.buildToolApproval(tools, highRisk),
-          stopWhen: isStepCount(1),
-          abortSignal: abort.signal,
-          maxRetries: 0, // 快速失败,由上层/用户决定重试
-          ...(this.cfg.fetch ? { fetch: this.cfg.fetch } : {}),
-        })
-        const iter = (async (): Promise<void> => {
-          for await (const part of result.fullStream) {
-            switch (part.type) {
-              case 'text-delta':
-                stepText += part.text
-                this.deps.emit({ type: 'text_delta', data: part.text })
-                break
-              case 'reasoning-delta':
-                stepReasoning += part.text
-                this.deps.emit({ type: 'reasoning_delta', data: part.text })
-                break
-              case 'tool-call':
-                stepToolCalls.push(part)
-                break
-              case 'tool-result':
-              case 'tool-error':
-                stepToolResults.push(part)
-                break
-              case 'tool-approval-request':
-                // SDK 审批请求:工具未执行;本轮结束后等用户回执
-                if (!part.isAutomatic) approvalParts.push(part)
-                break
-              case 'finish-step':
-                flushStep()
-                break
-              case 'finish':
-                // 跨轮累加(外层循环每轮独立 streamText,SDK totalUsage 为单轮值)
-                usage.prompt_tokens += part.totalUsage?.inputTokens ?? 0
-                usage.completion_tokens += part.totalUsage?.outputTokens ?? 0
-                break
-              case 'error':
-                throw part.error instanceof Error ? part.error : new Error(String(part.error))
-              case 'abort':
-                canceled = true
-                return
+    try {
+      while (steps < maxSteps) {
+        try {
+          const result = streamText({
+            model: this.cfg.model,
+            system: this.cfg.sysPrompt,
+            messages,
+            tools: wrapped,
+            toolApproval: this.buildToolApproval(tools, highRisk),
+            stopWhen: isStepCount(1),
+            abortSignal: abort.signal,
+            maxRetries: 0, // 快速失败,由上层/用户决定重试
+            ...(this.cfg.fetch ? { fetch: this.cfg.fetch } : {}),
+          })
+          const iter = (async (): Promise<void> => {
+            for await (const part of result.fullStream) {
+              switch (part.type) {
+                case 'text-delta':
+                  stepText += part.text
+                  this.deps.emit({ type: 'text_delta', data: part.text })
+                  break
+                case 'reasoning-delta':
+                  stepReasoning += part.text
+                  this.deps.emit({ type: 'reasoning_delta', data: part.text })
+                  break
+                case 'tool-call':
+                  stepToolCalls.push(part)
+                  break
+                case 'tool-result':
+                case 'tool-error':
+                  stepToolResults.push(part)
+                  break
+                case 'tool-approval-request':
+                  // SDK 审批请求:工具未执行;本轮结束后等用户回执
+                  if (!part.isAutomatic) approvalParts.push(part)
+                  break
+                case 'finish-step':
+                  flushStep()
+                  break
+                case 'finish':
+                  // 跨轮累加(外层循环每轮独立 streamText,SDK totalUsage 为单轮值)
+                  usage.prompt_tokens += part.totalUsage?.inputTokens ?? 0
+                  usage.completion_tokens += part.totalUsage?.outputTokens ?? 0
+                  break
+                case 'error':
+                  throw part.error instanceof Error ? part.error : new Error(String(part.error))
+                case 'abort':
+                  canceled = true
+                  return
+              }
             }
+          })()
+          await this.consumeWithAbort(iter, abort)
+          // 推进上下文:每轮模型调用结果(含 tool-call/tool-result/审批请求)追加到 messages,
+          // 审批 response 才能匹配对应 tool-call(SDK 自动执行已批准工具)
+          messages.push(...(await result.response).messages)
+        } catch (err) {
+          if (abort.signal.aborted || isAbortError(err)) {
+            canceled = true
+          } else {
+            this.markFailed(store, conversationId)
+            const message = err instanceof Error ? err.message : String(err)
+            this.deps.emit({ type: 'error', data: message })
+            throw err
           }
-        })()
-        await this.consumeWithAbort(iter, abort)
-        // 推进上下文:每轮模型调用结果(含 tool-call/tool-result/审批请求)追加到 messages,
-        // 审批 response 才能匹配对应 tool-call(SDK 自动执行已批准工具)
-        messages.push(...(await result.response).messages)
-      } catch (err) {
-        if (abort.signal.aborted || isAbortError(err)) {
-          canceled = true
-        } else {
-          this.markFailed(store, conversationId)
-          const message = err instanceof Error ? err.message : String(err)
-          this.deps.emit({ type: 'error', data: message })
-          throw err
         }
-      }
-      if (canceled) break
+        if (canceled) break
 
-      // 审批回执 → tool-approval-response 消息续跑(SDK 原生机制)。审批轮照常计入
-      // 步数预算:模型反复请求审批也会耗尽 maxSteps,不会无限弹确认框。
-      if (approvalParts.length > 0) {
-        await this.handleApprovalParts(approvalParts, messages)
-        approvalParts.length = 0
-        continue
+        // 审批回执 → tool-approval-response 消息续跑(SDK 原生机制)。审批轮照常计入
+        // 步数预算:模型反复请求审批也会耗尽 maxSteps,不会无限弹确认框。
+        if (approvalParts.length > 0) {
+          await this.handleApprovalParts(approvalParts, messages)
+          approvalParts.length = 0
+          continue
+        }
+        // 无审批:本轮有工具调用 → 结果已随 response.messages 回传 → 续跑让模型继续;否则完成
+        if (!lastStepHadToolCalls) break
       }
-      // 无审批:本轮有工具调用 → 结果已随 response.messages 回传 → 续跑让模型继续;否则完成
-      if (!lastStepHadToolCalls) break
-    }
 
-    if (canceled) {
-      this.markFailed(store, conversationId)
-      this.deps.emit({ type: 'canceled', data: { reason: 'user_canceled' } })
-      return
+      if (canceled) {
+        this.markFailed(store, conversationId)
+        this.deps.emit({ type: 'canceled', data: { reason: 'user_canceled' } })
+        return
+      }
+      if (steps >= maxSteps && lastStepHadToolCalls) {
+        // 步数超限:Agent 还想继续;UI 后续提供"继续/停止"(继续 = 截断到最后一条 user 消息重发 run)
+        this.markFailed(store, conversationId)
+        this.deps.emit({ type: 'error', data: '达到最大步骤数' })
+        return
+      }
+      if (store.getConversation(conversationId)) store.updateConversationStatus(conversationId, 'done')
+      this.deps.emit({ type: 'done', data: { usage } })
+    } finally {
+      this.currentAbort = null
     }
-    if (steps >= maxSteps && lastStepHadToolCalls) {
-      // 步数超限:Agent 还想继续;UI 后续提供"继续/停止"(继续 = 截断到最后一条 user 消息重发 run)
-      this.markFailed(store, conversationId)
-      this.deps.emit({ type: 'error', data: '达到最大步骤数' })
-      return
-    }
-    if (store.getConversation(conversationId)) store.updateConversationStatus(conversationId, 'done')
-    this.deps.emit({ type: 'done', data: { usage } })
   }
 
   // 竞速消费 fullStream:挂起流不主动响应 abort 时 SDK 的 fullStream 不 reject,这里竞速保证 cancel() 立即生效

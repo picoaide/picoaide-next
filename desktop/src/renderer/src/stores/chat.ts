@@ -72,6 +72,7 @@ interface ChatState {
   localError: string | null
   hasMoreMessages: boolean
   loadedTotal: number
+  loadingEarlier: boolean
   loadEarlierMessages: () => Promise<void>
   newConversation: () => Promise<number | null>
   loadConversations: () => Promise<void>
@@ -119,6 +120,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   localError: null,
   hasMoreMessages: false,
   loadedTotal: 0,
+  loadingEarlier: false,
   pendingQuote: null,
 
   newConversation: async () => {
@@ -185,18 +187,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   loadEarlierMessages: async () => {
+    if (get().loadingEarlier) return
     const { activeId, loadedTotal } = get()
     if (activeId === null) return
-    const rows = await picoaide().chatMessagesPaged({ conversationId: activeId, offset: loadedTotal, limit: PAGE_SIZE })
-    if (rows.length === 0) {
-      set({ hasMoreMessages: false })
-      return
+    set({ loadingEarlier: true })
+    try {
+      const rows = await picoaide().chatMessagesPaged({ conversationId: activeId, offset: loadedTotal, limit: PAGE_SIZE })
+      if (rows.length === 0) {
+        set({ hasMoreMessages: false })
+        return
+      }
+      set((s) => ({
+        messages: [...mapMessages(rows), ...s.messages],
+        loadedTotal: s.loadedTotal + rows.length,
+        hasMoreMessages: rows.length === PAGE_SIZE,
+      }))
+    } finally {
+      set({ loadingEarlier: false })
     }
-    set((s) => ({
-      messages: [...mapMessages(rows), ...s.messages],
-      loadedTotal: s.loadedTotal + rows.length,
-      hasMoreMessages: rows.length === PAGE_SIZE,
-    }))
   },
 
   deleteConversation: async (id) => {
@@ -214,20 +222,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ localError: '网络已断开,请恢复连接后再发送' })
       return
     }
-    let activeId = get().activeId
-    if (activeId === null) {
-      activeId = await picoaide().chatNew({ mode: get().mode })
-    }
-    const mode = get().mode
-    const id = activeId
-    // 乐观追加用户消息;assistant 内容以流式增量呈现,结束后从 DB 重载
-    set((s) => ({
-      messages: [...s.messages, { id: Date.now(), role: 'user', content: text, is_error: 0, tool_name: '', reasoning: '' }],
-      streaming: true,
-      streamingText: '',
-      localError: null,
-    }))
+    // 同步置 streaming:关闭 chatNew await 期间双击/并发发送的竞态窗口(第二个发送直接返回)
+    set((s) => ({ streaming: true, streamingText: '', localError: null }))
     try {
+      let activeId = get().activeId
+      if (activeId === null) {
+        activeId = await picoaide().chatNew({ mode: get().mode })
+      }
+      const id = activeId
+      // 乐观追加用户消息;assistant 内容以流式增量呈现,结束后从 DB 重载
+      set((s) => ({
+        messages: [...s.messages, { id: Date.now(), role: 'user', content: text, is_error: 0, tool_name: '', reasoning: '' }],
+      }))
       await picoaide().chatAsk(id, text)
       const messages = mapMessages(await picoaide().chatMessages(id))
       set({ messages, streaming: false, streamingText: '', streamingReasoning: '' })

@@ -33,10 +33,15 @@ export default function SearchDialog({ open, onClose }: { open: boolean; onClose
     }
     setBusy(true)
     let canceled = false
-    void window.picoaide.chatSearch(query).then((r) => {
-      if (!canceled) setResults(r)
-      setBusy(false)
-    })
+    window.picoaide
+      .chatSearch(query)
+      .then((r) => {
+        if (!canceled) setResults(r)
+        setBusy(false)
+      })
+      .catch(() => {
+        if (!canceled) setBusy(false)
+      })
     return () => {
       canceled = true
     }
