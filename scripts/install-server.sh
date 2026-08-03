@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
-# PicoAide 服务端一键部署脚本(Ubuntu)
+# PicoAide 服务端一键部署脚本(Ubuntu,非交互,全部用环境变量配置)
 # 用法(需 root 用户直接运行;若系统有 sudo 也可 sudo bash):
-#   curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-next/master/scripts/install-server.sh | bash
-#   curl -fsSL ... | DOMAIN=picoaide.example.com bash                 # 非交互指定域名
-#   curl -fsSL ... | bash -s -- --domain picoaide.example.com --admin-pass secret
+#   curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-next/master/scripts/install-server.sh | \
+#     DOMAIN=picoaide.example.com bash
+#
+# 环境变量(必填 DOMAIN,其余可选):
+#   DOMAIN        部署域名(必填,支持 IP,如 10.0.0.5 或 picoaide.example.com)
+#   INSTALL_DIR   部署目录(默认 /data/picoaide-next)
+#   ADMIN_USER    管理员账号(默认 admin)
+#   ADMIN_PASS    管理员密码(默认随机生成并打印)
+#   SERVER_IMAGE  服务端镜像(默认 ghcr.io/picoaide/picoaide-server:latest)
+#   REINSTALL=yes 目录已存在且非空时,清除旧部署并重新安装(默认安全退出)
 #
 # 行为:
 #   1. 检查系统(Ubuntu)与依赖(docker/compose/curl/jq/openssl),缺失自动安装
-#   2. 输入/指定域名 → 用 openssl 生成自签名证书到 certs/,Caddyfile 显式指定
+#   2. 用 openssl 生成自签名证书到 certs/,Caddyfile 显式指定
 #      tls /certs/server.crt /certs/server.key,管理员换证书 = 替换 certs/ 下文件后重启
-#   3. 生成随机强密码(可用 --admin-pass 指定);全部变量内联写入 docker-compose.yml
-#   4. 已有目录且有文件 → 询问是否重装(停止镜像、检查 80/443、清空目录)
+#   3. 生成随机强密码(可用 ADMIN_PASS 指定);全部变量内联写入 docker-compose.yml
+#   4. 已有目录且有文件 → 除非 REINSTALL=yes 否则安全退出
 #   5. 启动服务,展示访问地址/账号/密码/已安装项清单
 
 set -euo pipefail
@@ -23,15 +30,7 @@ ADMIN_PASS="${ADMIN_PASS:-}"
 DOCKER_MIRROR="${DOCKER_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/docker-ce}"
 SERVER_IMAGE="${SERVER_IMAGE:-ghcr.io/picoaide/picoaide-server:latest}"
 LOG_FILE="${LOG_FILE:-/tmp/picoaide-install.log}"
-
-# ---- 解析参数 --domain / --admin-pass ----
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --domain) DOMAIN="${2:-}"; shift 2 ;;
-    --admin-pass) ADMIN_PASS="${2:-}"; shift 2 ;;
-    *) shift ;;
-  esac
-done
+REINSTALL="${REINSTALL:-}"
 
 # ---- 环境检查(最先,非 root 直接退出) ----
 [ "$(id -u)" = 0 ] || { echo "错误: 必须以 root 用户运行。请用 root 登录后重试(例如: curl -fsSL ... | bash),或使用 sudo 运行。" >&2; exit 1; }
@@ -97,15 +96,9 @@ ensure_docker
 docker compose version >/dev/null 2>&1 || fail "docker compose 插件不可用"
 log "docker compose 已就绪"
 
-# ---- 参数/输入 ----
+# ---- 参数校验(纯环境变量,非交互) ----
 step "配置部署参数(域名 / 管理员密码)"
-# 注意: curl ... | bash 时 stdin 是脚本管道,read 会吞掉脚本文本;
-# 交互一律改从 /dev/tty 读取,提示写到 stderr(管道不影响);无 tty 时读取失败 → 置空走报错
-if [ -z "$DOMAIN" ]; then
-  printf '请输入部署域名(如 picoaide.example.com): ' >&2
-  if read -r DOMAIN < /dev/tty; then :; else DOMAIN=""; fi
-fi
-[ -n "$DOMAIN" ] || fail "未提供域名(可用 DOMAIN=your.domain bash 预置)"
+[ -n "$DOMAIN" ] || fail "未提供域名,请以 DOMAIN=your.domain bash 方式运行"
 case "$DOMAIN" in
   */*) fail "域名不合法: $DOMAIN" ;;
 esac
@@ -117,20 +110,19 @@ log "管理员账号: $ADMIN_USER(密码由下方展示)"
 # ---- 已有目录检查:是否重装 ----
 step "检查部署目录 $INSTALL_DIR"
 if [ -d "$INSTALL_DIR" ] && [ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]; then
-  log "检测到 $INSTALL_DIR 已存在且非空(已有部署或文件)"
-  log "如果重新安装:将停止相关容器、检查 80/443 端口、并清空 $INSTALL_DIR 下所有文件"
-  printf '是否重新安装?输入 yes 继续,其他任意键取消: ' >&2
-  if read -r confirm < /dev/tty; then :; else confirm=""; fi
-  if [ "$confirm" != "yes" ]; then
-    log "已取消,未做任何改动"
-    exit 0
+  if [ "$REINSTALL" = "yes" ]; then
+    log "检测到 $INSTALL_DIR 已存在且非空,REINSTALL=yes → 清除旧部署重新安装"
+    log "将停止相关容器、检查 80/443 端口、并清空 $INSTALL_DIR 下所有文件"
+    log "停止相关容器..."
+    docker compose -f "$INSTALL_DIR/docker-compose.yml" down 2>/dev/null || true
+    docker ps -aq --filter "name=picoaide-" | xargs -r docker rm -f 2>/dev/null || true
+    log "清空 $INSTALL_DIR 下所有文件..."
+    rm -rf "${INSTALL_DIR:?}/"*
+    log "旧部署已清除"
+  else
+    log "检测到 $INSTALL_DIR 已存在且非空"
+    fail "为避免覆盖已有部署,已安全退出。确认要重装请加 REINSTALL=yes 重新运行"
   fi
-  log "停止相关容器..."
-  docker compose -f "$INSTALL_DIR/docker-compose.yml" down 2>/dev/null || true
-  docker ps -aq --filter "name=picoaide-" | xargs -r docker rm -f 2>/dev/null || true
-  log "清空 $INSTALL_DIR 下所有文件..."
-  rm -rf "${INSTALL_DIR:?}/"*
-  log "旧部署已清除"
 fi
 
 # ---- 部署目录 ----
