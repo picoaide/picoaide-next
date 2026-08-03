@@ -100,8 +100,9 @@ log "docker compose 已就绪"
 # ---- 参数/输入 ----
 step "配置部署参数(域名 / 管理员密码)"
 # 注意: curl ... | bash 时 stdin 是脚本管道,read 会吞掉脚本文本;
-# 交互一律改从 /dev/tty 读取(无 tty 时读取失败 → 置空走报错)
+# 交互一律改从 /dev/tty 读取,提示写到 stderr(管道不影响);无 tty 时读取失败 → 置空走报错
 if [ -z "$DOMAIN" ]; then
+  printf '请输入部署域名(如 picoaide.example.com): ' >&2
   if read -r DOMAIN < /dev/tty; then :; else DOMAIN=""; fi
 fi
 [ -n "$DOMAIN" ] || fail "未提供域名(可用 DOMAIN=your.domain bash 预置)"
@@ -118,6 +119,7 @@ step "检查部署目录 $INSTALL_DIR"
 if [ -d "$INSTALL_DIR" ] && [ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]; then
   log "检测到 $INSTALL_DIR 已存在且非空(已有部署或文件)"
   log "如果重新安装:将停止相关容器、检查 80/443 端口、并清空 $INSTALL_DIR 下所有文件"
+  printf '是否重新安装?输入 yes 继续,其他任意键取消: ' >&2
   if read -r confirm < /dev/tty; then :; else confirm=""; fi
   if [ "$confirm" != "yes" ]; then
     log "已取消,未做任何改动"
