@@ -150,7 +150,7 @@ export async function sendCdp(
     const timer = setTimeout(() => {
       ws.close()
       finish(() => reject(new ToolError('浏览器插件未连接')))
-    }, opts.timeoutMs ?? 10000)
+    }, opts.timeoutMs ?? 5000)
     ws.on('open', () => ws.send(JSON.stringify({ id, method, params })))
     ws.on('message', (data: Buffer) => {
       let msg: { id?: unknown; result?: unknown; error?: { message?: string } }

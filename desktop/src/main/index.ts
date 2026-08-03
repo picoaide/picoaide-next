@@ -377,7 +377,9 @@ app.whenReady().then(async () => {
     ...buildAgentHandlers({
       store,
       sysPrompt: async () => {
-        const base = '你是 PicoAide,企业办公智能体助手。回答简洁准确;需要操作本机文件、终端、浏览器、屏幕时,使用可用工具。'
+        const base =
+          '你是 PicoAide,企业办公智能体助手。回答简洁准确;需要操作本机文件、终端、浏览器、屏幕时,使用可用工具。' +
+          '浏览器操作(打开/导航/点击/输入)必须调用 browser_* 工具;若工具返回"浏览器插件未连接",必须明确告知用户浏览器插件未就绪(需在 Chrome/Edge 安装 PicoAide 扩展),不得虚构操作结果。'
         try {
           const extra = await loadInstalledSkillInstruction()
           return extra ? base + extra : base

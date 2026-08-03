@@ -34,15 +34,18 @@ class MockProvider {
   modelId = 'mock-model'
   script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang'
   toolName: string
+  toolInput: unknown
   callCount = 0
   prompts: unknown[] = []
 
   constructor(
     script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang' = 'text',
     toolName = 'file_delete',
+    toolInput: unknown = { path: '/home/u/x.doc' },
   ) {
     this.script = script
     this.toolName = toolName
+    this.toolInput = toolInput
   }
 
   private hasToolResults(prompt: unknown): boolean {
@@ -87,7 +90,7 @@ class MockProvider {
           type: 'tool-call',
           toolCallId: 'call_1',
           toolName: this.toolName,
-          input: JSON.stringify({ path: '/home/u/x.doc' }),
+          input: JSON.stringify(this.toolInput),
         },
       ]
     if (this.script === 'two-tool-calls')
@@ -203,8 +206,9 @@ function makeEngine(
   cfg: Partial<{ maxSteps: number; approvalTimeoutMs: number; retryCount: number; fetch: typeof fetch }> = {},
   store: ReturnType<typeof makeStore> = makeStore(),
   toolName = 'file_delete',
+  toolInput: unknown = { path: '/home/u/x.doc' },
 ) {
-  const mock = new MockProvider(script, toolName)
+  const mock = new MockProvider(script, toolName, toolInput)
   const events: AgentEvent[] = []
   const engine = new AgentEngine(
     { model: mock as unknown as LanguageModel, sysPrompt: 'sys', ...cfg },
@@ -911,5 +915,42 @@ describe('越界引导(boundary guide)', () => {
     engine.confirm('call-2', false)
     await expect(run).rejects.toThrow()
     expect(addedDirs).toEqual([])
+  })
+})
+
+describe('browser bridge end-to-end', () => {
+  it('runs browser_navigate through the approval gate against a real CDP bridge', async () => {
+    const { WebSocketServer } = await import('ws')
+    const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
+    await new Promise<void>((r) => wss.on('listening', () => r()))
+    const port = (wss.address() as { port: number }).port
+    const methods: string[] = []
+    wss.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString()) as { id: number; method: string }
+        methods.push(msg.method)
+        ws.send(JSON.stringify({ id: msg.id, result: { ok: true } }))
+      })
+    })
+    try {
+      const { createBrowserTools } = await import('../tools/browser')
+      const btools = createBrowserTools({ port })
+      const { events, engine } = makeEngine('tool-call', {}, makeStore(), 'browser_navigate', { url: 'https://www.google.com' })
+      const run = engine.run({
+        content: '用浏览器打开谷歌',
+        mode: 'craft',
+        tools: { browser_navigate: btools.browser_navigate as GatedTool },
+        highRiskTools: new Set(['browser_navigate']),
+      })
+      await waitFor(() => eventsOf(events, 'confirm_required').length === 1)
+      const req = eventsOf(events, 'confirm_required')[0] as { data: { request_id: string; op: string } }
+      expect(req.data.op).toBe('browser_navigate')
+      engine.confirm(req.data.request_id, true)
+      await run
+      expect(methods).toContain('browser.navigate')
+      expect(eventsOf(events, 'tool_end')).toHaveLength(1)
+    } finally {
+      await new Promise<void>((r) => wss.close(() => r()))
+    }
   })
 })
