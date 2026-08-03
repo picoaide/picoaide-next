@@ -35,6 +35,7 @@ import { getBootstrap } from './gateway/bootstrap'
 import { createHealthPoller } from './gateway/health'
 import type { Session } from './gateway/config'
 import { establishSession, clearCaches, getBootstrapCache, getCurrentSession, setBootstrapCache } from './session_cache'
+import { clearCredentials as clearMcpCredentials } from './mcp/installer'
 import { buildPluginHandlers } from './plugin_ipc'
 
 let mainWindow: BrowserWindow | null = null
@@ -67,7 +68,6 @@ function buildMenu(): void {
       label: '文件',
       submenu: [
         { label: '新建会话', accelerator: 'Cmd+N', click: () => send('new-chat') },
-        { label: '新建项目', accelerator: 'Cmd+Shift+N', click: () => send('new-project') },
         { type: 'separator' },
         { role: 'close' },
       ],
@@ -359,6 +359,8 @@ app.whenReady().then(async () => {
     onSessionCleared: () => {
       stopPoller()
       resetAgentEngine()
+      // 登出必须清 MCP 凭证内存,否则下一个用户的会话沿用上一个用户的插件凭证
+      clearMcpCredentials()
     },
   }
 

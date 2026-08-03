@@ -70,7 +70,10 @@ export async function installCertificateVerification(storePath: string, opts: In
   if (!session || typeof session.setCertificateVerifyProc !== 'function') return
 
   session.setCertificateVerifyProc((request: any, callback: (verificationResult: number) => void) => {
+    // key 用 host:port:同一主机不同端口(多服务)各自 TOFU,证书不能串用
     const host: string = request?.hostname ?? ''
+    const port: number | undefined = request?.port
+    const hostKey = port ? `${host}:${port}` : host
     const cert = request?.certificate
     let fingerprint = ''
     try {
@@ -82,15 +85,15 @@ export async function installCertificateVerification(storePath: string, opts: In
       callback(-2)
       return
     }
-    const status = checkFingerprint(storePath, host, fingerprint)
+    const status = checkFingerprint(storePath, hostKey, fingerprint)
     if (status === 'trusted') {
       callback(0)
     } else if (status === 'mismatch') {
       callback(-2)
     } else {
       // TOFU:首次连接未知指纹 → 记录并信任;此后同指纹 trusted、不同指纹(如 MITM)拒绝
-      saveFingerprint(storePath, host, fingerprint)
-      opts.onUnknownFingerprint?.(host, fingerprint)
+      saveFingerprint(storePath, hostKey, fingerprint)
+      opts.onUnknownFingerprint?.(hostKey, fingerprint)
       callback(0)
     }
   })

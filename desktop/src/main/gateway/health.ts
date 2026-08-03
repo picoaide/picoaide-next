@@ -15,10 +15,19 @@ export async function ping(serverURL: string, token: string): Promise<HealthStat
 
 export function createHealthPoller(session: Session, opts: { intervalMs: number }) {
   let timer: ReturnType<typeof setInterval> | null = null
+  let inFlight = false
   return {
     start(cb: (status: HealthStatus) => void): void {
       if (timer) return
-      const tick = async () => cb(await ping(session.serverURL, session.token))
+      const tick = async () => {
+        if (inFlight) return // 上一轮 ping 未返回:跳过,不堆叠请求、不覆盖新鲜结果
+        inFlight = true
+        try {
+          cb(await ping(session.serverURL, session.token))
+        } finally {
+          inFlight = false
+        }
+      }
       timer = setInterval(tick, opts.intervalMs)
       void tick()
     },

@@ -29,11 +29,13 @@ export default function Usage() {
       if (to) params.set('to', to)
       const data = await request(`/api/admin/usage?${params}`)
       setRows(data.rows ?? [])
+      setError('')
     } catch (err: any) {
       setError(err.message)
     }
-  }, [group, from, to])
+  }, [group])
 
+  // 只在分组变化或点击"查询"时加载,避免每次击键/改日期都发请求
   useEffect(() => { load() }, [load])
 
   const chartData = rows.map((r) => ({ name: r.label, tokens: r.prompt_tokens + r.completion_tokens, requests: r.requests }))

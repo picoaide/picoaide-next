@@ -101,16 +101,18 @@ describe('installCertificateVerification', () => {
     expect(proc).toBeTruthy()
 
     // 1st connect: unknown cert → trusted (pinned)
-    proc!({ hostname: 'gw', certificate: { data: cert1 } }, (n) => results.push(n))
+    proc!({ hostname: 'gw', port: 443, certificate: { data: cert1 } }, (n) => results.push(n))
     // 2nd connect: same cert → trusted
-    proc!({ hostname: 'gw', certificate: { data: cert1 } }, (n) => results.push(n))
-    // 3rd connect: different cert (MITM) → rejected
-    proc!({ hostname: 'gw', certificate: { data: cert2 } }, (n) => results.push(n))
+    proc!({ hostname: 'gw', port: 443, certificate: { data: cert1 } }, (n) => results.push(n))
+    // 3rd connect: different cert on same port (MITM) → rejected
+    proc!({ hostname: 'gw', port: 443, certificate: { data: cert2 } }, (n) => results.push(n))
     // 4th connect: other host unknown → trusted+pinned
-    proc!({ hostname: 'other', certificate: { data: cert3 } }, (n) => results.push(n))
+    proc!({ hostname: 'other', port: 443, certificate: { data: cert3 } }, (n) => results.push(n))
+    // 5th connect: same host, different port → separate pin (cert1 not shared across ports)
+    proc!({ hostname: 'gw', port: 8443, certificate: { data: cert1 } }, (n) => results.push(n))
 
-    expect(results).toEqual([0, 0, -2, 0])
-    expect(notified).toEqual([['gw', fp1], ['other', fp3]])
-    expect(loadFingerprints(store)).toEqual({ gw: fp1, other: fp3 })
+    expect(results).toEqual([0, 0, -2, 0, 0])
+    expect(notified).toEqual([['gw:443', fp1], ['other:443', fp3], ['gw:8443', fp1]])
+    expect(loadFingerprints(store)).toEqual({ 'gw:443': fp1, 'other:443': fp3, 'gw:8443': fp1 })
   })
 })

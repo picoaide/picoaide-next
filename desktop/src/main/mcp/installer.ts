@@ -118,7 +118,7 @@ export function uninstallPlugin(input: { id: number; mcpDir?: string }): void {
 
 export interface RefreshResult {
   id: number
-  status: 'ok' | 'disabled'
+  status: 'ok' | 'disabled' | 'retry'
 }
 
 // 启动重拉:登录态下对已安装插件重拉 /config → 凭证进内存(不落盘);服务端下架(404)→ 标记停用
@@ -140,9 +140,12 @@ export async function refreshPluginCredentials(input: {
         setMcpEnabled({ id: rec.id, enabled: false, mcpDir: dir })
         credentials.delete(rec.id)
         results.push({ id: rec.id, status: 'disabled' })
+      } else if (kind === 'rate_limited') {
+        // 限流:插件并未下架,保留凭证与启用状态,如实上报 retry(不谎报 disabled)
+        results.push({ id: rec.id, status: 'retry' })
       } else {
-        // 网络/限流等瞬态错误:保留原状态,下次启动再试
-        results.push({ id: rec.id, status: kind === 'rate_limited' ? 'disabled' : 'ok' })
+        // 网络等瞬态错误:保留原状态,下次启动再试
+        results.push({ id: rec.id, status: 'retry' })
       }
     }
   }

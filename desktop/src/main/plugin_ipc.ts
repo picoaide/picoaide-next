@@ -1,4 +1,4 @@
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { dataDir } from './paths'
 import { getBootstrapCache, getCurrentSession } from './session_cache'
 import { getAllowedDirsFromSettings } from './tools/paths'
@@ -151,7 +151,12 @@ export function buildPluginHandlers(deps: PluginIpcDeps): Record<string, (...arg
     // get: 不传参;set: { dirs: [...] } → 保存并返回当前列表
     'settings:allowedDirs': (input?: { dirs?: string[] }) => {
       if (input?.dirs) {
-        store.setSetting('allowed_dirs', JSON.stringify(input.dirs))
+        // 安全边界:只接受绝对路径;相对路径/空串直接拒绝,防止 renderer 传 ['/'] 或任意串
+        const dirs = input.dirs.filter((d) => typeof d === 'string' && d.length > 0)
+        if (dirs.some((d) => !isAbsolute(d))) {
+          throw new Error('VALIDATION: 可访问目录必须是绝对路径')
+        }
+        store.setSetting('allowed_dirs', JSON.stringify(dirs))
       }
       return getAllowedDirsFromSettings(store.getSetting)
     },
