@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import type { Session, BootstrapConfig } from '../main/gateway/config'
 import type { AgentEvent } from '../main/agent/events'
-import type { ArtifactRow, ConversationRow, MessageRow } from '../main/ipc'
+import type { ArtifactRow, ConversationRow, MessageRow, ProjectRow } from '../main/ipc'
 
 type Unsub = () => void
 
@@ -26,7 +26,16 @@ const api = {
   logout: (): Promise<void> => ipcRenderer.invoke('auth:logout'),
   refreshBootstrap: (): Promise<BootstrapConfig> => ipcRenderer.invoke('auth:refreshBootstrap'),
   oidcLogin: (serverURL: string): Promise<void> => ipcRenderer.invoke('auth:oidcLogin', { serverURL }),
-  chatNew: (input?: { title?: string; mode?: string }): Promise<number> => ipcRenderer.invoke('chat:new', input),
+  chatNew: (input?: { title?: string; mode?: string; projectId?: number | null }): Promise<number> =>
+    ipcRenderer.invoke('chat:new', input),
+  projectList: (): Promise<ProjectRow[]> => ipcRenderer.invoke('project:list'),
+  projectCreate: (input: { name: string; path: string }): Promise<number> =>
+    ipcRenderer.invoke('project:create', input),
+  projectDelete: (id: number): Promise<void> => ipcRenderer.invoke('project:delete', { id }),
+  moveConversation: (conversationId: number, projectId: number | null): Promise<void> =>
+    ipcRenderer.invoke('conversation:moveProject', { conversationId, projectId }),
+  workspaceListFiles: (): Promise<string[]> => ipcRenderer.invoke('workspace:listFiles'),
+  pickDirectory: (): Promise<string[]> => ipcRenderer.invoke('dialog:pickDirectory'),
   chatAsk: (conversationId: number, content: string): Promise<void> =>
     ipcRenderer.invoke('chat:ask', { conversationId, content }),
   chatContinue: (conversationId: number): Promise<void> =>

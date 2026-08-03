@@ -1,4 +1,5 @@
-import { ipcMain, nativeTheme, shell } from 'electron'
+import { dialog, ipcMain, nativeTheme, shell } from 'electron'
+import { mkdirSync } from 'node:fs'
 import { AgentEngine } from './agent/engine'
 import type { GatedTool, StoreLike as EngineStore } from './agent/engine'
 import type { AgentEvent } from './agent/events'
@@ -6,6 +7,8 @@ import type { LanguageModel } from 'ai'
 import { ApiError, AuthError } from './gateway/auth'
 import type { Session, BootstrapConfig } from './gateway/config'
 import { establishSession, validateServerURL, clearCaches, setBootstrapCache, getCurrentSession } from './session_cache'
+import { workspaceFor } from './store/projects'
+import { listFilesRecursive } from './store/files'
 
 export const VERSION = '0.2.0'
 
@@ -17,8 +20,16 @@ export interface ConversationRow {
   status: string
   model: string
   workspace: string
+  project_id: number | null
   created_at: string
   updated_at: string
+}
+
+export interface ProjectRow {
+  id: number
+  name: string
+  path: string
+  created_at: string
 }
 
 // 与 src/main/store/messages.ts MessageRow 结构一致(自包含,不 import store)
@@ -37,12 +48,13 @@ export interface MessageRow {
 
 // 引擎 StoreLike + 会话级操作(index.ts 用 store 模块函数包一层即可,零 cast)
 export interface StoreLike extends EngineStore {
-  createConversation(input?: { title?: string; mode?: string }): number
+  createConversation(input?: { title?: string; mode?: string; projectId?: number | null }): number
   listConversations(): ConversationRow[]
   getConversation(id: number): ConversationRow | null
   updateConversationStatus(id: number, status: string): void
   deleteConversation(id: number): void
   setConversationTitle(id: number, title: string): void
+  setConversationWorkspace(id: number, workspace: string): void
   touchConversation(id: number): void
   // 覆写为完整行:chat:messages 需要读回全字段(MessageRow 是 DBMessage 的超集,兼容引擎)
   listMessages(conversationId: number): MessageRow[]
@@ -51,6 +63,12 @@ export interface StoreLike extends EngineStore {
   getSetting(key: string): string | null
   setSetting(key: string, value: string): void
   getAllSettings(): Record<string, string>
+  // 项目(迁移 0010)
+  createProject(input: { name: string; path: string }): number
+  listProjects(): ProjectRow[]
+  getProject(id: number): ProjectRow | null
+  deleteProject(id: number): void
+  setConversationProject(conversationId: number, projectId: number | null): void
 }
 
 export interface ArtifactRow {
@@ -67,8 +85,11 @@ export interface AgentIpcDeps {
   createModel: () => LanguageModel
   sysPrompt: string | (() => string) | (() => Promise<string>)
   // 工具注册表(本地文件/终端/沙盒/屏幕/剪贴板/web/浏览器桥/远程知识库),index.ts 构建;craft 模式时调用
-  getTools: () => Promise<{ tools: Record<string, GatedTool>; highRiskTools: Set<string> }>
+  getTools: (workspace?: string) => Promise<{ tools: Record<string, GatedTool>; highRiskTools: Set<string> }>
   getWindow: () => { webContents: { send(channel: string, payload: unknown): void } } | null
+  // @ 文件选择器:枚举目录由主进程组装(可访问目录 + 全部项目目录),renderer 不可指定任意路径
+  listAllowedDirs?: () => string[]
+  listProjectPaths?: () => string[]
   // 越界引导:确认后将目录加入可访问目录(settings allowed_dirs)
   addAllowedDir?: (dir: string) => void
   // 引擎重置钩子:登出/换账号时由宿主(index.ts)调用,丢弃缓存的
@@ -82,7 +103,7 @@ export interface IpcHandlers {
   'picoaide:version': () => string
   'picoaide:rendererReady': () => void
   'theme:get': () => 'dark' | 'light'
-  'chat:new': (input?: { title?: string; mode?: string }) => number
+  'chat:new': (input?: { title?: string; mode?: string; projectId?: number | null }) => number
   'chat:ask': (input: { conversationId: number; content: string }) => Promise<void>
   'chat:continue': (input: { conversationId: number }) => Promise<void>
   'chat:approvePlan': (input: { conversationId: number; ok: boolean }) => Promise<void>
@@ -95,6 +116,12 @@ export interface IpcHandlers {
   'chat:delete': (input: { conversationId: number }) => void
   'agent:confirm': (input: { requestId: string; ok: boolean }) => void
   'artifact:showInFolder': (input: { path: string }) => void
+  'project:list': () => ProjectRow[]
+  'project:create': (input: { name: string; path: string }) => number
+  'project:delete': (input: { id: number }) => void
+  'conversation:moveProject': (input: { conversationId: number; projectId: number | null }) => void
+  'workspace:listFiles': () => string[]
+  'dialog:pickDirectory': () => Promise<string[]>
   'auth:login': (input: { serverURL: string; username: string; password: string }) => Promise<{
     session: Session & { persisted: boolean }
     bootstrap: BootstrapConfig
@@ -158,11 +185,39 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
       rendererReady = true
       flushPending()
     },
-    'chat:new': (input) => deps.store.createConversation(input),
+    'chat:new': (input) => {
+      const projectId = input?.projectId ?? null
+      const id = deps.store.createConversation({ title: input?.title, mode: input?.mode, projectId })
+      if (projectId !== null) {
+        const project = deps.store.getProject(projectId)
+        if (project) {
+          const ws = workspaceFor(project.path, id)
+          mkdirSync(ws, { recursive: true })
+          deps.store.setConversationWorkspace(id, ws)
+        }
+      }
+      return id
+    },
+    'project:list': () => deps.store.listProjects(),
+    'project:create': ({ name, path }) => deps.store.createProject({ name, path }),
+    'project:delete': ({ id }) => deps.store.deleteProject(id),
+    'conversation:moveProject': ({ conversationId, projectId }) => deps.store.setConversationProject(conversationId, projectId),
+    'workspace:listFiles': () => {
+      // 安全边界:只枚举主进程组装的目录(全部项目目录 + 可访问目录),renderer 不可指定任意路径
+      const projectDirs = deps.listProjectPaths?.() ?? []
+      const allowed = deps.listAllowedDirs?.() ?? []
+      return listFilesRecursive([...projectDirs, ...allowed])
+    },
+    'dialog:pickDirectory': async () => {
+      const win = deps.getWindow()
+      if (!win) return []
+      const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
+      return result.canceled ? [] : result.filePaths
+    },
     'chat:ask': async ({ conversationId, content }) => {
       const mode = deps.store.getConversation(conversationId)?.mode ?? 'ask'
       if (mode === 'craft') {
-        const { tools, highRiskTools } = await deps.getTools()
+        const { tools, highRiskTools } = await deps.getTools(deps.store.getConversation(conversationId)?.workspace)
         await (await getEngine()).craft({ conversationId, content, tools, highRiskTools })
       } else if (mode === 'plan') {
         await (await getEngine()).plan({ conversationId, content })
@@ -176,14 +231,14 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
       if (mode === 'ask') {
         await (await getEngine()).continueConversation({ conversationId })
       } else {
-        const { tools, highRiskTools } = await deps.getTools()
+        const { tools, highRiskTools } = await deps.getTools(deps.store.getConversation(conversationId)?.workspace)
         await (await getEngine()).continueConversation({ conversationId, tools, highRiskTools })
       }
     },
     // Plan 确认(架构设计 §3.3.4):ok → 同会话第二轮带 tools 执行;!ok → rejected
     'chat:approvePlan': async ({ conversationId, ok }) => {
       if (ok) {
-        const { tools, highRiskTools } = await deps.getTools()
+        const { tools, highRiskTools } = await deps.getTools(deps.store.getConversation(conversationId)?.workspace)
         await (await getEngine()).approvePlan({ conversationId, ok, tools, highRiskTools })
       } else {
         await (await getEngine()).approvePlan({ conversationId, ok })

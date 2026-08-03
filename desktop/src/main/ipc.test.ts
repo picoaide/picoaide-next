@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { tool } from 'ai'
 import { z } from 'zod'
 import type { LanguageModel, Tool } from 'ai'
@@ -103,12 +106,17 @@ function makeStore(): StoreLike {
   const conversations: any[] = []
   const messages: any[] = []
   const artifacts: any[] = []
+  const projects: any[] = []
   const settings: Record<string, string> = {}
   let nextId = 1
   return {
     setConversationTitle: (id: number, title: string) => {
       const c = conversations.find((c) => c.id === id)
       if (c) c.title = title
+    },
+    setConversationWorkspace: (id: number, workspace: string) => {
+      const c = conversations.find((c) => c.id === id)
+      if (c) c.workspace = workspace
     },
     touchConversation: (id: number) => {
       const c = conversations.find((c) => c.id === id)
@@ -123,7 +131,7 @@ function makeStore(): StoreLike {
     getSetting: (k: string) => settings[k] ?? null,
     setSetting: (k: string, v: string) => { settings[k] = v },
     getAllSettings: () => ({ ...settings }),
-    createConversation: (input: { title?: string; mode?: string } = {}): number => {
+    createConversation: (input: { title?: string; mode?: string; projectId?: number | null } = {}): number => {
       const id = nextId++
       conversations.push({
         id,
@@ -132,10 +140,26 @@ function makeStore(): StoreLike {
         status: 'done',
         model: '',
         workspace: '',
+        project_id: input.projectId ?? null,
         created_at: '',
         updated_at: '',
       })
       return id
+    },
+    createProject: (input: { name: string; path: string }): number => {
+      const id = nextId++
+      projects.push({ id, name: input.name, path: input.path, created_at: '' })
+      return id
+    },
+    listProjects: () => projects.map((p) => ({ ...p })),
+    getProject: (id: number) => projects.find((p) => p.id === id) ?? null,
+    deleteProject: (id: number) => {
+      const i = projects.findIndex((p) => p.id === id)
+      if (i >= 0) projects.splice(i, 1)
+    },
+    setConversationProject: (conversationId: number, projectId: number | null) => {
+      const c = conversations.find((c) => c.id === conversationId)
+      if (c) c.project_id = projectId
     },
     listConversations: () => conversations.map((c) => ({ ...c })),
     getConversation: (id: number) => conversations.find((c) => c.id === id) ?? null,
@@ -217,6 +241,27 @@ describe('chat:new / chat:delete', () => {
     const id = handlers['chat:new']({})
     handlers['chat:delete']({ conversationId: id })
     expect(store.getConversation(id)).toBeNull()
+  })
+
+  it('chat:new with projectId creates the workspace dir and sets workspace', () => {
+    const { deps, store } = makeDeps()
+    const handlers = buildAgentHandlers(deps)
+    const dir = mkdtempSync(join(tmpdir(), 'picoaide-ipc-proj-'))
+    const pid = handlers['project:create']({ name: 'p', path: dir })
+    const id = handlers['chat:new']({ projectId: pid })
+    const conv = store.getConversation(id)
+    expect(conv?.project_id).toBe(pid)
+    expect(conv?.workspace).toBe(join(dir, String(id)))
+    expect(existsSync(conv!.workspace)).toBe(true)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('conversation:moveProject updates the project association', () => {
+    const { deps, store } = makeDeps()
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({})
+    handlers['conversation:moveProject']({ conversationId: id, projectId: 9 })
+    expect(store.getConversation(id)?.project_id).toBe(9)
   })
 })
 
@@ -363,6 +408,19 @@ describe('chat:continue / chat:approvePlan / chat:listRunning / artifacts', () =
     expect(eventsOf(sent).some((e) => (e as { type: string }).type === 'done')).toBe(true)
     // 中断时的部分输出不进上下文(截断到最后一条 user)
     expect(store.listMessages(id).filter((m) => m.role === 'user')).toHaveLength(1)
+  })
+
+  it('chat:continue passes the conversation workspace to getTools', async () => {
+    const { deps, store } = makeDeps('tool-call')
+    const getTools = vi.fn(async () => ({ tools: {} as Record<string, Tool>, highRiskTools: new Set<string>() }))
+    deps.getTools = getTools
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({ mode: 'craft' })
+    store.setConversationWorkspace(id, '/proj/5')
+    store.appendMessage({ conversationId: id, role: 'user', content: 'first' })
+    store.updateConversationStatus(id, 'running')
+    await handlers['chat:continue']({ conversationId: id })
+    expect(getTools).toHaveBeenCalledWith('/proj/5')
   })
 
   it('chat:ask in plan mode produces a plan; chat:approvePlan(true) executes with tools', async () => {

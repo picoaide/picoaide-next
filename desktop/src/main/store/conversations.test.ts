@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import Database from 'better-sqlite3'
 import { openDb } from './db'
 import { migrate } from './migrations'
-import { createConversation, deleteConversation, getConversation, listConversations, setConversationTitle, touchConversation, updateConversationStatus } from './conversations'
+import { createConversation, deleteConversation, getConversation, listConversations, setConversationTitle, setConversationWorkspace, touchConversation, updateConversationStatus } from './conversations'
 import { appendMessage, listMessages } from './messages'
 
 function openTestDb(): { db: Database.Database; cleanup: () => void } {
@@ -77,6 +77,31 @@ describe('conversations', () => {
       deleteConversation(db, id)
       expect(getConversation(db, id)).toBeNull()
       expect(listMessages(db, id)).toHaveLength(0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('createConversation 支持 projectId', () => {
+    const { db, cleanup } = openTestDb()
+    try {
+      const id = createConversation(db, { projectId: 7 })
+      const row = db.prepare('SELECT project_id FROM conversations WHERE id = ?').get(id) as { project_id: number | null }
+      expect(row.project_id).toBe(7)
+      expect(getConversation(db, id)!.project_id).toBe(7)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('setConversationWorkspace 更新 workspace', () => {
+    const { db, cleanup } = openTestDb()
+    try {
+      const id = createConversation(db, {})
+      expect(getConversation(db, id)!.workspace).toBe('')
+      const ws = '/proj/1'
+      setConversationWorkspace(db, id, ws)
+      expect(getConversation(db, id)!.workspace).toBe(ws)
     } finally {
       cleanup()
     }

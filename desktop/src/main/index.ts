@@ -9,8 +9,9 @@ import { openDb } from './store/db'
 import { migrate } from './store/migrations'
 import {
   createConversation, listConversations, getConversation,
-  updateConversationStatus, deleteConversation, setConversationTitle, touchConversation,
+  updateConversationStatus, deleteConversation, setConversationTitle, setConversationWorkspace, touchConversation,
 } from './store/conversations'
+import { createProject, listProjects, getProject, deleteProject, setConversationProject } from './store/projects'
 import { listMessages, appendMessage } from './store/messages'
 import { addArtifact, listArtifacts } from './store/artifacts'
 import { getSetting, setSetting, getAllSettings } from './store/settings'
@@ -158,9 +159,11 @@ async function loadBrowserTools(): Promise<{ tools: Record<string, Tool>; highRi
 }
 
 // 工具注册表(架构设计 §3.4):本地文件/终端/沙盒/屏幕/剪贴板/web + 远程知识库 + 浏览器桥
-async function buildToolsRegistry(db: ReturnType<typeof openDb>): Promise<{ tools: Record<string, GatedTool>; highRiskTools: Set<string> }> {
-  const allowedDirs = resolveAllowedDirs(workspaceDir(), getAllowedDirsFromSettings((k) => getSetting(db, k)))
-  const cwd = workspaceDir()
+// workspace 非空(项目内会话)→ cwd 与 allowedDirs 以会话 workspace 为基准;否则回退全局用户工作目录
+async function buildToolsRegistry(db: ReturnType<typeof openDb>, workspace?: string): Promise<{ tools: Record<string, GatedTool>; highRiskTools: Set<string> }> {
+  const base = workspace ?? workspaceDir()
+  const allowedDirs = resolveAllowedDirs(base, getAllowedDirsFromSettings((k) => getSetting(db, k)))
+  const cwd = base
   const web = getBootstrapCache().web
   const commandTool: GatedTool = {
     ...tool({
@@ -309,6 +312,7 @@ app.whenReady().then(async () => {
     updateConversationStatus: (id, status) => updateConversationStatus(db, id, status as any),
     deleteConversation: (id) => deleteConversation(db, id),
     setConversationTitle: (id, title) => setConversationTitle(db, id, title),
+    setConversationWorkspace: (id, ws) => setConversationWorkspace(db, id, ws),
     touchConversation: (id) => touchConversation(db, id),
     listMessages: (cid) => listMessages(db, cid),
     appendMessage: (m) => appendMessage(db, m),
@@ -317,6 +321,11 @@ app.whenReady().then(async () => {
     getSetting: (k) => getSetting(db, k),
     setSetting: (k, v) => setSetting(db, k, v),
     getAllSettings: () => getAllSettings(db),
+    createProject: (input) => createProject(db, input),
+    listProjects: () => listProjects(db),
+    getProject: (id) => getProject(db, id),
+    deleteProject: (id) => deleteProject(db, id),
+    setConversationProject: (cid, pid) => setConversationProject(db, cid, pid),
   }
   appStore = store
 
@@ -371,8 +380,10 @@ app.whenReady().then(async () => {
         if (!model) throw new Error('无可用模型')
         return makeGatewayModel(session.serverURL, session.token, model.id)
       },
-      getTools: () => buildToolsRegistry(db),
+      getTools: (workspace?: string) => buildToolsRegistry(db, workspace),
       getWindow: () => mainWindow,
+      listAllowedDirs: () => resolveAllowedDirs(workspaceDir(), getAllowedDirsFromSettings((k) => getSetting(db, k))),
+      listProjectPaths: () => listProjects(db).map((p) => p.path),
       registerEngineReset: (reset) => {
         resetAgentEngine = reset
       },
