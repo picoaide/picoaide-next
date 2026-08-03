@@ -22,6 +22,8 @@ export interface ConversationRow {
   model: string
   workspace: string
   project_id: number | null
+  starred: number
+  archived: number
   created_at: string
   updated_at: string
 }
@@ -55,6 +57,8 @@ export interface StoreLike extends EngineStore {
   updateConversationStatus(id: number, status: string): void
   deleteConversation(id: number): void
   setConversationTitle(id: number, title: string): void
+  setConversationStarred(id: number, starred: boolean): void
+  setConversationArchived(id: number, archived: boolean): void
   setConversationWorkspace(id: number, workspace: string): void
   touchConversation(id: number): void
   // 覆写为完整行:chat:messages 需要读回全字段(MessageRow 是 DBMessage 的超集,兼容引擎)
@@ -122,6 +126,10 @@ export interface IpcHandlers {
   'chat:deleteMessage': (input: { messageId: number }) => void
   'chat:artifacts': (input: { conversationId: number }) => ArtifactRow[]
   'chat:delete': (input: { conversationId: number }) => void
+  'chat:rename': (input: { conversationId: number; title: string }) => void
+  'chat:setStarred': (input: { conversationId: number; starred: boolean }) => void
+  'chat:setArchived': (input: { conversationId: number; archived: boolean }) => void
+  'chat:export': (input: { conversationId: number }) => string
   'agent:confirm': (input: { requestId: string; ok: boolean }) => void
   'artifact:showInFolder': (input: { path: string }) => void
   'project:list': () => ProjectRow[]
@@ -286,6 +294,23 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
     },
     'chat:artifacts': ({ conversationId }) => deps.store.listArtifacts(conversationId),
     'chat:delete': ({ conversationId }) => deps.store.deleteConversation(conversationId),
+    'chat:rename': ({ conversationId, title }) => deps.store.setConversationTitle(conversationId, title),
+    'chat:setStarred': ({ conversationId, starred }) => deps.store.setConversationStarred(conversationId, starred),
+    'chat:setArchived': ({ conversationId, archived }) => deps.store.setConversationArchived(conversationId, archived),
+    // 导出会话为 Markdown(chatbox ExportChat 轻量版:文本导出,复制到剪贴板)
+    'chat:export': ({ conversationId }) => {
+      const conv = deps.store.getConversation(conversationId)
+      if (!conv) return ''
+      const msgs = deps.store.listMessages(conversationId)
+      const title = conv.title || '未命名会话'
+      const lines = [`# ${title}`, '', `> 导出时间:${new Date().toLocaleString()}`, '']
+      for (const m of msgs) {
+        if (m.role === 'user') lines.push(`## 我`, '', m.content, '')
+        else if (m.role === 'assistant') lines.push(`## PicoAide`, '', m.content, '')
+        else if (m.role === 'tool') lines.push(`> 工具调用:${m.tool_name}`, '')
+      }
+      return lines.join('\n')
+    },
     'artifact:showInFolder': ({ path }) => {
       if (typeof path === 'string' && path.length > 0) shell.showItemInFolder(path)
     },

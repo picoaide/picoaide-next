@@ -1,5 +1,8 @@
 import { useEffect, useState } from 'react'
-import { ChevronDown, ChevronRight, FolderPlus, LogOut, Plus, Settings as SettingsIcon, Trash2 } from 'lucide-react'
+import {
+  Archive, Check, ChevronDown, ChevronRight, Copy, Download, FolderPlus, LogOut, MoreHorizontal, Pencil, Pin,
+  Plus, Settings as SettingsIcon, Trash2, Trash,
+} from 'lucide-react'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '../components/ui/card'
@@ -10,6 +13,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '../components/ui/dropdown-menu'
 import ArtifactsPanel from '../components/ArtifactsPanel'
@@ -43,6 +47,9 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
   const [showNewProject, setShowNewProject] = useState(false)
   const [projectName, setProjectName] = useState('')
   const [projectPath, setProjectPath] = useState('')
+  const [renamingId, setRenamingId] = useState<number | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const [showArchived, setShowArchived] = useState(false)
   const { newConversation, loadConversations, selectConversation, deleteConversation, loadProjects, createProject, deleteProject, moveConversation, setActiveProject, toggleProjectCollapsed } = useChatStore.getState()
 
   useEffect(() => {
@@ -87,49 +94,125 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
   }
 
   const conversationsOf = (projectId: number | null) =>
-    conversations.filter((c) => (projectId === null ? c.project_id == null : c.project_id === projectId))
+    conversations.filter((c) => (projectId === null ? c.project_id == null : c.project_id === projectId) && c.archived === 0)
 
-  const renderConversationRow = (c: { id: number; title: string }) => (
-    <div
-      key={c.id}
-      className={cn(
-        'group ml-4 mb-1 flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-sm hover:bg-accent',
-        c.id === activeId && 'bg-accent'
-      )}
-      onClick={() => void selectConversation(c.id)}
-    >
-      <span className="truncate">{c.title || '新会话'}</span>
-      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className="h-6 w-6" title="移动到项目">
-              <FolderPlus className="h-3.5 w-3.5" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={() => void moveConversation(c.id, null)}>未分类</DropdownMenuItem>
-            {projects.map((p) => (
-              <DropdownMenuItem key={p.id} onClick={() => void moveConversation(c.id, p.id)}>
-                {p.name}
+  const renderConversationRow = (c: { id: number; title: string; starred?: number; archived?: number }) => {
+    const startRename = () => {
+      setRenamingId(c.id)
+      setRenameValue(c.title)
+    }
+    const saveRename = async () => {
+      await window.picoaide.chatRename(c.id, renameValue.trim())
+      await loadConversations()
+      setRenamingId(null)
+    }
+    const doExport = async () => {
+      const md = await window.picoaide.chatExport(c.id)
+      try {
+        await navigator.clipboard.writeText(md)
+        window.alert('已复制到剪贴板')
+      } catch {
+        window.alert('导出失败')
+      }
+    }
+    if (renamingId === c.id) {
+      return (
+        <div key={c.id} className="ml-4 mb-1 flex items-center gap-1 px-3 py-1">
+          <Input
+            autoFocus
+            value={renameValue}
+            className="h-7 text-sm"
+            onChange={(e) => setRenameValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void saveRename()
+              if (e.key === 'Escape') setRenamingId(null)
+            }}
+          />
+          <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => void saveRename()}>
+            <Check className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      )
+    }
+    return (
+      <div
+        key={c.id}
+        className={cn(
+          'group ml-4 mb-1 flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-sm hover:bg-accent',
+          c.id === activeId && 'bg-accent'
+        )}
+        onClick={() => void selectConversation(c.id)}
+      >
+        <span className="flex min-w-0 items-center gap-1">
+          {c.starred === 1 && <Pin className="h-3 w-3 shrink-0 text-amber-500" />}
+          <span className="truncate">{c.title || '新会话'}</span>
+        </span>
+        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" className="h-6 w-6" title="更多操作">
+                <MoreHorizontal className="h-3.5 w-3.5" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={() => void window.picoaide.chatSetStarred(c.id, c.starred !== 1)}>
+                <Pin className="h-3.5 w-3.5" />
+                {c.starred === 1 ? '取消置顶' : '置顶'}
               </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-6 w-6"
-          title="删除会话"
-          onClick={(e) => {
-            e.stopPropagation()
-            void handleDelete(c.id)
-          }}
-        >
-          <Trash2 className="h-3.5 w-3.5" />
-        </Button>
+              <DropdownMenuItem onClick={startRename}>
+                <Pencil className="h-3.5 w-3.5" /> 重命名
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => void window.picoaide.chatSetArchived(c.id, true)}>
+                <Archive className="h-3.5 w-3.5" /> 归档
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => void doExport()}>
+                <Download className="h-3.5 w-3.5" /> 导出
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => void window.picoaide.chatSetArchived(c.id, false)} disabled={c.archived !== 1}>
+                <Copy className="h-3.5 w-3.5" /> 取消归档
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => {
+                  if (window.confirm('删除会话?')) void handleDelete(c.id)
+                }}
+                className="text-destructive focus:text-destructive"
+              >
+                <Trash2 className="h-3.5 w-3.5" /> 删除
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" className="h-6 w-6" title="移动到项目">
+                <FolderPlus className="h-3.5 w-3.5" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={() => void moveConversation(c.id, null)}>未分类</DropdownMenuItem>
+              {projects.map((p) => (
+                <DropdownMenuItem key={p.id} onClick={() => void moveConversation(c.id, p.id)}>
+                  {p.name}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            title="删除会话"
+            onClick={(e) => {
+              e.stopPropagation()
+              if (window.confirm('删除会话?')) void handleDelete(c.id)
+            }}
+          >
+            <Trash className="h-3.5 w-3.5" />
+          </Button>
+        </div>
       </div>
-    </div>
-  )
+    )
+  }
 
   const renderProjectGroup = (p: ProjectView) => {
     const collapsed = collapsedProjects.includes(p.id)
@@ -193,6 +276,21 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
               <>
                 <div className="mb-1 mt-2 px-3 py-1 text-xs text-muted-foreground">未分类</div>
                 {conversationsOf(null).map(renderConversationRow)}
+              </>
+            )}
+            {conversations.some((c) => c.archived === 1) && (
+              <>
+                <div
+                  className="mb-1 mt-2 flex cursor-pointer items-center gap-1 px-3 py-1 text-xs text-muted-foreground hover:text-foreground"
+                  onClick={() => setShowArchived((v) => !v)}
+                >
+                  {showArchived ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                  已归档
+                </div>
+                {showArchived &&
+                  conversations
+                    .filter((c) => c.archived === 1)
+                    .map((c) => renderConversationRow({ ...c, archived: 1 }))}
               </>
             )}
           </div>

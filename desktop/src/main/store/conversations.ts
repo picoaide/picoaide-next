@@ -10,6 +10,8 @@ export interface ConversationRow {
   model: string
   workspace: string
   project_id: number | null
+  starred: number
+  archived: number
   created_at: string
   updated_at: string
 }
@@ -55,4 +57,13 @@ export function deleteConversation(db: Database.Database, id: number): void {
 
 export function setConversationTitle(db: Database.Database, id: number, title: string): void {
   db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(title, id)
+}
+
+// chatbox 会话管理:置顶 / 归档
+export function setConversationStarred(db: Database.Database, id: number, starred: boolean): void {
+  db.prepare('UPDATE conversations SET starred = ? WHERE id = ?').run(starred ? 1 : 0, id)
+}
+
+export function setConversationArchived(db: Database.Database, id: number, archived: boolean): void {
+  db.prepare('UPDATE conversations SET archived = ? WHERE id = ?').run(archived ? 1 : 0, id)
 }

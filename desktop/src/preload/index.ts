@@ -56,6 +56,13 @@ const api = {
   chatArtifacts: (conversationId: number): Promise<ArtifactRow[]> =>
     ipcRenderer.invoke('chat:artifacts', { conversationId }),
   chatDelete: (conversationId: number): Promise<void> => ipcRenderer.invoke('chat:delete', { conversationId }),
+  chatRename: (conversationId: number, title: string): Promise<void> =>
+    ipcRenderer.invoke('chat:rename', { conversationId, title }),
+  chatSetStarred: (conversationId: number, starred: boolean): Promise<void> =>
+    ipcRenderer.invoke('chat:setStarred', { conversationId, starred }),
+  chatSetArchived: (conversationId: number, archived: boolean): Promise<void> =>
+    ipcRenderer.invoke('chat:setArchived', { conversationId, archived }),
+  chatExport: (conversationId: number): Promise<string> => ipcRenderer.invoke('chat:export', { conversationId }),
   confirm: (requestId: string, ok: boolean): Promise<void> =>
     ipcRenderer.invoke('agent:confirm', { requestId, ok }),
   artifactShowInFolder: (path: string): Promise<void> => ipcRenderer.invoke('artifact:showInFolder', { path }),

@@ -43,6 +43,8 @@ const migrations: string[] = [
     created_at DATETIME DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now','localtime'))
   );
   ALTER TABLE conversations ADD COLUMN project_id INTEGER;`,
+  `ALTER TABLE conversations ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE conversations ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;`,
 ]
 
 export function migrate(db: Database.Database): void {

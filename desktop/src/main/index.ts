@@ -10,6 +10,7 @@ import { migrate } from './store/migrations'
 import {
   createConversation, listConversations, getConversation,
   updateConversationStatus, deleteConversation, setConversationTitle, setConversationWorkspace, touchConversation,
+  setConversationStarred, setConversationArchived,
 } from './store/conversations'
 import { createProject, listProjects, getProject, deleteProject, setConversationProject } from './store/projects'
 import { listMessages, appendMessage, updateMessageContent, deleteMessagesAfter, deleteMessage } from './store/messages'
@@ -314,6 +315,8 @@ app.whenReady().then(async () => {
     updateConversationStatus: (id, status) => updateConversationStatus(db, id, status as any),
     deleteConversation: (id) => deleteConversation(db, id),
     setConversationTitle: (id, title) => setConversationTitle(db, id, title),
+    setConversationStarred: (id, starred) => setConversationStarred(db, id, starred),
+    setConversationArchived: (id, archived) => setConversationArchived(db, id, archived),
     setConversationWorkspace: (id, ws) => setConversationWorkspace(db, id, ws),
     touchConversation: (id) => touchConversation(db, id),
     listMessages: (cid) => listMessages(db, cid),

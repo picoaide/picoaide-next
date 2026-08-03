@@ -114,6 +114,14 @@ function makeStore(): StoreLike {
       const c = conversations.find((c) => c.id === id)
       if (c) c.title = title
     },
+    setConversationStarred: (id: number, starred: boolean) => {
+      const c = conversations.find((c) => c.id === id)
+      if (c) c.starred = starred ? 1 : 0
+    },
+    setConversationArchived: (id: number, archived: boolean) => {
+      const c = conversations.find((c) => c.id === id)
+      if (c) c.archived = archived ? 1 : 0
+    },
     setConversationWorkspace: (id: number, workspace: string) => {
       const c = conversations.find((c) => c.id === id)
       if (c) c.workspace = workspace
@@ -141,6 +149,8 @@ function makeStore(): StoreLike {
         model: '',
         workspace: '',
         project_id: input.projectId ?? null,
+        starred: 0,
+        archived: 0,
         created_at: '',
         updated_at: '',
       })
@@ -255,6 +265,33 @@ describe('chat:new / chat:delete', () => {
     const id = handlers['chat:new']({})
     handlers['chat:delete']({ conversationId: id })
     expect(store.getConversation(id)).toBeNull()
+  })
+
+  it('chat:rename / chat:setStarred / chat:setArchived update the conversation', () => {
+    const { deps, store } = makeDeps()
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({})
+    handlers['chat:rename']({ conversationId: id, title: '新标题' })
+    handlers['chat:setStarred']({ conversationId: id, starred: true })
+    handlers['chat:setArchived']({ conversationId: id, archived: true })
+    const c = store.getConversation(id)!
+    expect(c.title).toBe('新标题')
+    expect(c.starred).toBe(1)
+    expect(c.archived).toBe(1)
+  })
+
+  it('chat:export renders markdown with user and assistant turns', () => {
+    const { deps, store } = makeDeps()
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({ title: 'T' })
+    store.appendMessage({ conversationId: id, role: 'user', content: 'hi' })
+    store.appendMessage({ conversationId: id, role: 'assistant', content: 'hello' })
+    const md = handlers['chat:export']({ conversationId: id })
+    expect(md).toContain('# T')
+    expect(md).toContain('## 我')
+    expect(md).toContain('hi')
+    expect(md).toContain('## PicoAide')
+    expect(md).toContain('hello')
   })
 
   it('chat:new with projectId creates the workspace dir and sets workspace', () => {
