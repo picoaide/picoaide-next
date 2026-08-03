@@ -8,7 +8,7 @@
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "ELECTRON_RUN_AS_NODE=1 electron ./node_modules/vitest/vitest.mjs run",
-    "postinstall": "electron-rebuild -f -o better-sqlite3 && node scripts/clean-better-sqlite3-prebuilds.js"
+    "postinstall": "node scripts/clean-better-sqlite3-prebuilds.js && electron-rebuild -f -o better-sqlite3"
   },
   "dependencies": {
     "@ai-sdk/mcp": "^2.0.22",
