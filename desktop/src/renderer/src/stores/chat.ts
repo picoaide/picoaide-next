@@ -171,6 +171,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   // 分页(4.4):首次加载最近 PAGE_SIZE 条,向上滚动加载更早
   selectConversation: async (id) => {
+    // 流中切换会话:先停掉当前运行,否则流式增量/toolCalls 会串台显示到新会话
+    if (get().activeId !== id && get().streaming) {
+      await picoaide().chatCancel()
+    }
     const [all, artifacts] = await Promise.all([picoaide().chatMessages(id), picoaide().chatArtifacts(id)])
     const page = mapMessages(all.slice(-PAGE_SIZE))
     set({

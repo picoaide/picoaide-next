@@ -807,9 +807,11 @@ export class AgentEngine {
 function approvalTarget(toolName: string, input: unknown): string {
   if (typeof input === 'object' && input !== null) {
     const rec = input as Record<string, unknown>
-    const hit = rec.path ?? rec.target ?? rec.file
+    const hit = rec.path ?? rec.target ?? rec.file ?? rec.title
     if (typeof hit === 'string') return hit
-    return JSON.stringify(input)
+    // 无路径字段的工具(kb_upload 等):只给参数键名摘要,不把整个文档内容送进审批弹窗
+    const keys = Object.keys(rec)
+    return keys.length > 0 ? `(${keys.join(', ')})` : JSON.stringify(input)
   }
   return String(input)
 }
