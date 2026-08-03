@@ -76,6 +76,8 @@ func main() {
 	knowledge.RegisterAdminRoutes(r, db)
 	bootstrap.RegisterRoutes(r, db)
 	serverstore.CleanupPendingUsage(db, time.Now().Add(-time.Hour))
+	// 渠道模型自动同步(固定间隔 1 小时;拉取上游 /models 自动上架/下架)
+	go llmgateway.SyncLoop(db, time.Hour, nil)
 
 	// webadmin SPA: /admin/ serves built assets with index.html fallback.
 	dist, _ := fs.Sub(webadmin.FS, "dist")
