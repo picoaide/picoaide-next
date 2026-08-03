@@ -1,14 +1,23 @@
-import { useEffect } from 'react'
-import { LogOut, Plus, Settings as SettingsIcon, Trash2 } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { ChevronDown, ChevronRight, FolderPlus, LogOut, Plus, Settings as SettingsIcon, Trash2 } from 'lucide-react'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '../components/ui/card'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog'
+import { Input } from '../components/ui/input'
+import { Label } from '../components/ui/label'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '../components/ui/dropdown-menu'
 import ArtifactsPanel from '../components/ArtifactsPanel'
 import ChatInput from '../components/ChatInput'
 import Messages from '../components/Messages'
 import ConfirmModal from '../components/ConfirmModal'
 import { useAuthStore } from '../stores/auth'
-import { useChatStore } from '../stores/chat'
+import { useChatStore, type ProjectView } from '../stores/chat'
 import { useConnectionStore } from '../stores/connection'
 import { cn } from '../lib/utils'
 
@@ -16,7 +25,10 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
   const bootstrap = useAuthStore((s) => s.bootstrap)
   const logout = useAuthStore((s) => s.logout)
   const conversations = useChatStore((s) => s.conversations)
+  const projects = useChatStore((s) => s.projects)
   const activeId = useChatStore((s) => s.activeId)
+  const activeProjectId = useChatStore((s) => s.activeProjectId)
+  const collapsedProjects = useChatStore((s) => s.collapsedProjects)
   const messages = useChatStore((s) => s.messages)
   const artifacts = useChatStore((s) => s.artifacts)
   const interrupted = useChatStore((s) => s.interrupted)
@@ -27,18 +39,23 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
   const hasMoreMessages = useChatStore((s) => s.hasMoreMessages)
   const loadEarlierMessages = useChatStore((s) => s.loadEarlierMessages)
   const connStatus = useConnectionStore((s) => s.status)
-  const { newConversation, loadConversations, selectConversation, deleteConversation } = useChatStore.getState()
+  const [showNewProject, setShowNewProject] = useState(false)
+  const [projectName, setProjectName] = useState('')
+  const [projectPath, setProjectPath] = useState('')
+  const { newConversation, loadConversations, selectConversation, deleteConversation, loadProjects, createProject, deleteProject, moveConversation, setActiveProject, toggleProjectCollapsed } = useChatStore.getState()
 
   useEffect(() => {
     void loadConversations()
+    void loadProjects()
     // 启动扫描中断会话(架构设计 §3.3.1a 重跑恢复):主进程推送 + 拉取兜底(去重由 store 保证)
     void useChatStore.getState().checkInterrupted()
     const off = window.picoaide.onInterrupted((list) => useChatStore.getState().onInterrupted(list))
     return () => off()
-  }, [loadConversations])
+  }, [loadConversations, loadProjects])
 
   const model = bootstrap?.models.find((m) => m.id === bootstrap.default_model) ?? bootstrap?.models[0]
   const modelName = model?.display_name ?? bootstrap?.default_model ?? '—'
+  const activeProject = projects.find((p) => p.id === activeProjectId)
 
   const handleDelete = async (id: number) => {
     await deleteConversation(id)
@@ -47,6 +64,109 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
 
   const handleContinue = async (id: number) => {
     await useChatStore.getState().continueConversation(id)
+  }
+
+  const pickProjectDir = async () => {
+    const dirs = await window.picoaide.pickDirectory()
+    if (dirs && dirs.length > 0) setProjectPath(dirs[0])
+  }
+
+  const handleCreateProject = async () => {
+    if (!projectName.trim() || !projectPath.trim()) return
+    const id = await createProject({ name: projectName.trim(), path: projectPath.trim() })
+    setActiveProject(id)
+    setShowNewProject(false)
+    setProjectName('')
+    setProjectPath('')
+  }
+
+  const handleDeleteProject = async (id: number) => {
+    await deleteProject(id)
+    await loadProjects()
+  }
+
+  const conversationsOf = (projectId: number | null) =>
+    conversations.filter((c) => (projectId === null ? c.project_id == null : c.project_id === projectId))
+
+  const renderConversationRow = (c: { id: number; title: string }) => (
+    <div
+      key={c.id}
+      className={cn(
+        'group ml-4 mb-1 flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-sm hover:bg-accent',
+        c.id === activeId && 'bg-accent'
+      )}
+      onClick={() => void selectConversation(c.id)}
+    >
+      <span className="truncate">{c.title || '新会话'}</span>
+      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon" className="h-6 w-6" title="移动到项目">
+              <FolderPlus className="h-3.5 w-3.5" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={() => void moveConversation(c.id, null)}>未分类</DropdownMenuItem>
+            {projects.map((p) => (
+              <DropdownMenuItem key={p.id} onClick={() => void moveConversation(c.id, p.id)}>
+                {p.name}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6"
+          title="删除会话"
+          onClick={(e) => {
+            e.stopPropagation()
+            void handleDelete(c.id)
+          }}
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+    </div>
+  )
+
+  const renderProjectGroup = (p: ProjectView) => {
+    const collapsed = collapsedProjects.includes(p.id)
+    const items = conversationsOf(p.id)
+    return (
+      <div key={p.id} className="mb-1">
+        <div
+          className={cn(
+            'group flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-sm font-medium hover:bg-accent',
+            activeProjectId === p.id && 'bg-accent'
+          )}
+          onClick={() => {
+            setActiveProject(p.id)
+            toggleProjectCollapsed(p.id)
+          }}
+        >
+          <span className="flex min-w-0 items-center gap-1">
+            {collapsed ? <ChevronRight className="h-3.5 w-3.5 shrink-0" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
+            <span className="truncate">{p.name}</span>
+          </span>
+          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6"
+              title="删除项目(会话移入未分类,不删文件)"
+              onClick={(e) => {
+                e.stopPropagation()
+                void handleDeleteProject(p.id)
+              }}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        </div>
+        {!collapsed && items.map(renderConversationRow)}
+      </div>
+    )
   }
 
   return (
@@ -58,36 +178,22 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
       )}
       <div className="flex min-h-0 flex-1">
         <aside className="flex w-60 flex-col border-r bg-muted/20">
-          <div className="p-3">
-            <Button className="w-full" onClick={() => void newConversation()}>
+          <div className="flex gap-2 p-3">
+            <Button className="flex-1" onClick={() => void newConversation()}>
               <Plus className="h-4 w-4" /> 新建会话
+            </Button>
+            <Button variant="outline" className="flex-1" onClick={() => setShowNewProject(true)}>
+              <FolderPlus className="h-4 w-4" /> 新建项目
             </Button>
           </div>
           <div className="flex-1 overflow-y-auto px-2 pb-2">
-            {conversations.map((c) => (
-              <div
-                key={c.id}
-                className={cn(
-                  'group mb-1 flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-sm hover:bg-accent',
-                  c.id === activeId && 'bg-accent'
-                )}
-                onClick={() => void selectConversation(c.id)}
-              >
-                <span className="truncate">{c.title || '新会话'}</span>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-6 w-6 opacity-0 group-hover:opacity-100"
-                  title="删除会话"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    void handleDelete(c.id)
-                  }}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-            ))}
+            {projects.map(renderProjectGroup)}
+            {conversationsOf(null).length > 0 && (
+              <>
+                <div className="mb-1 mt-2 px-3 py-1 text-xs text-muted-foreground">未分类</div>
+                {conversationsOf(null).map(renderConversationRow)}
+              </>
+            )}
           </div>
           <div className="border-t p-3">
             <Button variant="ghost" className="w-full justify-start text-muted-foreground" onClick={onOpenSettings}>
@@ -100,7 +206,10 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
         </aside>
         <main className="flex min-w-0 flex-1 flex-col">
           <header className="flex items-center justify-between border-b px-4 py-2">
-            <span className="text-sm text-muted-foreground">{modelName}</span>
+            <span className="truncate text-sm text-muted-foreground">
+              {activeProject ? `${activeProject.name} · ` : ''}
+              {modelName}
+            </span>
             <Badge variant={connStatus === 'online' ? 'success' : 'destructive'}>
               {connStatus === 'online' ? '在线' : connStatus === 'offline' ? '离线' : '已过期'}
             </Badge>
@@ -149,6 +258,37 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
           </Card>
         </div>
       )}
+      <Dialog open={showNewProject} onOpenChange={setShowNewProject}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>新建项目</DialogTitle>
+            <DialogDescription>项目 = 命名的工作目录,其下会话的文件操作都发生在该目录中</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <Label>项目名称</Label>
+              <Input value={projectName} placeholder="如:月度报表" onChange={(e) => setProjectName(e.target.value)} />
+            </div>
+            <div className="space-y-1.5">
+              <Label>工作目录</Label>
+              <div className="flex gap-2">
+                <Input value={projectPath} readOnly placeholder="请选择项目目录" />
+                <Button variant="outline" onClick={() => void pickProjectDir()}>
+                  浏览…
+                </Button>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowNewProject(false)}>
+              取消
+            </Button>
+            <Button disabled={!projectName.trim() || !projectPath.trim()} onClick={() => void handleCreateProject()}>
+              创建
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <ConfirmModal />
     </div>
   )
