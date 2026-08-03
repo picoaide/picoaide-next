@@ -9,6 +9,7 @@ export interface ConversationRow {
   status: string
   model: string
   workspace: string
+  project_id: number | null
   created_at: string
   updated_at: string
 }
@@ -18,13 +19,18 @@ export interface CreateConversationInput {
   mode?: string
   model?: string
   workspace?: string
+  projectId?: number | null
 }
 
 export function createConversation(db: Database.Database, input: CreateConversationInput = {}): number {
   const info = db
-    .prepare('INSERT INTO conversations (title, mode, model, workspace) VALUES (?, ?, ?, ?)')
-    .run(input.title ?? '', input.mode ?? 'ask', input.model ?? '', input.workspace ?? '')
+    .prepare('INSERT INTO conversations (title, mode, model, workspace, project_id) VALUES (?, ?, ?, ?, ?)')
+    .run(input.title ?? '', input.mode ?? 'ask', input.model ?? '', input.workspace ?? '', input.projectId ?? null)
   return Number(info.lastInsertRowid)
+}
+
+export function setConversationWorkspace(db: Database.Database, id: number, workspace: string): void {
+  db.prepare('UPDATE conversations SET workspace = ? WHERE id = ?').run(workspace, id)
 }
 
 export function listConversations(db: Database.Database): ConversationRow[] {
