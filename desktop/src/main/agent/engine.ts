@@ -246,6 +246,7 @@ export class AgentEngine {
       let outcome: 'done' | 'canceled' = 'done'
       for (let attempt = 0; ; attempt++) {
         fullText = ''
+        usage = { prompt_tokens: 0, completion_tokens: 0 } // 重试时清零,避免 failed 轮用量重复计数
         try {
           outcome = await runOnce()
           break
@@ -508,9 +509,9 @@ export class AgentEngine {
       }
       if (canceled) break
 
-      // 审批回执 → tool-approval-response 消息续跑(SDK 原生机制);审批轮不消耗步数预算(工具尚未执行)
+      // 审批回执 → tool-approval-response 消息续跑(SDK 原生机制)。审批轮照常计入
+      // 步数预算:模型反复请求审批也会耗尽 maxSteps,不会无限弹确认框。
       if (approvalParts.length > 0) {
-        steps--
         await this.handleApprovalParts(approvalParts, messages)
         approvalParts.length = 0
         continue
