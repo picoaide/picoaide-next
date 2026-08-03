@@ -438,9 +438,9 @@ Agent 发起高危工具(注册表标记 needsApproval)
 
 存储根目录:
 
-- Linux:`~/.local/share/picoaide/`
-- macOS:`~/Library/Application Support/picoaide/`
-- Windows:`%APPDATA%/picoaide/`
+- Linux:`~/.local/share/picoaide/`;**Portable 模式(仅 Windows/Linux)**:exe 同目录存在 `portable.txt` → 数据目录 = exe 同目录/data(不可写时回退系统目录),解压即用、数据随程序目录移动
+- macOS:`~/Library/Application Support/picoaide/`(一律标准数据目录,不做 portable;dmg 拖入 Applications 即用)
+- Windows:`%APPDATA%/picoaide/`;**Portable 模式**同上(数据在 exe 同目录/data)
 
 文件布局:
 
@@ -448,14 +448,23 @@ Agent 发起高危工具(注册表标记 needsApproval)
 picoaide/
 ├── picoaide.db          # 主库(WAL 模式)
 ├── config.json          # 服务端 URL/token(权限 0600)
-├── workspaces/<conv-id>/   # 产物
+├── workspaces/<conv-id>/   # 产物(无项目会话)
 ├── skills/<name>/       # 已安装技能
 └── mcp/<plugin-id>/     # 已安装插件配置
 ```
 
+**项目体系(迁移 0010)**:项目 = 命名工作目录;项目内会话 workspace = `<项目目录>/<会话id>/`(chat:new 时 mkdir,引擎工具 cwd/allowedDirs 以会话 workspace 为基准),无项目会话回退全局工作目录;删除项目仅解绑会话(project_id → NULL,移入"未分类"),不删任何文件。
+
 表结构:
 
 ```sql
+CREATE TABLE projects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  path TEXT NOT NULL UNIQUE,
+  created_at DATETIME DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now','localtime'))
+);
+
 CREATE TABLE conversations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   title TEXT NOT NULL DEFAULT '',
@@ -463,6 +472,7 @@ CREATE TABLE conversations (
   status TEXT NOT NULL DEFAULT 'done',         -- running | done | failed(恢复重跑依据)
   model TEXT NOT NULL DEFAULT '',
   workspace TEXT NOT NULL DEFAULT '',
+  project_id INTEGER,                          -- 项目归属(删除项目置 NULL)
   created_at DATETIME DEFAULT (datetime('now','localtime')),
   updated_at DATETIME DEFAULT (datetime('now','localtime'))
 );
