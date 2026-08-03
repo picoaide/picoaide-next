@@ -138,6 +138,36 @@ func TestAdminProviderChannel(t *testing.T) {
 	}
 }
 
+func TestAdminProviderChannelAutofill(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	// base_url omitted + channel set → autofill from channel default
+	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+		`{"name":"deepseek","api_key":"sk","models":[],"channel":"deepseek"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create channel provider: %d %s", w.Code, w.Body.String())
+	}
+	p := out["provider"].(map[string]any)
+	if p["base_url"] != "https://api.deepseek.com" {
+		t.Fatalf("base_url not autofilled from channel: %v", p["base_url"])
+	}
+
+	// stored custom base_url
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/providers/1", `{"base_url":"https://custom.example.com"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("set custom base_url: %d", w.Code)
+	}
+	// channel-only update must not clobber the stored custom base_url
+	w, out = adminReq(t, r, "PUT", "/api/admin/providers/1", `{"channel":"deepseek"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("channel update: %d %s", w.Code, w.Body.String())
+	}
+	p = out["provider"].(map[string]any)
+	if p["base_url"] != "https://custom.example.com" {
+		t.Fatalf("channel-only update clobbered custom base_url: %v", p["base_url"])
+	}
+}
+
 func TestAdminModelsAndDefaultModel(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
