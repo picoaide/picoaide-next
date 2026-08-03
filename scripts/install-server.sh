@@ -98,8 +98,12 @@ log "docker compose 已就绪"
 
 # ---- 参数/输入 ----
 step "配置部署参数(域名 / 管理员密码)"
-[ -n "$DOMAIN" ] || { read -r -p "请输入部署域名(如 picoaide.example.com): " DOMAIN; }
-[ -n "$DOMAIN" ] || fail "未提供域名"
+# 注意: curl ... | bash 时 stdin 是脚本管道,read 会吞掉脚本文本;
+# 交互一律改从 /dev/tty 读取(无 tty 时读取失败 → 置空走报错)
+if [ -z "$DOMAIN" ]; then
+  if read -r DOMAIN < /dev/tty; then :; else DOMAIN=""; fi
+fi
+[ -n "$DOMAIN" ] || fail "未提供域名(可用 DOMAIN=your.domain bash 预置)"
 case "$DOMAIN" in
   */*) fail "域名不合法: $DOMAIN" ;;
 esac
@@ -113,7 +117,7 @@ step "检查部署目录 $INSTALL_DIR"
 if [ -d "$INSTALL_DIR" ] && [ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]; then
   log "检测到 $INSTALL_DIR 已存在且非空(已有部署或文件)"
   log "如果重新安装:将停止相关容器、检查 80/443 端口、并清空 $INSTALL_DIR 下所有文件"
-  read -r -p "是否重新安装?输入 yes 继续,其他任意键取消: " confirm
+  if read -r confirm < /dev/tty; then :; else confirm=""; fi
   if [ "$confirm" != "yes" ]; then
     log "已取消,未做任何改动"
     exit 0
@@ -121,14 +125,6 @@ if [ -d "$INSTALL_DIR" ] && [ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]; then
   log "停止相关容器..."
   docker compose -f "$INSTALL_DIR/docker-compose.yml" down 2>/dev/null || true
   docker ps -aq --filter "name=picoaide-" | xargs -r docker rm -f 2>/dev/null || true
-  log "检查 80/443 端口占用..."
-  for port in 80 443; do
-    if ss -tlnp 2>/dev/null | grep -q ":$port "; then
-      log "端口 $port 被占用,当前占用:"
-      ss -tlnp 2>/dev/null | grep ":$port " || true
-      fail "端口 $port 被其他进程占用,请先释放后再重装"
-    fi
-  done
   log "清空 $INSTALL_DIR 下所有文件..."
   rm -rf "${INSTALL_DIR:?}/"*
   log "旧部署已清除"
@@ -200,6 +196,17 @@ volumes:
   caddy-config:
 COMPOSE
 installed+=("生成 Caddyfile 与 docker-compose.yml")
+
+# ---- 端口检查(80/443 必须空闲,caddy 才能绑定) ----
+step "检查端口 80/443 是否空闲"
+for port in 80 443; do
+  if ss -tlnp 2>/dev/null | grep -q ":$port "; then
+    log "端口 $port 被占用,当前占用:"
+    ss -tlnp 2>/dev/null | grep ":$port " || true
+    fail "端口 $port 被其他进程占用,请先释放后再重装/安装"
+  fi
+  log "端口 $port 空闲"
+done
 
 # ---- 启动 ----
 step "拉取镜像并启动服务"
