@@ -9,6 +9,12 @@
 
 目标:引入**内置预置渠道包**(每渠道一个独立文件),自动适配渠道;按**固定间隔自动轮询**渠道 `/models`,新增模型自动上架、消失模型自动下架;为 DeepSeek 渠道**强制启用思考模式(max)**并注入上下文/输出长度能力。
 
+## 关键原则
+
+1. **模型不硬编码**:渠道包文件只声明 `name`/`base_url`/能力预设/思考模式参数,**不写任何模型 id 列表**。模型 id 完全经 `/models` 从上游拉取,自动上架到 `models` 表,再经 `bootstrap` 下发给客户端。
+2. **客户端走 OpenAI 兼容 API**:客户端已用 `@ai-sdk/openai-compatible`,`baseURL={serverURL}/v1`、`apiKey=用户token`,即客户端直接消费服务端网关的 OpenAI 兼容接口,无需任何渠道适配;服务端 `bootstrap.models` 列表即客户端可用模型。
+3. 默认模型由管理员在 webadmin 选择(下拉来自自动上架后的 models 表),客户端无默认时回退首个。
+
 ## 范围
 
 - 新增 `internal/llmgateway/channels/` 渠道包模块(先实现 deepseek,接口可扩展)
@@ -59,8 +65,9 @@ type Channel interface {
 
 - `Name() = "deepseek"`,`BaseURL() = "https://api.deepseek.com"`
 - `FetchModels`:`GET https://api.deepseek.com/models`,`Authorization: Bearer <apiKey>`,解析 `{data:[{id,...}]}`;display_name 取 id;ContextLen/MaxOutput 优先取响应中数字字段,否则 0(走预设兜底)
+- **不硬编码模型**:渠道文件不含任何模型 id;deepseek 返回 `["deepseek-v4-flash","deepseek-v4-pro"]`(已实测),全部来自 `/models`
 - `RequestOverrides`:返回 `overrides={"thinking":{"type":"enabled"}, "reasoning_effort":"max"}` 与 `removeKeys=["temperature","top_p","presence_penalty","frequency_penalty"]`(思考模式不支持,文档:设置不报错但不生效)
-- `DefaultModelCaps`:`contextLen=1M(1048576)`,`maxOutput=384K(393216)`(deepseek 官方模型表)
+- `DefaultModelCaps`:`contextLen=1M(1048576)`,`maxOutput=384K(393216)`(deepseek 官方模型表;**已实测 `/models` 接口不返回长度字段,只能用预设**)
 
 ## 请求注入(handler.go forward 前)
 
@@ -74,7 +81,7 @@ type Channel interface {
 - 迁移 `0010_channel.sql`:`ALTER TABLE gateway_providers ADD COLUMN channel TEXT NOT NULL DEFAULT ''`
 - provider JSON 增加 `channel` 字段;创建时渠道下拉选择,自动填 base_url(管理员仍可改)
 
-`models` 表复用 `default_params`(JSON)承载 `context_length`/`max_output`,无 schema 变更。
+`models` 表复用 `default_params`(JSON)承载 `context_length`/`max_output`,无 schema 变更。**models 表由同步器从上游 `/models` 自动填充,不手工录入**;`bootstrap.models` 直接读 `models` 表下发给客户端,客户端经 OpenAI 兼容接口直用,无需任何客户端改动。
 
 ## 同步器(sync.go)
 
