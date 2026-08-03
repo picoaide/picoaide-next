@@ -160,7 +160,7 @@ func ListModels(db *sql.DB) ([]Model, error) {
 func SyncProviderModel(db *sql.DB, providerID int64, name, defaultParams string) error {
 	_, err := db.Exec(`INSERT INTO models (name, provider_id, display_name, default_params)
 		VALUES (?, ?, ?, ?)
-		ON CONFLICT(name) DO UPDATE SET display_name=excluded.display_name, default_params=excluded.default_params`,
+		ON CONFLICT(provider_id, name) DO UPDATE SET display_name=excluded.display_name, default_params=excluded.default_params`,
 		name, providerID, name, defaultParams)
 	return err
 }
