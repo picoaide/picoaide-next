@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { getAllowedDirsFromSettings, isAllowed, resolveAllowedDirs } from './paths'
+import { getAllowedDirsFromSettings, isAllowed, resolveAllowedDirs, resolveWorkspace } from './paths'
 
 const dirs: string[] = []
 
@@ -95,5 +95,17 @@ describe('resolveAllowedDirs', () => {
 
   it('dedupes the workspace dir from raw entries', () => {
     expect(resolveAllowedDirs('/ws', ['/ws', '/x', '/ws'])).toEqual(['/ws', '/x'])
+  })
+})
+
+describe('resolveWorkspace', () => {
+  it('空串/空白回退 fallback(无项目会话 workspace 默认 \'\')', () => {
+    expect(resolveWorkspace('', '/fallback')).toBe('/fallback')
+    expect(resolveWorkspace('   ', '/fallback')).toBe('/fallback')
+    expect(resolveWorkspace(undefined, '/fallback')).toBe('/fallback')
+  })
+
+  it('非空 workspace 原样返回', () => {
+    expect(resolveWorkspace('/proj/5', '/fallback')).toBe('/proj/5')
   })
 })

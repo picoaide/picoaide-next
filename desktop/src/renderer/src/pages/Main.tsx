@@ -34,6 +34,7 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
   const interrupted = useChatStore((s) => s.interrupted)
   const streaming = useChatStore((s) => s.streaming)
   const streamingText = useChatStore((s) => s.streamingText)
+  const streamingReasoning = useChatStore((s) => s.streamingReasoning)
   const toolCalls = useChatStore((s) => s.toolCalls)
   const localError = useChatStore((s) => s.localError)
   const hasMoreMessages = useChatStore((s) => s.hasMoreMessages)
@@ -221,6 +222,7 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
                   messages={messages}
                   streaming={streaming}
                   streamingText={streamingText}
+                  streamingReasoning={streamingReasoning}
                   toolCalls={toolCalls}
                   error={localError}
                   hasMore={hasMoreMessages}

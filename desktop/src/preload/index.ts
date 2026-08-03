@@ -77,6 +77,8 @@ const api = {
   cdpStatus: (): Promise<{ running: boolean; port: number }> => ipcRenderer.invoke('cdp:status'),
   onAgentEvent: (cb: (ev: AgentEvent) => void): Unsub => subscribe('agent:event', cb),
   onInterrupted: (cb: (list: ConversationRow[]) => void): Unsub => subscribe('chat:interrupted', cb),
+  onChatTitle: (cb: (payload: { conversationId: number; title: string }) => void): Unsub =>
+    subscribe('chat:title', cb),
   onConnectionStatus: (cb: (status: 'online' | 'offline' | 'auth_expired' | 'trusting_cert') => void): Unsub =>
     subscribe('connection:status', cb),
   onLoggedIn: (cb: (session: Session) => void): Unsub => subscribe('auth:logged-in', cb),

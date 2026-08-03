@@ -61,6 +61,11 @@ export function resolveAllowedDirs(workspaceDir: string, raw: string[]): string[
   return out
 }
 
+// 会话 workspace 可能为空串(无项目会话默认 ''),此时回退全局工作目录,防止 cwd/allowedDirs 变成 ''
+export function resolveWorkspace(workspace: string | undefined, fallback: string): string {
+  return workspace && workspace.trim().length > 0 ? workspace : fallback
+}
+
 const BOUNDARY_PREFIX = '路径不在允许目录内: '
 
 // isBoundaryError reports whether err is an out-of-boundary ToolError,

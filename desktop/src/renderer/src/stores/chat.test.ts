@@ -106,6 +106,13 @@ describe('chat store', () => {
     expect(fake.api.moveConversation).toHaveBeenCalledWith(1, 2)
   })
 
+  it('onChatTitle 实时更新侧边栏会话标题', async () => {
+    const id = (await useChatStore.getState().newConversation())!
+    expect(useChatStore.getState().conversations[0].title).toBe('')
+    useChatStore.getState().onChatTitle(id, '修复登录页样式')
+    expect(useChatStore.getState().conversations[0].title).toBe('修复登录页样式')
+  })
+
   it('sendMessage creates a conversation when none is active and calls chatAsk', async () => {
     await useChatStore.getState().sendMessage('你好')
     expect(fake.api.chatNew).toHaveBeenCalled()
@@ -145,6 +152,14 @@ describe('chat store', () => {
     const s = useChatStore.getState()
     expect(s.streaming).toBe(false)
     expect(s.localError).toContain('upstream 502')
+  })
+
+  it('reasoning_delta appends to streamingReasoning; done clears it', () => {
+    useChatStore.getState().onAgentEvent({ type: 'reasoning_delta', data: '先分析需求' })
+    useChatStore.getState().onAgentEvent({ type: 'reasoning_delta', data: ',再写代码' })
+    expect(useChatStore.getState().streamingReasoning).toBe('先分析需求,再写代码')
+    useChatStore.getState().onAgentEvent({ type: 'done', data: {} })
+    expect(useChatStore.getState().streamingReasoning).toBe('')
   })
 
   it('selectConversation loads artifacts for the conversation', async () => {

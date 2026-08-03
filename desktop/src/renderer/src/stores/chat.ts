@@ -17,6 +17,7 @@ export interface ChatMessage {
   content: string
   is_error: number
   tool_name: string
+  reasoning: string
 }
 
 export interface ProjectView {
@@ -44,6 +45,7 @@ function mapMessages(rows: MessageRow[]): ChatMessage[] {
     content: m.content,
     is_error: m.is_error,
     tool_name: m.tool_name ?? '',
+    reasoning: m.reasoning ?? '',
   }))
 }
 
@@ -60,6 +62,7 @@ interface ChatState {
   interrupted: ConversationRow[]
   streaming: boolean
   streamingText: string
+  streamingReasoning: string
   toolCalls: ToolCallView[]
   mode: Mode
   localError: string | null
@@ -86,6 +89,7 @@ interface ChatState {
   moveConversation: (conversationId: number, projectId: number | null) => Promise<void>
   setActiveProject: (id: number | null) => void
   toggleProjectCollapsed: (id: number) => void
+  onChatTitle: (conversationId: number, title: string) => void
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -99,6 +103,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   interrupted: [],
   streaming: false,
   streamingText: '',
+  streamingReasoning: '',
   toolCalls: [],
   mode: 'ask',
   localError: null,
@@ -108,7 +113,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   newConversation: async () => {
     const id = await picoaide().chatNew({ mode: get().mode, projectId: get().activeProjectId })
     const [conversations, projects] = await Promise.all([picoaide().chatList(), picoaide().projectList()])
-    set({ conversations, projects, activeId: id, messages: [], artifacts: [], streaming: false, streamingText: '', toolCalls: [], localError: null, hasMoreMessages: false, loadedTotal: 0 })
+    set({ conversations, projects, activeId: id, messages: [], artifacts: [], streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], localError: null, hasMoreMessages: false, loadedTotal: 0 })
     return id
   },
 
@@ -140,6 +145,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       collapsedProjects: s.collapsedProjects.includes(id)
         ? s.collapsedProjects.filter((x) => x !== id)
         : [...s.collapsedProjects, id],
+    })),
+
+  onChatTitle: (conversationId, title) =>
+    set((s) => ({
+      conversations: s.conversations.map((c) => (c.id === conversationId ? { ...c, title } : c)),
     })),
 
   loadConversations: async () => {
@@ -201,7 +211,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const id = activeId
     // 乐观追加用户消息;assistant 内容以流式增量呈现,结束后从 DB 重载
     set((s) => ({
-      messages: [...s.messages, { id: Date.now(), role: 'user', content: text, is_error: 0, tool_name: '' }],
+      messages: [...s.messages, { id: Date.now(), role: 'user', content: text, is_error: 0, tool_name: '', reasoning: '' }],
       streaming: true,
       streamingText: '',
       localError: null,
@@ -209,10 +219,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       await picoaide().chatAsk(id, text)
       const messages = mapMessages(await picoaide().chatMessages(id))
-      set({ messages, streaming: false, streamingText: '' })
+      set({ messages, streaming: false, streamingText: '', streamingReasoning: '' })
       await get().loadConversations()
     } catch {
-      set((s) => ({ streaming: false, streamingText: '', localError: s.localError ?? '发送失败,请重试' }))
+      set((s) => ({ streaming: false, streamingText: '', streamingReasoning: '', localError: s.localError ?? '发送失败,请重试' }))
     }
   },
 
@@ -220,7 +230,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   continueConversation: async (id) => {
     const messages = mapMessages(await picoaide().chatMessages(id))
     const artifacts = await picoaide().chatArtifacts(id)
-    set({ activeId: id, messages, artifacts, streaming: true, streamingText: '', toolCalls: [], interrupted: [], localError: null })
+    set({ activeId: id, messages, artifacts, streaming: true, streamingText: '', streamingReasoning: '', toolCalls: [], interrupted: [], localError: null })
     try {
       await picoaide().chatContinue(id)
       await get().loadConversations()
@@ -279,6 +289,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           toolCalls: [...s.toolCalls.filter((t) => t.id !== ev.data.id), { ...ev.data, status: 'running' }],
         }))
         break
+      case 'reasoning_delta':
+        set((s) => ({ streamingReasoning: s.streamingReasoning + ev.data }))
+        break
       case 'tool_end':
         set((s) => ({
           toolCalls: [
@@ -331,13 +344,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break
       case 'done':
       case 'canceled':
-        set({ streaming: false, streamingText: '', toolCalls: [] })
+        set({ streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [] })
         useApprovalsStore.getState().clear()
         void reloadMessages()
         void reloadArtifacts()
         break
       case 'error':
-        set({ streaming: false, streamingText: '', toolCalls: [], localError: ev.data })
+        set({ streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], localError: ev.data })
         useApprovalsStore.getState().clear()
         void reloadMessages()
         void reloadArtifacts()

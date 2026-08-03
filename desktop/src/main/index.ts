@@ -26,7 +26,7 @@ import { createSandboxTool, getSandbox } from './tools/sandbox'
 import { screenCaptureTool, HIGH_RISK_TOOLS as SCREEN_HIGH_RISK } from './tools/screen'
 import { clipboardReadTool, clipboardWriteTool, HIGH_RISK_TOOLS as CLIPBOARD_HIGH_RISK } from './tools/clipboard'
 import { createWebTools } from './tools/web'
-import { getAllowedDirsFromSettings, resolveAllowedDirs } from './tools/paths'
+import { getAllowedDirsFromSettings, resolveAllowedDirs, resolveWorkspace } from './tools/paths'
 import { login, saveSession, loadSession, clearSession, gatewayFetch } from './gateway/auth'
 import { generateTitle, fallbackTitle } from './agent/title'
 import { getBootstrap } from './gateway/bootstrap'
@@ -162,7 +162,8 @@ async function loadBrowserTools(): Promise<{ tools: Record<string, Tool>; highRi
 // 工具注册表(架构设计 §3.4):本地文件/终端/沙盒/屏幕/剪贴板/web + 远程知识库 + 浏览器桥
 // workspace 非空(项目内会话)→ cwd 与 allowedDirs 以会话 workspace 为基准;否则回退全局用户工作目录
 async function buildToolsRegistry(db: ReturnType<typeof openDb>, workspace?: string): Promise<{ tools: Record<string, GatedTool>; highRiskTools: Set<string> }> {
-  const base = workspace ?? workspaceDir()
+  // 无项目会话 workspace 默认 ''(falsy)→ 回退全局工作目录,防止 cwd/allowedDirs 变成空
+  const base = resolveWorkspace(workspace, workspaceDir())
   const allowedDirs = resolveAllowedDirs(base, getAllowedDirsFromSettings((k) => getSetting(db, k)))
   const cwd = base
   const web = getBootstrapCache().web
@@ -396,17 +397,22 @@ app.whenReady().then(async () => {
         const bootstrap = getBootstrapCache()
         const model = bootstrap.models.find((m) => m.id === bootstrap.default_model) ?? bootstrap.models[0]
         if (!model) return
+        let title = ''
         try {
-          const title = await generateTitle(
+          title = await generateTitle(
             { serverURL: session.serverURL, token: session.token },
             model.id,
             firstUser.content,
             gatewayFetch,
           )
-          if (title) store.setConversationTitle(conversationId, title)
         } catch {
           // 网关失败兜底:截取首条用户消息
-          store.setConversationTitle(conversationId, fallbackTitle(firstUser.content))
+          title = fallbackTitle(firstUser.content)
+        }
+        if (title) {
+          store.setConversationTitle(conversationId, title)
+          // 实时通知 renderer 刷新侧边栏标题(不等下次 loadConversations)
+          mainWindow?.webContents.send('chat:title', { conversationId, title })
         }
       },
       registerEngineReset: (reset) => {

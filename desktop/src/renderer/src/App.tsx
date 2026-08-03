@@ -22,11 +22,16 @@ export default function App() {
     const offLoggedIn = window.picoaide.onLoggedIn((session) => {
       useAuthStore.getState().applySession(session)
     })
+    // 自动标题实时刷新(主进程 chat:title 推送,不等下次 loadConversations)
+    const offTitle = window.picoaide.onChatTitle(({ conversationId, title }) => {
+      useChatStore.getState().onChatTitle(conversationId, title)
+    })
     void useAuthStore.getState().init()
     return () => {
       offAgent()
       offConn()
       offLoggedIn()
+      offTitle()
     }
   }, [])
 
