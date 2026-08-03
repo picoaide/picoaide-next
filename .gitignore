@@ -15,5 +15,6 @@ webadmin/dist/
 *.log
 .DS_Store
 desktop/test-results/
+picoaide-data/
 .picoaide-data/
 .worktrees/

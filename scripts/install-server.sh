@@ -127,7 +127,7 @@ fi
 
 # ---- 部署目录 ----
 step "创建部署目录并生成配置"
-mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/.picoaide-data"
+mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/picoaide-data"
 cd "$INSTALL_DIR"
 
 # ---- 证书生成(openssl 自签名 → certs/ 目录) ----
@@ -198,7 +198,7 @@ services:
     environment:
       PICOAI_ADMIN_PASSWORD: $ADMIN_PASS
     volumes:
-      - ./.picoaide-data:/data
+      - ./picoaide-data:/data
     command: ["--bootstrap-admin", "$ADMIN_USER"]
     healthcheck:
       # /healthz 无需认证返回 200;wget 退出码 0=healthy(连接失败/非200=unhealthy)
@@ -246,7 +246,7 @@ log "管理后台: https://$DOMAIN/admin/"
 log "员工登录: https://$DOMAIN"
 log "账号: $ADMIN_USER"
 log "密码: $ADMIN_PASS"
-log "数据目录: $INSTALL_DIR/.picoaide-data"
+log "数据目录: $INSTALL_DIR/picoaide-data"
 log "证书: 自签名(openssl 生成,10 年有效期)"
 log "  证书文件: $INSTALL_DIR/certs/server.crt"
 log "  私钥文件: $INSTALL_DIR/certs/server.key"
