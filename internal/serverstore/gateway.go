@@ -137,6 +137,89 @@ func SyncProviderModels(db *sql.DB, providerID int64, names []string) error {
 	return tx.Commit()
 }
 
+// ListModels returns all model rows, ordered by id.
+func ListModels(db *sql.DB) ([]Model, error) {
+	rows, err := db.Query(`SELECT id, name, provider_id, display_name, default_params
+		FROM models ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Model
+	for rows.Next() {
+		m, err := scanModel(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *m)
+	}
+	return out, rows.Err()
+}
+
+// SyncProviderModel upsert 一个模型的 display_name 与 default_params(幂等)。
+func SyncProviderModel(db *sql.DB, providerID int64, name, defaultParams string) error {
+	_, err := db.Exec(`INSERT INTO models (name, provider_id, display_name, default_params)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(name) DO UPDATE SET display_name=excluded.display_name, default_params=excluded.default_params`,
+		name, providerID, name, defaultParams)
+	return err
+}
+
+// RemoveMissingProviderModels 删除 provider 下不在 keep 列表中的模型。
+// 若被删的是 gateway.default_model,重置为空串。返回删除数量。
+func RemoveMissingProviderModels(db *sql.DB, providerID int64, keep []string) (int, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	keepSet := make(map[string]bool, len(keep))
+	for _, k := range keep {
+		keepSet[k] = true
+	}
+	rows, err := tx.Query(`SELECT id, name FROM models WHERE provider_id = ?`, providerID)
+	if err != nil {
+		return 0, err
+	}
+	type row struct {
+		id   int64
+		name string
+	}
+	var doomed []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.name); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if !keepSet[r.name] {
+			doomed = append(doomed, r)
+		}
+	}
+	rows.Close()
+
+	deletedDefault := false
+	for _, r := range doomed {
+		if _, err := tx.Exec("DELETE FROM models WHERE id = ?", r.id); err != nil {
+			return 0, err
+		}
+		var dm string
+		if err := tx.QueryRow("SELECT value FROM settings WHERE key = 'gateway.default_model'").Scan(&dm); err == nil && dm == r.name {
+			deletedDefault = true
+		}
+	}
+	if deletedDefault {
+		if _, err := tx.Exec("UPDATE settings SET value = '' WHERE key = 'gateway.default_model'"); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(doomed), nil
+}
+
 func scanModel(scan interface{ Scan(...any) error }) (*Model, error) {
 	var m Model
 	if err := scan.Scan(&m.ID, &m.Name, &m.ProviderID, &m.DisplayName, &m.DefaultParams); err != nil {
