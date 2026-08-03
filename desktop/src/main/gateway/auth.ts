@@ -53,10 +53,11 @@ async function electronSessionFetch(): Promise<typeof fetch | null> {
   return typeof f === 'function' ? (f as typeof fetch) : null
 }
 
-export async function gatewayFetch(url: string, init?: RequestInit): Promise<Response> {
+export async function gatewayFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
   const sessionFetch = await electronSessionFetch()
+  const url = typeof input === 'string' ? input : input.toString()
   if (sessionFetch) return sessionFetch(url, init)
-  return fetch(url, init)
+  return fetch(input, init)
 }
 
 export async function login(serverURL: string, username: string, password: string): Promise<Session> {

@@ -183,7 +183,7 @@ function makeStore() {
 
 function makeEngine(
   script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang',
-  cfg: Partial<{ maxSteps: number; approvalTimeoutMs: number; retryCount: number }> = {},
+  cfg: Partial<{ maxSteps: number; approvalTimeoutMs: number; retryCount: number; fetch: typeof fetch }> = {},
   store: ReturnType<typeof makeStore> = makeStore(),
   toolName = 'file_delete',
 ) {
@@ -253,6 +253,15 @@ describe('provider', () => {
     const model = createGatewayModel('https://gw.example.com', 'tok-123', 'deepseek-chat')
     expect(model.modelId).toBe('deepseek-chat')
     expect(model.provider).toBe('gateway.chat')
+  })
+})
+
+describe('AgentEngine gateway fetch injection', () => {
+  it('holds the configured fetch (session.defaultSession.fetch) for gateway calls', async () => {
+    const injected = vi.fn() as unknown as typeof fetch
+    const { engine } = makeEngine('text', { fetch: injected })
+    expect(engine.injectedFetch).toBe(injected)
+    await engine.ask({ conversationId: 1, content: 'hello' })
   })
 })
 

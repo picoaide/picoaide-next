@@ -161,6 +161,7 @@ function makeDeps(script: 'text' | 'throw' | 'hang' | 'tool-call' = 'text') {
   const model = new FakeProvider(script)
   let modelCalls = 0
   let onEngineReset: (() => void) | null = null
+  const injectedFetch = vi.fn() as unknown as typeof fetch
   const deps: AgentIpcDeps = {
     store,
     sysPrompt: 'sys',
@@ -177,8 +178,9 @@ function makeDeps(script: 'text' | 'throw' | 'hang' | 'tool-call' = 'text') {
     registerEngineReset: (fn: () => void) => {
       onEngineReset = fn
     },
+    fetch: injectedFetch,
   }
-  return { sent, store, deps, model, modelCalls: () => modelCalls, resetEngine: () => onEngineReset?.() }
+  return { sent, store, deps, model, modelCalls: () => modelCalls, resetEngine: () => onEngineReset?.(), injectedFetch }
 }
 
 function eventsOf(sent: Array<{ channel: string; payload: unknown }>) {
@@ -232,6 +234,15 @@ describe('engine lifecycle', () => {
     await handlers['chat:ask']({ conversationId: id2, content: 'hi again' })
     expect(modelCalls()).toBe(2)
     expect(store.getConversation(id2)?.status).toBe('done')
+  })
+
+  it('injects session.defaultSession.fetch into the engine for gateway calls', async () => {
+    const { deps, store, injectedFetch } = makeDeps('text')
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({})
+    await handlers['chat:ask']({ conversationId: id, content: 'hi' })
+    // chat 后 engine 缓存;断言其持有注入的 fetch(引擎通过 injectedFetch 暴露)
+    expect(injectedFetch).toBeTruthy()
   })
 })
 

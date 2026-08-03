@@ -5,7 +5,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 
 export type RunnerConfig =
   | { transport: 'stdio'; command: string; args: string[]; env?: Record<string, string> }
-  | { transport: 'http'; url: string; headers?: Record<string, string> }
+  | { transport: 'http'; url: string; headers?: Record<string, string>; fetch?: typeof fetch }
 
 export interface McpToolDef {
   name: string
@@ -23,6 +23,8 @@ export interface McpRunner {
   onDisabled(cb: () => void): () => void
   isDisabled(): boolean
   restartCount(): number
+  // 测试钩子:http transport 实际使用的 fetch(TOFU 注入验证)
+  readonly transportFetch?: typeof fetch
 }
 
 // 白名单二进制:绝对路径,或 npx/node/python3/docker(裸名);args 拒绝 shell 元字符
@@ -76,11 +78,20 @@ export function createMcpRunner(config: RunnerConfig): McpRunner {
   // 预挂处理器:disable 时若无人 await ready,也避免 unhandledRejection(Node 语义)
   ready.catch(() => {})
 
+  // 测试钩子:记录 http transport 实际收到的 fetch(验证 session.fetch 注入)
+  let lastTransportFetch: typeof fetch | undefined
   function buildTransport(): StdioClientTransport | StreamableHTTPClientTransport {
     if (config.transport === 'stdio') {
       return new StdioClientTransport({ command: config.command, args: config.args, env: config.env })
     }
-    return new StreamableHTTPClientTransport(new URL(config.url), { requestInit: { headers: config.headers } })
+    // 注入 session.defaultSession.fetch(证书校验/TOFU 生效,架构设计 §3.3.7),
+    // 避免 MCP http 传输用全局 fetch 绕过 TLS 校验
+    const opts: Record<string, unknown> = { requestInit: { headers: config.headers } }
+    if (config.fetch) {
+      opts.fetch = config.fetch
+      lastTransportFetch = config.fetch
+    }
+    return new StreamableHTTPClientTransport(new URL(config.url), opts)
   }
 
   async function connectOnce(): Promise<void> {
@@ -173,6 +184,9 @@ export function createMcpRunner(config: RunnerConfig): McpRunner {
     },
     isDisabled: () => disabled,
     restartCount: () => restarts,
+    get transportFetch() {
+      return lastTransportFetch
+    },
   }
 }
 

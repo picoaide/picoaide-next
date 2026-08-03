@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createMcpRunner, validateArgs, validateStdioCommand } from './runner'
 
 const FIXTURE = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..', 'tests', 'fixtures', 'mock-mcp-server.js')
@@ -123,6 +123,24 @@ describe('createMcpRunner (http)', () => {
       const disabled = new Promise<void>((resolve) => runner.onDisabled(() => resolve()))
       await disabled
       expect(runner.isDisabled()).toBe(true)
+    } finally {
+      await runner.close()
+    }
+  })
+
+  it('uses the injected session fetch for the HTTP transport (TOFU path)', async () => {
+    const injectedFetch = vi.fn() as unknown as typeof fetch
+    const runner = createMcpRunner({
+      transport: 'http',
+      url: 'http://127.0.0.1:1/mcp',
+      headers: { Authorization: 'Bearer x' },
+      fetch: injectedFetch,
+    })
+    try {
+      // transport 构造即把注入的 fetch 交给 StreamableHTTPClientTransport
+      expect(runner.transportFetch).toBe(injectedFetch)
+      // 且 transport 未被全局 fetch 替代
+      expect(runner.transportFetch).not.toBe(undefined)
     } finally {
       await runner.close()
     }

@@ -26,7 +26,7 @@ import { screenCaptureTool, HIGH_RISK_TOOLS as SCREEN_HIGH_RISK } from './tools/
 import { clipboardReadTool, clipboardWriteTool, HIGH_RISK_TOOLS as CLIPBOARD_HIGH_RISK } from './tools/clipboard'
 import { createWebTools } from './tools/web'
 import { getAllowedDirsFromSettings, resolveAllowedDirs } from './tools/paths'
-import { login, saveSession, loadSession, clearSession } from './gateway/auth'
+import { login, saveSession, loadSession, clearSession, gatewayFetch } from './gateway/auth'
 import { getBootstrap } from './gateway/bootstrap'
 import { createHealthPoller } from './gateway/health'
 import type { Session } from './gateway/config'
@@ -193,6 +193,7 @@ async function loadMcpTools(db: ReturnType<typeof openDb>): Promise<{ tools: Rec
         url: rec.url ?? '',
         headers: creds?.headers ?? {},
         env: creds?.env ?? {},
+        fetch: gatewayFetch,
       })
       try {
         const conn = await mod.connectRunner(runner)
@@ -320,6 +321,7 @@ app.whenReady().then(async () => {
       registerEngineReset: (reset) => {
         resetAgentEngine = reset
       },
+      fetch: gatewayFetch,
       addAllowedDir: (dir) => {
         const current = getAllowedDirsFromSettings((k) => getSetting(db, k))
         if (!current.includes(dir)) {

@@ -161,6 +161,11 @@ export class AgentEngine {
     return this.queue.length + (this.active ? 1 : 0)
   }
 
+  // 测试钩子:注入的 session.fetch(TOFU 生效);ipc 层断言接线正确
+  get injectedFetch(): typeof fetch | undefined {
+    return this.cfg.fetch
+  }
+
   // Ask 模式:纯聊天、无工具、单步、持久化到 store(架构设计 §3.3.4)
   async ask(input: AskInput): Promise<void> {
     const store = this.deps.store

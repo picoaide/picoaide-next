@@ -74,6 +74,8 @@ export interface AgentIpcDeps {
   // 引擎重置钩子:登出/换账号时由宿主(index.ts)调用,丢弃缓存的
   // AgentEngine(它持有旧会话的 model/token,跨登入残留会导致 401)
   registerEngineReset?: (reset: () => void) => void
+  // session.defaultSession.fetch 注入(证书校验/TOFU 生效,架构设计 §3.3.7)
+  fetch?: typeof fetch
 }
 
 export interface IpcHandlers {
@@ -121,7 +123,7 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
     if (!engine) {
       const sysPrompt = typeof deps.sysPrompt === 'function' ? await deps.sysPrompt() : deps.sysPrompt
       engine = new AgentEngine(
-        { model: deps.createModel(), sysPrompt },
+        { model: deps.createModel(), sysPrompt, ...(deps.fetch ? { fetch: deps.fetch } : {}) },
         {
           store: deps.store,
           emit: emitAgentEvent,
