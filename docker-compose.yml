@@ -10,7 +10,7 @@
 # 说明:
 #   - HTTPS 由 Caddy 提供(默认自签名,部署后可在 webadmin 网关页信任);
 #     有公网域名时删掉 Caddyfile 里 `tls internal`,自动换 Let's Encrypt 正式证书
-#   - 数据(数据库/密钥/知识库)落在当前目录 ./.picoaide-data,升级镜像不丢数据
+#   - 数据(数据库/密钥/知识库)落在当前目录 ./picoaide-data,升级镜像不丢数据
 #   - 员工客户端填 https://<你的域名> 登录
 #   - 首次使用前请修改下方 PICOAI_ADMIN_PASSWORD 为强密码
 services:
@@ -39,7 +39,7 @@ services:
       # ⚠ 部署前请改为强密码
       PICOAI_ADMIN_PASSWORD: change-me-to-a-strong-password
     volumes:
-      - ./.picoaide-data:/data
+      - ./picoaide-data:/data
     command: ["--bootstrap-admin", "admin"]
     healthcheck:
       # /healthz 无需认证返回 200;wget 退出码 0=healthy(连接失败/非200=unhealthy)
