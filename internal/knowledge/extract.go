@@ -16,6 +16,12 @@ import (
 
 var xmlTagRE = regexp.MustCompile(`<[^>]+>`)
 
+// maxUploadBytes caps a raw upload file; maxExtractBytes caps extracted text.
+const (
+	maxUploadBytes  = 16 << 20
+	maxExtractBytes = 32 << 20
+)
+
 // extractFile saves a multipart upload to a temp file and extracts its text
 // plus a content type. Supported: txt/md/docx/pdf.
 func extractFile(fh *multipart.FileHeader) (content, contentType string, err error) {
@@ -42,11 +48,14 @@ func extractFile(fh *multipart.FileHeader) (content, contentType string, err err
 		return "", "", errors.New("读取文件失败")
 	}
 	defer os.Remove(tmp.Name())
-	if _, err := io.Copy(tmp, src); err != nil {
+	if _, err := io.Copy(tmp, io.LimitReader(src, maxUploadBytes+1)); err != nil {
 		tmp.Close()
 		return "", "", errors.New("读取文件失败")
 	}
 	tmp.Close()
+	if info, err := os.Stat(tmp.Name()); err == nil && info.Size() > maxUploadBytes {
+		return "", "", errors.New("文件超过 16MB 上限")
+	}
 
 	switch contentType {
 	case "text", "markdown":
@@ -85,10 +94,13 @@ func extractDocx(path string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("docx 解析失败: %v", err)
 		}
-		b, err := io.ReadAll(rc)
+		b, err := io.ReadAll(io.LimitReader(rc, maxExtractBytes+1)) // zip bomb guard
 		rc.Close()
 		if err != nil {
 			return "", fmt.Errorf("docx 解析失败: %v", err)
+		}
+		if len(b) > maxExtractBytes {
+			return "", errors.New("docx 解压内容超过 32MB 上限")
 		}
 		text := xmlTagRE.ReplaceAllString(strings.ReplaceAll(string(b), "</w:p>", "\n"), "")
 		return html.UnescapeString(text), nil
@@ -114,9 +126,12 @@ func extractPDF(path string) (out string, err error) {
 	if err != nil {
 		return "", fmt.Errorf("pdf 解析失败: %v", err)
 	}
-	b, err := io.ReadAll(rd)
+	b, err := io.ReadAll(io.LimitReader(rd, maxExtractBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("pdf 解析失败: %v", err)
+	}
+	if len(b) > maxExtractBytes {
+		return "", errors.New("pdf 内容超过 32MB 上限")
 	}
 	return string(b), nil
 }

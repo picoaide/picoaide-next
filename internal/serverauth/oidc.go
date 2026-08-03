@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gin-gonic/gin"
@@ -22,9 +23,18 @@ var errOIDCState = errors.New("oidc: unknown state")
 // oidcFlow holds the PKCE verifier and nonce bound to a state value.
 // Stored in memory: flows are invalidated on restart (accepted per plan).
 type oidcFlow struct {
-	verifier string
-	nonce    string
+	verifier  string
+	nonce     string
+	createdAt time.Time
 }
+
+// oidcFlowTTL bounds how long a flow may sit before the callback arrives.
+// oidcMaxFlows caps the in-memory map so unauthenticated /oidc/login spam
+// cannot grow memory without bound.
+const (
+	oidcFlowTTL  = 10 * time.Minute
+	oidcMaxFlows = 1000
+)
 
 // OIDCProvider implements the authorization code + PKCE flow.
 // Config keys: issuer, client_id, client_secret, redirect_url.
@@ -79,11 +89,32 @@ func (p *OIDCProvider) AuthURL(state string) (string, error) {
 	}
 	verifier := oauth2.GenerateVerifier()
 	p.mu.Lock()
-	p.flows[state] = &oidcFlow{verifier: verifier, nonce: nonce}
+	p.sweepFlowsLocked(time.Now())
+	if len(p.flows) >= oidcMaxFlows { // still full: evict the oldest flow
+		var oldest string
+		var oldestAt time.Time
+		for s, f := range p.flows {
+			if oldest == "" || f.createdAt.Before(oldestAt) {
+				oldest, oldestAt = s, f.createdAt
+			}
+		}
+		delete(p.flows, oldest)
+	}
+	p.flows[state] = &oidcFlow{verifier: verifier, nonce: nonce, createdAt: time.Now()}
 	p.mu.Unlock()
 	return p.cfg.AuthCodeURL(state,
 		oauth2.S256ChallengeOption(verifier),
 		oidc.Nonce(nonce)), nil
+}
+
+// sweepFlowsLocked removes expired flows; caller holds p.mu.
+func (p *OIDCProvider) sweepFlowsLocked(now time.Time) {
+	cutoff := now.Add(-oidcFlowTTL)
+	for s, f := range p.flows {
+		if f.createdAt.Before(cutoff) {
+			delete(p.flows, s)
+		}
+	}
 }
 
 // HandleCallback exchanges the code (validating PKCE, state and nonce) and

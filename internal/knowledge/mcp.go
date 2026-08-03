@@ -49,8 +49,13 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 	g.POST("/message", serverauth.BearerAuth(db), handleMessage(db))
 }
 
+// maxMCPBody caps the JSON-RPC request body (kb_search/read/list are tiny;
+// kb_upload content is separately capped in IndexDocument).
+const maxMCPBody = 4 << 20
+
 func handleMessage(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxMCPBody)
 		var req rpcRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusOK, rpcResponse{JSONRPC: "2.0", ID: json.RawMessage("null"),

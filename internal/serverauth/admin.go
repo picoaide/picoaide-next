@@ -15,6 +15,10 @@ import (
 
 const sessionCookieName = "picoaide_session"
 
+// adminLoginLimiter bounds admin login attempts (ip+username) so the
+// password is not brute-forceable without rate limiting.
+var adminLoginLimiter = newLoginLimiter()
+
 // AdminAPI holds the admin web handlers.
 type AdminAPI struct {
 	DB *sql.DB
@@ -77,6 +81,10 @@ func (a *AdminAPI) handleLogin(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.Username == "" {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+		return
+	}
+	if !adminLoginLimiter.allow(loginKey(c, req.Username)) {
+		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录尝试过于频繁,请稍后再试")
 		return
 	}
 	u, err := serverstore.AuthenticateLocal(a.DB, req.Username, req.Password)
@@ -273,20 +281,22 @@ func (a *AdminAPI) deleteUser(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "不能删除自己")
 		return
 	}
-	// block deleting the last admin
+	// block deleting the last admin (fail closed: DB error also refuses)
 	if u.IsAdmin {
 		admins, _, err := serverstore.ListUsers(a.DB, 0, 100000)
-		if err == nil {
-			count := 0
-			for _, x := range admins {
-				if x.IsAdmin {
-					count++
-				}
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		count := 0
+		for _, x := range admins {
+			if x.IsAdmin {
+				count++
 			}
-			if count <= 1 {
-				writeError(c, http.StatusBadRequest, "VALIDATION", "不能删除最后一个管理员")
-				return
-			}
+		}
+		if count <= 1 {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "不能删除最后一个管理员")
+			return
 		}
 	}
 	if err := serverstore.DeleteUser(a.DB, id); err != nil {
