@@ -3,6 +3,7 @@ package llmgateway
 import (
 	"database/sql"
 	"encoding/json"
+	"log"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
@@ -23,6 +24,8 @@ type Upstream struct {
 // LoadUpstreams returns all enabled providers with their model lists.
 // Model names merge the provider's models JSON column with the models table
 // (where channel sync writes), so both manually-entered and synced models route.
+// One broken provider (undecryptable key, corrupt models JSON) is skipped and
+// logged instead of aborting the whole gateway.
 func LoadUpstreams(db *sql.DB) ([]Upstream, error) {
 	rows, err := db.Query(`SELECT id, name, base_url, api_key_enc, models, channel FROM gateway_providers WHERE enabled = 1 ORDER BY id`)
 	if err != nil {
@@ -39,16 +42,19 @@ func LoadUpstreams(db *sql.DB) ([]Upstream, error) {
 		}
 		key, err := DecryptSecret(key)
 		if err != nil {
-			return nil, err
+			log.Printf("gateway: skip provider %s: decrypt api key: %v", u.Name, err)
+			continue
 		}
 		u.APIKey = key
 		if err := json.Unmarshal([]byte(modelsJSON), &u.Models); err != nil {
-			return nil, err
+			log.Printf("gateway: skip provider %s: bad models json: %v", u.Name, err)
+			continue
 		}
 		// ponytail: N+1 per provider; admin-managed table is tiny, a JOIN adds no value
 		synced, err := syncedModelNames(db, id)
 		if err != nil {
-			return nil, err
+			log.Printf("gateway: skip provider %s: load synced models: %v", u.Name, err)
+			continue
 		}
 		u.Models = mergeModelNames(u.Models, synced)
 		ups = append(ups, u)

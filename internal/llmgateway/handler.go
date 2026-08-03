@@ -26,6 +26,10 @@ import (
 // defaultRateLimit is the default per-user requests per minute.
 const defaultRateLimit = 60
 
+// maxChatBody caps the chat completions request body (memory guard; typical
+// requests are a few hundred KB even with long context).
+const maxChatBody = 16 << 20
+
 // API holds gateway dependencies.
 type API struct {
 	DB     *sql.DB
@@ -41,7 +45,13 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
 		return
 	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxChatBody)
 	raw, err := io.ReadAll(c.Request.Body)
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		serverauth.WriteError(c, http.StatusRequestEntityTooLarge, "VALIDATION", "请求体过大")
+		return
+	}
 	if err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
 		return
@@ -186,7 +196,8 @@ func upstreamURL(base string) string {
 }
 
 // forward sends the raw body to the upstream, replacing Authorization with
-// the upstream key; retries once on transport error or 5xx.
+// the upstream key. Retries once on transport error only: a 5xx response may
+// have been partially processed/billed upstream, re-sending would double-bill.
 func (a *API) forward(c *gin.Context, up *Upstream, raw []byte, stream bool) (*http.Response, error) {
 	url := upstreamURL(up.BaseURL)
 	client := a.client
@@ -211,7 +222,7 @@ func (a *API) forward(c *gin.Context, up *Upstream, raw []byte, stream bool) (*h
 		}
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
-		lastErr = fmt.Errorf("upstream status %d", resp.StatusCode)
+		return nil, fmt.Errorf("upstream status %d", resp.StatusCode)
 	}
 	return nil, lastErr
 }
