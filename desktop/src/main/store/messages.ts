@@ -54,6 +54,15 @@ export function updateMessageContent(db: Database.Database, id: number, content:
   db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(content, id)
 }
 
+// 删除指定消息之后的所有消息(chatbox 消息编辑语义:改 user 消息后截断该轮重跑)
+export function deleteMessagesAfter(db: Database.Database, messageId: number): void {
+  db.prepare('DELETE FROM messages WHERE id > ?').run(messageId)
+}
+
+export function deleteMessage(db: Database.Database, id: number): void {
+  db.prepare('DELETE FROM messages WHERE id = ?').run(id)
+}
+
 export function deleteMessages(db: Database.Database, conversationId: number): void {
   db.prepare('DELETE FROM messages WHERE conversation_id = ?').run(conversationId)
 }

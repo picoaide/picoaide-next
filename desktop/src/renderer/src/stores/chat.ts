@@ -78,6 +78,12 @@ interface ChatState {
   approvePlan: (id: number, ok: boolean) => Promise<void>
   cancel: () => Promise<void>
   setMode: (m: Mode) => void
+  // 消息操作(chatbox 语义):重新生成 = 截断重跑;编辑 = 改内容+截断重跑;引用 = 插入输入框
+  editMessage: (messageId: number, content: string) => Promise<void>
+  deleteMessage: (messageId: number) => Promise<void>
+  quoteMessage: (content: string) => void
+  pendingQuote: string | null
+  consumeQuote: () => string | null
   checkInterrupted: () => Promise<void>
   onInterrupted: (list: ConversationRow[]) => void
   clearInterrupted: () => void
@@ -109,6 +115,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   localError: null,
   hasMoreMessages: false,
   loadedTotal: 0,
+  pendingQuote: null,
 
   newConversation: async () => {
     const id = await picoaide().chatNew({ mode: get().mode, projectId: get().activeProjectId })
@@ -256,6 +263,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setMode: (m) => set({ mode: m }),
+
+  // 消息编辑:改内容 + 截断重跑;UI 先展示"正在重新生成"状态,完成后从 DB 重载
+  editMessage: async (messageId, content) => {
+    const { activeId } = get()
+    if (activeId === null) return
+    set({ streaming: true, streamingText: '', streamingReasoning: '', localError: null })
+    try {
+      await picoaide().chatEditAndRerun({ conversationId: activeId, messageId, content })
+      const messages = mapMessages(await picoaide().chatMessages(activeId))
+      set({ messages, streaming: false, streamingText: '' })
+      await get().loadConversations()
+    } catch {
+      set((s) => ({ streaming: false, streamingText: '', localError: s.localError ?? '编辑失败,请重试' }))
+    }
+  },
+
+  quoteMessage: (content) => set({ pendingQuote: content }),
+  consumeQuote: () => {
+    const q = get().pendingQuote
+    set({ pendingQuote: null })
+    return q
+  },
+
+  deleteMessage: async (messageId) => {
+    const { activeId } = get()
+    if (activeId === null) return
+    await picoaide().chatDeleteMessage(messageId)
+    const messages = mapMessages(await picoaide().chatMessages(activeId))
+    set({ messages })
+  },
 
   // 启动时拉取中断会话;与主进程推送合并(去重:已有提示则不覆盖)
   checkInterrupted: async () => {

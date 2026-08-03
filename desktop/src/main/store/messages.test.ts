@@ -6,7 +6,7 @@ import Database from 'better-sqlite3'
 import { openDb } from './db'
 import { migrate } from './migrations'
 import { createConversation } from './conversations'
-import { appendMessage, deleteMessages, listMessages, updateMessageContent } from './messages'
+import { appendMessage, deleteMessages, deleteMessagesAfter, listMessages, updateMessageContent } from './messages'
 
 function openTestDb(): { db: Database.Database; convId: number; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), 'picoaide-msg-test-'))
@@ -84,6 +84,22 @@ describe('messages', () => {
       appendMessage(db, { conversationId: convId, role: 'assistant', content: 'y' })
       deleteMessages(db, convId)
       expect(listMessages(db, convId)).toHaveLength(0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('deleteMessagesAfter removes messages after the given id only', () => {
+    const { db, convId, cleanup } = openTestDb()
+    try {
+      const m1 = appendMessage(db, { conversationId: convId, role: 'user', content: 'edited' })
+      const m2 = appendMessage(db, { conversationId: convId, role: 'assistant', content: 'old answer' })
+      const m3 = appendMessage(db, { conversationId: convId, role: 'user', content: 'followup' })
+      deleteMessagesAfter(db, m1)
+      const left = listMessages(db, convId)
+      expect(left.map((m) => m.id)).toEqual([m1])
+      void m2
+      void m3
     } finally {
       cleanup()
     }

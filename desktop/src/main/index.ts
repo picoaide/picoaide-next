@@ -12,7 +12,7 @@ import {
   updateConversationStatus, deleteConversation, setConversationTitle, setConversationWorkspace, touchConversation,
 } from './store/conversations'
 import { createProject, listProjects, getProject, deleteProject, setConversationProject } from './store/projects'
-import { listMessages, appendMessage } from './store/messages'
+import { listMessages, appendMessage, updateMessageContent, deleteMessagesAfter, deleteMessage } from './store/messages'
 import { addArtifact, listArtifacts } from './store/artifacts'
 import { getSetting, setSetting, getAllSettings } from './store/settings'
 import { dataDir, dbPath, workspaceDir } from './paths'
@@ -317,6 +317,9 @@ app.whenReady().then(async () => {
     setConversationWorkspace: (id, ws) => setConversationWorkspace(db, id, ws),
     touchConversation: (id) => touchConversation(db, id),
     listMessages: (cid) => listMessages(db, cid),
+    updateMessageContent: (id, content) => updateMessageContent(db, id, content),
+    deleteMessagesAfter: (id) => deleteMessagesAfter(db, id),
+    deleteMessage: (id) => deleteMessage(db, id),
     appendMessage: (m) => appendMessage(db, m),
     addArtifact: (a) => addArtifact(db, a),
     listArtifacts: (cid) => listArtifacts(db, cid),

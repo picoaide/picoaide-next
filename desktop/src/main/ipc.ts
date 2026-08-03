@@ -9,6 +9,7 @@ import type { Session, BootstrapConfig } from './gateway/config'
 import { establishSession, validateServerURL, clearCaches, setBootstrapCache, getCurrentSession } from './session_cache'
 import { workspaceFor } from './store/projects'
 import { listFilesRecursive } from './store/files'
+import { updateMessageContent, deleteMessagesAfter } from './store/messages'
 
 export const VERSION = '0.2.0'
 
@@ -58,6 +59,9 @@ export interface StoreLike extends EngineStore {
   touchConversation(id: number): void
   // 覆写为完整行:chat:messages 需要读回全字段(MessageRow 是 DBMessage 的超集,兼容引擎)
   listMessages(conversationId: number): MessageRow[]
+  updateMessageContent(id: number, content: string): void
+  deleteMessagesAfter(id: number): void
+  deleteMessage(id: number): void
   addArtifact(a: { conversationId: number; path: string; type: string; size: number }): number
   listArtifacts(conversationId: number): ArtifactRow[]
   getSetting(key: string): string | null
@@ -114,6 +118,8 @@ export interface IpcHandlers {
   'chat:listRunning': () => ConversationRow[]
   'chat:messages': (input: { conversationId: number }) => MessageRow[]
   'chat:messagesPaged': (input: { conversationId: number; offset: number; limit: number }) => MessageRow[]
+  'chat:editAndRerun': (input: { conversationId: number; messageId: number; content: string }) => Promise<void>
+  'chat:deleteMessage': (input: { messageId: number }) => void
   'chat:artifacts': (input: { conversationId: number }) => ArtifactRow[]
   'chat:delete': (input: { conversationId: number }) => void
   'agent:confirm': (input: { requestId: string; ok: boolean }) => void
@@ -255,6 +261,22 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
     'chat:listRunning': () =>
       deps.store.listConversations().filter((c) => c.status === 'running' || c.status === 'executing'),
     'chat:messages': ({ conversationId }) => deps.store.listMessages(conversationId),
+    // 消息编辑(chatbox 语义):改 user 消息内容 + 截断其后消息 + 重跑(模式决定是否带工具)
+    'chat:editAndRerun': async ({ conversationId, messageId, content }) => {
+      const mode = deps.store.getConversation(conversationId)?.mode ?? 'ask'
+      deps.store.updateMessageContent(messageId, content)
+      deps.store.deleteMessagesAfter(messageId)
+      // 引擎仅允许 running/executing/planning/failed 状态重跑,编辑场景先把 done 置为 failed
+      deps.store.updateConversationStatus(conversationId, 'failed')
+      if (mode === 'ask') {
+        await (await getEngine()).continueConversation({ conversationId })
+      } else {
+        const { tools, highRiskTools } = await deps.getTools(deps.store.getConversation(conversationId)?.workspace)
+        await (await getEngine()).continueConversation({ conversationId, tools, highRiskTools })
+      }
+      if (deps.autoTitle) void deps.autoTitle({ conversationId })
+    },
+    'chat:deleteMessage': ({ messageId }) => deps.store.deleteMessage(messageId),
     // 分页(4.4):offset 从最新消息往前数,offset=0 返回最新 limit 条
     'chat:messagesPaged': ({ conversationId, offset, limit }) => {
       const all = deps.store.listMessages(conversationId)

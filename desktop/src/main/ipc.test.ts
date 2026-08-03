@@ -172,9 +172,23 @@ function makeStore(): StoreLike {
       if (i >= 0) conversations.splice(i, 1)
     },
     listMessages: (conversationId: number) => messages.filter((m) => m.conversationId === conversationId),
+    updateMessageContent: (id: number, content: string) => {
+      const m = messages.find((m) => m.id === id)
+      if (m) m.content = content
+    },
+    deleteMessagesAfter: (id: number) => {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].id > id) messages.splice(i, 1)
+      }
+    },
+    deleteMessage: (id: number) => {
+      const i = messages.findIndex((m) => m.id === id)
+      if (i >= 0) messages.splice(i, 1)
+    },
     appendMessage: (m: AppendMessageInput) => {
-      messages.push({ ...m, id: nextId++ })
-      return nextId
+      const id = nextId++
+      messages.push({ ...m, id })
+      return id
     },
   }
 }
@@ -441,6 +455,18 @@ describe('chat:continue / chat:approvePlan / chat:listRunning / artifacts', () =
     store.updateConversationStatus(id, 'running')
     await handlers['chat:continue']({ conversationId: id })
     expect(getTools).toHaveBeenCalledWith('/proj/5')
+  })
+
+  it('chat:editAndRerun rewrites the user message, truncates, and reruns', async () => {
+    const { deps, store, sent } = makeDeps('text')
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({ mode: 'craft' })
+    const m1 = store.appendMessage({ conversationId: id, role: 'user', content: 'old question' })
+    store.appendMessage({ conversationId: id, role: 'assistant', content: 'old answer' })
+    await handlers['chat:editAndRerun']({ conversationId: id, messageId: m1, content: 'new question' })
+    const msgs = store.listMessages(id)
+    expect(msgs.map((m) => m.content)).toEqual(['new question', 'answer from model'])
+    expect(eventsOf(sent).some((e) => (e as { type: string }).type === 'done')).toBe(true)
   })
 
   it('chat:ask in plan mode produces a plan; chat:approvePlan(true) executes with tools', async () => {

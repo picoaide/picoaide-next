@@ -50,6 +50,9 @@ const api = {
     ipcRenderer.invoke('chat:messages', { conversationId }),
   chatMessagesPaged: (input: { conversationId: number; offset: number; limit: number }): Promise<MessageRow[]> =>
     ipcRenderer.invoke('chat:messagesPaged', input),
+  chatEditAndRerun: (input: { conversationId: number; messageId: number; content: string }): Promise<void> =>
+    ipcRenderer.invoke('chat:editAndRerun', input),
+  chatDeleteMessage: (messageId: number): Promise<void> => ipcRenderer.invoke('chat:deleteMessage', { messageId }),
   chatArtifacts: (conversationId: number): Promise<ArtifactRow[]> =>
     ipcRenderer.invoke('chat:artifacts', { conversationId }),
   chatDelete: (conversationId: number): Promise<void> => ipcRenderer.invoke('chat:delete', { conversationId }),

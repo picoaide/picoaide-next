@@ -32,6 +32,8 @@ export default function ChatInput() {
   const activeId = useChatStore((s) => s.activeId)
   const activeProjectId = useChatStore((s) => s.activeProjectId)
   const conversations = useChatStore((s) => s.conversations)
+  const pendingQuote = useChatStore((s) => s.pendingQuote)
+  const consumeQuote = useChatStore((s) => s.consumeQuote)
   const bootstrap = useAuthStore((s) => s.bootstrap)
   const [files, setFiles] = useState<string[]>([])
   const [installedSkills, setInstalledSkills] = useState<string[]>([])
@@ -53,6 +55,18 @@ export default function ChatInput() {
       .then((r) => setInstalledSkills(Object.keys(r.installed)))
       .catch(() => setInstalledSkills([]))
   }, [])
+
+  // 引用消息(chatbox 语义):以 blockquote 前缀插入输入框
+  useEffect(() => {
+    if (pendingQuote) {
+      setValue((v) => {
+        const quote = pendingQuote.split('\n').map((l) => `> ${l}`).join('\n')
+        return v.length === 0 ? quote + '\n\n' : v + '\n\n' + quote + '\n\n'
+      })
+      consumeQuote()
+      textareaRef.current?.focus()
+    }
+  }, [pendingQuote, consumeQuote])
 
   const commandItems = (bootstrap?.skills ?? []).map((s) => s.name)
   const line: ChatboxLine =
