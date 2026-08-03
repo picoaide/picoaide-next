@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/llmgateway/channels"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/util"
@@ -27,6 +28,50 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	g.DELETE("/models/:id", func(c *gin.Context) { deleteModel(c, db) })
 	g.GET("/gateway", func(c *gin.Context) { getGatewayConfig(c, db) })
 	g.PUT("/gateway", func(c *gin.Context) { setGatewayConfig(c, db) })
+	g.GET("/channels", func(c *gin.Context) { listChannelsAdmin(c) })
+	g.POST("/providers/:id/sync", func(c *gin.Context) { syncOneAdmin(c, db) })
+	g.POST("/providers/sync-all", func(c *gin.Context) { syncAllAdmin(c, db) })
+}
+
+func listChannelsAdmin(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"channels": channels.All()})
+}
+
+func syncAllAdmin(c *gin.Context, db *sql.DB) {
+	results, err := SyncOnce(db, nil)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "同步失败")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"results": results})
+}
+
+func syncOneAdmin(c *gin.Context, db *sql.DB) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
+		return
+	}
+	p, err := serverstore.GetGatewayProvider(db, id)
+	if errors.Is(err, serverstore.ErrNotFound) {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "上游不存在")
+		return
+	}
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	ch, ok := channels.Get(p.Channel)
+	if !ok {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "渠道不存在")
+		return
+	}
+	key, err := DecryptSecret(p.APIKeyEnc)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "密钥解密失败")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"result": SyncProvider(db, ch, p, key, nil)})
 }
 
 // encryptSecret encrypts an upstream API key with the master key.
@@ -46,6 +91,7 @@ type providerReq struct {
 	BaseURL string   `json:"base_url"`
 	APIKey  string   `json:"api_key"`
 	Models  []string `json:"models"`
+	Channel string   `json:"channel"`
 }
 
 func providerJSON(p serverstore.GatewayProvider, maskKey bool) gin.H {
@@ -60,6 +106,7 @@ func providerJSON(p serverstore.GatewayProvider, maskKey bool) gin.H {
 		"api_key":  key,
 		"models":   p.Models,
 		"enabled":  p.Enabled == 1,
+		"channel":  p.Channel,
 	}
 }
 
@@ -78,7 +125,16 @@ func listProviders(c *gin.Context, db *sql.DB) {
 
 func createProvider(c *gin.Context, db *sql.DB) {
 	var req providerReq
-	if err := c.ShouldBindJSON(&req); err != nil || req.Name == "" || req.BaseURL == "" {
+	if err := c.ShouldBindJSON(&req); err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
+		return
+	}
+	if req.BaseURL == "" && req.Channel != "" {
+		if ch, ok := channels.Get(req.Channel); ok {
+			req.BaseURL = ch.BaseURL()
+		}
+	}
+	if req.Name == "" || req.BaseURL == "" {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "名称和 base_url 必填")
 		return
 	}
@@ -87,7 +143,7 @@ func createProvider(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "密钥加密失败")
 		return
 	}
-	p := &serverstore.GatewayProvider{Name: req.Name, BaseURL: req.BaseURL, APIKeyEnc: enc, Models: req.Models, Enabled: 1}
+	p := &serverstore.GatewayProvider{Name: req.Name, BaseURL: req.BaseURL, APIKeyEnc: enc, Models: req.Models, Channel: req.Channel, Enabled: 1}
 	if _, err := serverstore.AddGatewayProvider(db, p); err != nil {
 		if errors.Is(err, serverstore.ErrDuplicate) {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "上游名称已存在")
@@ -127,8 +183,16 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 	if req.Name != "" {
 		p.Name = req.Name
 	}
+	if req.BaseURL == "" && req.Channel != "" {
+		if ch, ok := channels.Get(req.Channel); ok {
+			p.BaseURL = ch.BaseURL()
+		}
+	}
 	if req.BaseURL != "" {
 		p.BaseURL = req.BaseURL
+	}
+	if req.Channel != "" {
+		p.Channel = req.Channel
 	}
 	if req.APIKey != "" {
 		enc, err := encryptSecret(req.APIKey)
@@ -265,11 +329,11 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 	}
 	allowPrivate := settings["web.allow_private"] == "true"
 	c.JSON(http.StatusOK, gin.H{
-		"default_model":    settings["gateway.default_model"],
-		"rate_limit":       rateLimit,
-		"allow_private":    allowPrivate,
-		"search_endpoint":  settings["web.search_endpoint"],
-		"server_base_url":  settings["server.base_url"],
+		"default_model":   settings["gateway.default_model"],
+		"rate_limit":      rateLimit,
+		"allow_private":   allowPrivate,
+		"search_endpoint": settings["web.search_endpoint"],
+		"server_base_url": settings["server.base_url"],
 	})
 }
 
