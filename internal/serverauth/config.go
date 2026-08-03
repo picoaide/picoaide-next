@@ -74,7 +74,7 @@ func stripPrefix(m map[string]string, prefix string) map[string]string {
 
 // ConfiguredAPI bundles the auth API with its configured browser provider.
 type ConfiguredAPI struct {
-	API *API
+	API  *API
 	OIDC BrowserProvider
 }
 
