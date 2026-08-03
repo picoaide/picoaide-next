@@ -19,6 +19,13 @@ export interface ChatMessage {
   tool_name: string
 }
 
+export interface ProjectView {
+  id: number
+  name: string
+  path: string
+  created_at: string
+}
+
 // 工具卡片视图(流式期间由 tool_start/tool_end/tool_error 事件驱动)
 export interface ToolCallView {
   id: string
@@ -45,6 +52,10 @@ interface ChatState {
   activeId: number | null
   messages: ChatMessage[]
   artifacts: ArtifactRow[]
+  // 项目(侧边栏分组;workspace 由主进程按项目路径/会话 id 落库)
+  projects: ProjectView[]
+  activeProjectId: number | null
+  collapsedProjects: number[]
   // 启动扫描/推送的中断会话(架构设计 §3.3.1a 重跑恢复),非空时 UI 提示"是否继续"
   interrupted: ConversationRow[]
   streaming: boolean
@@ -69,6 +80,12 @@ interface ChatState {
   clearInterrupted: () => void
   onAgentEvent: (ev: AgentEvent) => void
   clearLocalError: () => void
+  loadProjects: () => Promise<void>
+  createProject: (input: { name: string; path: string }) => Promise<number>
+  deleteProject: (id: number) => Promise<void>
+  moveConversation: (conversationId: number, projectId: number | null) => Promise<void>
+  setActiveProject: (id: number | null) => void
+  toggleProjectCollapsed: (id: number) => void
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -76,6 +93,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   activeId: null,
   messages: [],
   artifacts: [],
+  projects: [],
+  activeProjectId: null,
+  collapsedProjects: [],
   interrupted: [],
   streaming: false,
   streamingText: '',
@@ -86,11 +106,41 @@ export const useChatStore = create<ChatState>((set, get) => ({
   loadedTotal: 0,
 
   newConversation: async () => {
-    const id = await picoaide().chatNew({ mode: get().mode })
-    const conversations = await picoaide().chatList()
-    set({ conversations, activeId: id, messages: [], artifacts: [], streaming: false, streamingText: '', toolCalls: [], localError: null, hasMoreMessages: false, loadedTotal: 0 })
+    const id = await picoaide().chatNew({ mode: get().mode, projectId: get().activeProjectId })
+    const [conversations, projects] = await Promise.all([picoaide().chatList(), picoaide().projectList()])
+    set({ conversations, projects, activeId: id, messages: [], artifacts: [], streaming: false, streamingText: '', toolCalls: [], localError: null, hasMoreMessages: false, loadedTotal: 0 })
     return id
   },
+
+  loadProjects: async () => {
+    set({ projects: await picoaide().projectList() })
+  },
+
+  createProject: async (input) => {
+    const id = await picoaide().projectCreate(input)
+    await get().loadProjects()
+    return id
+  },
+
+  deleteProject: async (id) => {
+    await picoaide().projectDelete(id)
+    set((s) => ({ activeProjectId: s.activeProjectId === id ? null : s.activeProjectId }))
+    await get().loadProjects()
+  },
+
+  moveConversation: async (conversationId, projectId) => {
+    await picoaide().moveConversation(conversationId, projectId)
+    await Promise.all([get().loadConversations(), get().loadProjects()])
+  },
+
+  setActiveProject: (id) => set({ activeProjectId: id }),
+
+  toggleProjectCollapsed: (id) =>
+    set((s) => ({
+      collapsedProjects: s.collapsedProjects.includes(id)
+        ? s.collapsedProjects.filter((x) => x !== id)
+        : [...s.collapsedProjects, id],
+    })),
 
   loadConversations: async () => {
     set({ conversations: await picoaide().chatList() })

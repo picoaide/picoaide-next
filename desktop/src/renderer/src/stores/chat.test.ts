@@ -14,17 +14,22 @@ interface FakePicoaide {
   chatDelete: ReturnType<typeof vi.fn>
   chatCancel: ReturnType<typeof vi.fn>
   listRunningConversations: ReturnType<typeof vi.fn>
+  projectList: ReturnType<typeof vi.fn>
+  projectCreate: ReturnType<typeof vi.fn>
+  projectDelete: ReturnType<typeof vi.fn>
+  moveConversation: ReturnType<typeof vi.fn>
 }
 
 function makeFake() {
   const conversations: Record<string, any>[] = []
   const messages: Record<string, any>[] = []
   const artifacts: Record<string, any>[] = []
+  const projects: Record<string, any>[] = []
   let nextId = 1
   const api: FakePicoaide = {
-    chatNew: vi.fn(async (input?: { mode?: string }) => {
+    chatNew: vi.fn(async (input?: { mode?: string; projectId?: number | null }) => {
       const id = nextId++
-      conversations.push({ id, title: '', mode: input?.mode ?? 'ask', status: 'done', model: '', workspace: '', created_at: '', updated_at: '' })
+      conversations.push({ id, title: '', mode: input?.mode ?? 'ask', status: 'done', model: '', workspace: '', project_id: input?.projectId ?? null, created_at: '', updated_at: '' })
       return id
     }),
     chatList: vi.fn(async () => conversations.map((c) => ({ ...c }))),
@@ -44,8 +49,16 @@ function makeFake() {
     chatDelete: vi.fn(async () => undefined),
     chatCancel: vi.fn(async () => undefined),
     listRunningConversations: vi.fn(async () => []),
+    projectList: vi.fn(async () => projects.map((p) => ({ ...p }))),
+    projectCreate: vi.fn(async (input: { name: string; path: string }) => {
+      const id = nextId++
+      projects.push({ id, name: input.name, path: input.path, created_at: '' })
+      return id
+    }),
+    projectDelete: vi.fn(async () => undefined),
+    moveConversation: vi.fn(async () => undefined),
   }
-  return { api, conversations, messages, artifacts }
+  return { api, conversations, messages, artifacts, projects }
 }
 
 let fake: ReturnType<typeof makeFake>
@@ -61,9 +74,36 @@ describe('chat store', () => {
   it('newConversation creates a conversation and selects it', async () => {
     const id = (await useChatStore.getState().newConversation())!
     expect(id).toBe(1)
-    expect(fake.api.chatNew).toHaveBeenCalledWith({ mode: 'ask' })
+    expect(fake.api.chatNew).toHaveBeenCalledWith({ mode: 'ask', projectId: null })
     expect(useChatStore.getState().activeId).toBe(1)
     expect(useChatStore.getState().conversations).toHaveLength(1)
+  })
+
+  it('newConversation passes activeProjectId to chatNew', async () => {
+    useChatStore.setState({ projects: [{ id: 2, name: 'P2', path: '/p2', created_at: '' }], activeProjectId: 2 })
+    await useChatStore.getState().newConversation()
+    expect(fake.api.chatNew).toHaveBeenCalledWith({ mode: 'ask', projectId: 2 })
+  })
+
+  it('createProject adds to the list and returns the id', async () => {
+    useChatStore.setState({ projects: [] })
+    const id = await useChatStore.getState().createProject({ name: 'P1', path: '/p1' })
+    expect(id).toBeGreaterThan(0)
+    expect(useChatStore.getState().projects).toHaveLength(1)
+    expect(useChatStore.getState().projects[0]).toMatchObject({ name: 'P1', path: '/p1' })
+  })
+
+  it('deleteProject removes it and clears activeProjectId', async () => {
+    useChatStore.setState({ projects: [{ id: 1, name: 'P', path: '/p', created_at: '' }], activeProjectId: 1 })
+    await useChatStore.getState().deleteProject(1)
+    expect(useChatStore.getState().projects).toHaveLength(0)
+    expect(useChatStore.getState().activeProjectId).toBeNull()
+  })
+
+  it('moveConversation reloads conversations and projects', async () => {
+    useChatStore.setState({ conversations: [], projects: [] })
+    await useChatStore.getState().moveConversation(1, 2)
+    expect(fake.api.moveConversation).toHaveBeenCalledWith(1, 2)
   })
 
   it('sendMessage creates a conversation when none is active and calls chatAsk', async () => {
@@ -139,7 +179,7 @@ describe('chat store', () => {
   it('checkInterrupted surfaces running conversations; continueConversation selects and resumes', async () => {
     const id = (await useChatStore.getState().newConversation())!
     fake.api.listRunningConversations.mockResolvedValue([
-      { id, title: '中断任务', mode: 'craft', status: 'running', model: '', workspace: '', created_at: '', updated_at: '' },
+      { id, title: '中断任务', mode: 'craft', status: 'running', model: '', workspace: '', project_id: null, created_at: '', updated_at: '' },
     ])
     await useChatStore.getState().checkInterrupted()
     expect(useChatStore.getState().interrupted).toHaveLength(1)
@@ -150,8 +190,8 @@ describe('chat store', () => {
   })
 
   it('onInterrupted merges without clobbering an existing prompt', () => {
-    useChatStore.getState().onInterrupted([{ id: 1, title: 'a', mode: 'craft', status: 'running', model: '', workspace: '', created_at: '', updated_at: '' }])
-    useChatStore.getState().onInterrupted([{ id: 2, title: 'b', mode: 'craft', status: 'running', model: '', workspace: '', created_at: '', updated_at: '' }])
+    useChatStore.getState().onInterrupted([{ id: 1, title: 'a', mode: 'craft', status: 'running', model: '', workspace: '', project_id: null, created_at: '', updated_at: '' }])
+    useChatStore.getState().onInterrupted([{ id: 2, title: 'b', mode: 'craft', status: 'running', model: '', workspace: '', project_id: null, created_at: '', updated_at: '' }])
     expect(useChatStore.getState().interrupted.map((c) => c.id)).toEqual([1])
     useChatStore.getState().clearInterrupted()
     expect(useChatStore.getState().interrupted).toEqual([])
