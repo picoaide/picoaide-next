@@ -194,7 +194,7 @@ describe('chat store', () => {
   it('checkInterrupted surfaces running conversations; continueConversation selects and resumes', async () => {
     const id = (await useChatStore.getState().newConversation())!
     fake.api.listRunningConversations.mockResolvedValue([
-      { id, title: '中断任务', mode: 'craft', status: 'running', model: '', workspace: '', project_id: null, created_at: '', updated_at: '' },
+      { id, title: '中断任务', mode: 'craft', status: 'running', model: '', workspace: '', project_id: null, starred: 0, archived: 0, created_at: '', updated_at: '' },
     ])
     await useChatStore.getState().checkInterrupted()
     expect(useChatStore.getState().interrupted).toHaveLength(1)
@@ -205,8 +205,8 @@ describe('chat store', () => {
   })
 
   it('onInterrupted merges without clobbering an existing prompt', () => {
-    useChatStore.getState().onInterrupted([{ id: 1, title: 'a', mode: 'craft', status: 'running', model: '', workspace: '', project_id: null, created_at: '', updated_at: '' }])
-    useChatStore.getState().onInterrupted([{ id: 2, title: 'b', mode: 'craft', status: 'running', model: '', workspace: '', project_id: null, created_at: '', updated_at: '' }])
+    useChatStore.getState().onInterrupted([{ id: 1, title: 'a', mode: 'craft', status: 'running', model: '', workspace: '', project_id: null, starred: 0, archived: 0, created_at: '', updated_at: '' }])
+    useChatStore.getState().onInterrupted([{ id: 2, title: 'b', mode: 'craft', status: 'running', model: '', workspace: '', project_id: null, starred: 0, archived: 0, created_at: '', updated_at: '' }])
     expect(useChatStore.getState().interrupted.map((c) => c.id)).toEqual([1])
     useChatStore.getState().clearInterrupted()
     expect(useChatStore.getState().interrupted).toEqual([])
