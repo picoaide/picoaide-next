@@ -32,8 +32,13 @@ describe('portable mode', () => {
     mkdirSync(join(tmp, 'app'), { recursive: true })
     writeFileSync(join(tmp, 'app', 'portable.txt'), '')
     setExecPath(join(tmp, 'app', 'picoaide'))
-    expect(isPortable()).toBe(true)
-    expect(dataDir()).toBe(join(tmp, 'app', 'data'))
+    vi.stubGlobal('process', { ...process, platform: 'linux' })
+    try {
+      expect(isPortable()).toBe(true)
+      expect(dataDir()).toBe(join(tmp, 'app', 'data'))
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('macOS 即使有 portable.txt 也不启用 portable,data 走 Application Support', () => {
@@ -57,8 +62,13 @@ describe('portable mode', () => {
     writeFileSync(join(tmp, 'ro', 'portable.txt'), '')
     writeFileSync(join(tmp, 'ro', 'data'), 'blocked')
     setExecPath(join(tmp, 'ro', 'picoaide'))
-    process.env.HOME = join(tmp, 'home')
-    expect(dataDir()).toBe(join(tmp, 'home', '.local', 'share', 'picoaide'))
+    vi.stubGlobal('process', { ...process, platform: 'linux' })
+    try {
+      process.env.HOME = join(tmp, 'home')
+      expect(dataDir()).toBe(join(tmp, 'home', '.local', 'share', 'picoaide'))
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('dataDirOverride 优先于 portable', () => {
