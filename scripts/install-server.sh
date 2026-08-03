@@ -7,7 +7,8 @@
 #
 # 行为:
 #   1. 检查系统(Ubuntu)与依赖(docker/compose/curl/jq/openssl),缺失自动安装
-#   2. 输入/指定域名 → 生成 Caddyfile(自签名证书,提示管理员替换证书路径)
+#   2. 输入/指定域名 → 用 openssl 生成自签名证书到 certs/,Caddyfile 显式指定
+#      tls /certs/server.crt /certs/server.key,管理员换证书 = 替换 certs/ 下文件后重启
 #   3. 生成随机强密码(可用 --admin-pass 指定);全部变量内联写入 docker-compose.yml
 #   4. 已有目录且有文件 → 询问是否重装(停止镜像、检查 80/443、清空目录)
 #   5. 启动服务,展示访问地址/账号/密码/已安装项清单
@@ -135,16 +136,39 @@ step "创建部署目录并生成配置"
 mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/.picoaide-data"
 cd "$INSTALL_DIR"
 
-# ---- Caddyfile 生成(自签名) ----
+# ---- 证书生成(openssl 自签名 → certs/ 目录) ----
+step "生成自签名证书(certs/)"
+mkdir -p "$INSTALL_DIR/certs"
+if [ -f "$INSTALL_DIR/certs/server.crt" ] && [ -f "$INSTALL_DIR/certs/server.key" ]; then
+  log "检测到已有证书,保留不重新生成:"
+  log "  $INSTALL_DIR/certs/server.crt"
+  log "  $INSTALL_DIR/certs/server.key"
+else
+  log "用 openssl 生成 10 年自签名证书(CN/SAN=$DOMAIN)..."
+  # 域名为 IP 时 SAN 用 IP:,否则用 DNS:
+  case "$DOMAIN" in
+    *[!0-9.]*) san="DNS:$DOMAIN" ;;
+    *) san="IP:$DOMAIN" ;;
+  esac
+  openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 3650 \
+    -keyout "$INSTALL_DIR/certs/server.key" \
+    -out "$INSTALL_DIR/certs/server.crt" \
+    -subj "/CN=$DOMAIN" \
+    -addext "subjectAltName=$san" || fail "证书生成失败"
+  log "已生成:"
+  log "  证书: $INSTALL_DIR/certs/server.crt"
+  log "  私钥: $INSTALL_DIR/certs/server.key"
+fi
+installed+=("生成自签名证书(openssl)")
+
+# ---- Caddyfile 生成(显式指定证书文件) ----
 cat > Caddyfile <<CADDY
 # PicoAide HTTPS 反代(由 install-server.sh 自动生成)
-# 证书: 自签名(Caddy 生成),位于 caddy-data 卷,容器内 /data/caddy/authorities/local
-# 替换正式证书: 删除下面 tls internal 行后重新执行 docker compose restart caddy,
-# 或使用自己的证书: 将证书放到服务器后在此处改为
-#   tls /path/your-cert.pem /path/your-key.pem
-# 然后 docker compose restart caddy
+# 证书: 部署脚本用 openssl 生成的自签名证书,位于 $INSTALL_DIR/certs/
+# 替换证书(管理员): 直接用新证书覆盖 certs/server.crt 与 certs/server.key,然后:
+#   cd $INSTALL_DIR && docker compose restart caddy
 $DOMAIN {
-	tls internal
+	tls /certs/server.crt /certs/server.key
 
 	reverse_proxy server:8080 {
 		header_up Host {host}
@@ -153,7 +177,7 @@ $DOMAIN {
 	}
 }
 CADDY
-log "已生成 Caddyfile(自签名证书)"
+log "已生成 Caddyfile(指定 tls /certs/server.crt /certs/server.key)"
 
 # ---- docker-compose.yml 生成(变量全部内联) ----
 cat > docker-compose.yml <<COMPOSE
@@ -167,8 +191,7 @@ services:
       - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
+      - ./certs:/certs:ro
     depends_on:
       - server
 
@@ -190,10 +213,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-
-volumes:
-  caddy-data:
-  caddy-config:
 COMPOSE
 installed+=("生成 Caddyfile 与 docker-compose.yml")
 
@@ -234,10 +253,11 @@ log "员工登录: https://$DOMAIN"
 log "账号: $ADMIN_USER"
 log "密码: $ADMIN_PASS"
 log "数据目录: $INSTALL_DIR/.picoaide-data"
-log "证书: 自签名(Caddy 生成)"
-log "  替换正式证书: 编辑 $INSTALL_DIR/Caddyfile,删除 'tls internal' 行(自动 Let's Encrypt),"
-log "  或配置自定义证书: 在 Caddyfile 中改为 'tls /path/your-cert.pem /path/your-key.pem',"
-log "  然后执行 cd $INSTALL_DIR && docker compose restart caddy"
+log "证书: 自签名(openssl 生成,10 年有效期)"
+log "  证书文件: $INSTALL_DIR/certs/server.crt"
+log "  私钥文件: $INSTALL_DIR/certs/server.key"
+log "  替换正式证书: 用新证书覆盖上面两个文件,然后:"
+log "  cd $INSTALL_DIR && docker compose restart caddy"
 log "--------------------------------------"
 log "已执行操作:"
 for i in "${installed[@]}"; do log "  ✓ $i"; done
