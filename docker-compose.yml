@@ -1,0 +1,34 @@
+# PicoAide 服务端 Docker Compose 部署
+# 镜像:ghcr.io/picoaide/picoaide-server(amd64 + arm64)
+#
+# 快速开始:
+#   1. 设管理员初始密码:cp .env.example .env 并填写 PICOAI_ADMIN_PASSWORD
+#   2. 启动:docker compose up -d(自动创建超管账号 admin,幂等)
+#   3. 浏览器打开 http://<host>:8080/admin/ 用超管账号登录管理
+#
+# 说明:
+#   - 数据(数据库/密钥/知识库)落在命名卷 picoaide-data,升级镜像不丢数据
+#   - 员工客户端填 http(s)://<host>:8080 登录(远程必须 HTTPS,见 README)
+services:
+  server:
+    image: ghcr.io/picoaide/picoaide-server:latest
+    container_name: picoaide-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # 必填:初始管理员密码(每次启动都会 EnsureBootstrapAdmin,幂等,已存在则跳过)
+      PICOAI_ADMIN_PASSWORD: ${PICOAI_ADMIN_PASSWORD:?请设置 PICOAI_ADMIN_PASSWORD 环境变量}
+    volumes:
+      - picoaide-data:/data
+    command: ["--bootstrap-admin", "admin"]
+    healthcheck:
+      # /api/auth/me 未认证返回 401(预期);<500 即服务存活
+      test: ["CMD-SHELL", "code=$$(wget -q -S -O /dev/null http://127.0.0.1:8080/api/auth/me 2>&1 | grep -oE 'HTTP/[0-9.]+ [0-9]+' | head -1 | grep -oE '[0-9]+$$'); [ -n \"$$code\" ] && [ \"$$code\" -lt 500 ]"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  picoaide-data:
