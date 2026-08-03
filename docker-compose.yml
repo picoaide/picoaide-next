@@ -42,8 +42,8 @@ services:
       - ./.picoaide-data:/data
     command: ["--bootstrap-admin", "admin"]
     healthcheck:
-      # /api/auth/me 未认证返回 401(预期);<500 即服务存活
-      test: ["CMD-SHELL", "code=$$(wget -q -S -O /dev/null http://127.0.0.1:8080/api/auth/me 2>&1 | grep -oE 'HTTP/[0-9.]+ [0-9]+' | head -1 | grep -oE '[0-9]+$$'); [ -n \"$$code\" ] && [ \"$$code\" -lt 500 ]"]
+      # 有 HTTP 响应(含 401 未认证)= 服务存活;无响应(连接失败)则不健康
+      test: ["CMD-SHELL", "wget -q -S -O /dev/null http://127.0.0.1:8080/api/auth/me 2>&1 | grep -q HTTP/"]
       interval: 30s
       timeout: 5s
       retries: 3

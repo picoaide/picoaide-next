@@ -14,6 +14,27 @@
 
 ## 快速开始
 
+### 0. 服务端一键安装(Ubuntu,推荐)
+
+一条命令自动完成:检查并安装依赖(docker/compose/curl/jq,缺失自动装)、生成自签名证书、配置 Caddy HTTPS、生成 docker-compose.yml、启动服务。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-next/master/scripts/install-server.sh | sudo bash
+```
+
+运行时会交互询问**域名**;也可非交互指定:
+
+```bash
+# 指定域名 + 自定义管理员密码
+curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-next/master/scripts/install-server.sh | sudo DOMAIN=picoaide.example.com ADMIN_PASS=your-strong-password bash
+```
+
+脚本会展示:管理后台/员工登录地址、管理员账号与**随机生成的密码**(记住它)、数据目录、证书类型与**替换证书的路径/方法**。
+
+- 证书为**自签名**(Caddy 生成);替换正式证书:编辑 `<部署目录>/Caddyfile`,删除 `tls internal` 行(自动申请 Let's Encrypt)或改用 `tls /path/your-cert.pem /path/your-key.pem`,然后 `docker compose restart caddy`。
+- 部署目录默认 `/data/picoaide-next`(可用 `INSTALL_DIR` 覆盖)。
+- 目录已存在且有文件时,脚本会提示是否重新安装(停止容器、检查 80/443 端口、清空目录)。
+
 ### 1. 服务端(Go 1.24+)
 
 ```bash
