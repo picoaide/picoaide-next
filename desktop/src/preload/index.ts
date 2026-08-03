@@ -47,6 +47,10 @@ const api = {
     ipcRenderer.invoke('agent:confirm', { requestId, ok }),
   artifactShowInFolder: (path: string): Promise<void> => ipcRenderer.invoke('artifact:showInFolder', { path }),
   ready: (): Promise<void> => ipcRenderer.invoke('picoaide:rendererReady'),
+  getTheme: (): Promise<'dark' | 'light'> => ipcRenderer.invoke('theme:get'),
+  onThemeChanged: (cb: (t: 'dark' | 'light') => void): Unsub => subscribe('theme:changed', cb),
+  onMenuCommand: (cb: (cmd: 'settings' | 'new-chat' | 'new-project') => void): Unsub =>
+    subscribe('menu:command', cb),
   onAgentEvent: (cb: (ev: AgentEvent) => void): Unsub => subscribe('agent:event', cb),
   onInterrupted: (cb: (list: ConversationRow[]) => void): Unsub => subscribe('chat:interrupted', cb),
   onConnectionStatus: (cb: (status: 'online' | 'offline' | 'auth_expired' | 'trusting_cert') => void): Unsub =>

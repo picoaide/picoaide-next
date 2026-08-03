@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { LogOut, Plus, Trash2 } from 'lucide-react'
+import { LogOut, Plus, Settings as SettingsIcon, Trash2 } from 'lucide-react'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '../components/ui/card'
@@ -12,7 +12,7 @@ import { useChatStore } from '../stores/chat'
 import { useConnectionStore } from '../stores/connection'
 import { cn } from '../lib/utils'
 
-export default function Main() {
+export default function Main({ onOpenSettings }: { onOpenSettings: () => void }) {
   const bootstrap = useAuthStore((s) => s.bootstrap)
   const logout = useAuthStore((s) => s.logout)
   const conversations = useChatStore((s) => s.conversations)
@@ -90,7 +90,10 @@ export default function Main() {
             ))}
           </div>
           <div className="border-t p-3">
-            <Button variant="ghost" className="w-full justify-start text-muted-foreground" onClick={() => void logout()}>
+            <Button variant="ghost" className="w-full justify-start text-muted-foreground" onClick={onOpenSettings}>
+              <SettingsIcon className="h-4 w-4" /> 设置
+            </Button>
+            <Button variant="ghost" className="mt-1 w-full justify-start text-muted-foreground" onClick={() => void logout()}>
               <LogOut className="h-4 w-4" /> 退出登录
             </Button>
           </div>

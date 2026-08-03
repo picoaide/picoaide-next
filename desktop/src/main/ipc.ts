@@ -1,4 +1,4 @@
-import { ipcMain, shell } from 'electron'
+import { ipcMain, nativeTheme, shell } from 'electron'
 import { AgentEngine } from './agent/engine'
 import type { GatedTool, StoreLike as EngineStore } from './agent/engine'
 import type { AgentEvent } from './agent/events'
@@ -81,6 +81,7 @@ export interface AgentIpcDeps {
 export interface IpcHandlers {
   'picoaide:version': () => string
   'picoaide:rendererReady': () => void
+  'theme:get': () => 'dark' | 'light'
   'chat:new': (input?: { title?: string; mode?: string }) => number
   'chat:ask': (input: { conversationId: number; content: string }) => Promise<void>
   'chat:continue': (input: { conversationId: number }) => Promise<void>
@@ -104,9 +105,10 @@ export interface IpcHandlers {
   'auth:oidcLogin': (input: { serverURL: string }) => Promise<void>
 }
 
-export function buildHandlers(): Pick<IpcHandlers, 'picoaide:version'> {
+export function buildHandlers(): Pick<IpcHandlers, 'picoaide:version' | 'theme:get'> {
   return {
     'picoaide:version': () => VERSION,
+    'theme:get': () => (nativeTheme.shouldUseDarkColors ? 'dark' : 'light'),
   }
 }
 
@@ -151,6 +153,7 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
   }
   return {
     'picoaide:version': () => VERSION,
+    'theme:get': () => (nativeTheme.shouldUseDarkColors ? 'dark' : 'light'),
     'picoaide:rendererReady': () => {
       rendererReady = true
       flushPending()

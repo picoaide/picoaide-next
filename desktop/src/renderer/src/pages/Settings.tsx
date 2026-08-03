@@ -20,7 +20,7 @@ import type { McpListResult, McpRiskInfo, SettingsInfo, SkillRiskInfo, SkillsLis
 
 type RiskState = { kind: 'skill'; data: SkillRiskInfo } | { kind: 'mcp'; data: McpRiskInfo } | null
 
-export default function Settings() {
+export default function Settings({ onBack }: { onBack: () => void }) {
   const logout = useAuthStore((s) => s.logout)
   const [info, setInfo] = useState<SettingsInfo | null>(null)
   const [skills, setSkills] = useState<SkillsListResult>({ suggestions: [], installed: {} })
@@ -124,7 +124,12 @@ export default function Settings() {
   return (
     <div className="mx-auto flex h-screen max-w-3xl flex-col overflow-y-auto p-6">
       <div className="mb-6 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">设置</h1>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="sm" onClick={onBack}>
+            ← 返回
+          </Button>
+          <h1 className="text-lg font-semibold">设置</h1>
+        </div>
         <Button variant="outline" size="sm" onClick={refreshConfig} disabled={busy !== ''}>
           <RefreshCw className="h-4 w-4" /> 刷新配置
         </Button>

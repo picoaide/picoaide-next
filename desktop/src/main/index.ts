@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell } from 'electron'
+import { app, BrowserWindow, Menu, nativeTheme, shell } from 'electron'
 import { join } from 'path'
 import { tool } from 'ai'
 import { z } from 'zod'
@@ -35,6 +35,59 @@ import { buildPluginHandlers } from './plugin_ipc'
 
 let mainWindow: BrowserWindow | null = null
 let poller: ReturnType<typeof createHealthPoller> | null = null
+
+// macOS 原生应用菜单(HIG):Cmd+Q 退出、Cmd+, 设置、Cmd+N 新建会话;菜单命令经 menu:command 事件下发 renderer
+function buildMenu(): void {
+  if (process.platform !== 'darwin') return
+  const send = (command: string): void => {
+    mainWindow?.webContents.send('menu:command', command)
+  }
+  const template: Electron.MenuItemConstructorOptions[] = [
+    {
+      label: app.name,
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        { label: '设置…', accelerator: 'Cmd+,', click: () => send('settings') },
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    },
+    {
+      label: '文件',
+      submenu: [
+        { label: '新建会话', accelerator: 'Cmd+N', click: () => send('new-chat') },
+        { label: '新建项目', accelerator: 'Cmd+Shift+N', click: () => send('new-project') },
+        { type: 'separator' },
+        { role: 'close' },
+      ],
+    },
+    {
+      label: '编辑',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+    {
+      label: '窗口',
+      submenu: [{ role: 'minimize' }, { role: 'zoom' }, { role: 'front' }],
+    },
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
 // 最近一次成功登录的服务器地址(设置表持久化),OIDC 深链回跳时用
 let lastServerURL: string | null = null
 // 启动扫描未完成任务用(架构设计 §3.3.1a):whenReady 内注入 store
@@ -46,6 +99,8 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1100,
     height: 720,
+    minWidth: 900,
+    minHeight: 600,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -337,7 +392,16 @@ app.whenReady().then(async () => {
     if (arg.startsWith('picoaide://')) handleAuthDeepLinkImpl(arg, authDeps)
   }
 
+  buildMenu()
   createWindow()
+
+  // 深色模式跟随系统(HIG):nativeTheme 变化时广播给所有窗口
+  nativeTheme.on('updated', () => {
+    const theme: 'dark' | 'light' = nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send('theme:changed', theme)
+    }
+  })
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
