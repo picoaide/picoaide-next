@@ -13,3 +13,4 @@ fi
 echo
 echo "== macOS package =="
 echo "dmg: $(ls dist/*.dmg 2>/dev/null || echo 'not found')"
+# macOS 规范:标准 dmg,拖入 Applications 即用;数据存 ~/Library/Application Support/picoaide(非 portable)
