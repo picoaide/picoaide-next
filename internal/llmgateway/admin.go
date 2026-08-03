@@ -183,7 +183,7 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 	if req.Name != "" {
 		p.Name = req.Name
 	}
-	if req.BaseURL == "" && req.Channel != "" {
+	if req.BaseURL == "" && p.BaseURL == "" && req.Channel != "" {
 		if ch, ok := channels.Get(req.Channel); ok {
 			p.BaseURL = ch.BaseURL()
 		}
