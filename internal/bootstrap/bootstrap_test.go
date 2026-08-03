@@ -144,3 +144,19 @@ func TestBootstrapWebSettings(t *testing.T) {
 		t.Fatalf("web = %v", web)
 	}
 }
+
+func TestHealthzNoAuth(t *testing.T) {
+	r, _ := setup(t)
+	// 无需 token,返回 200 + ok
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("healthz status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var out map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	if out["ok"] != true {
+		t.Fatalf("healthz body = %s", w.Body.String())
+	}
+}

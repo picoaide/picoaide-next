@@ -32,8 +32,13 @@ type Response struct {
 	Web          WebConfig             `json:"web"`
 }
 
-// RegisterRoutes mounts GET /api/config/bootstrap behind BearerAuth.
+// RegisterRoutes mounts GET /api/config/bootstrap behind BearerAuth,
+// plus an unauthenticated /healthz for docker healthchecks.
 func RegisterRoutes(r *gin.Engine, db *sql.DB) {
+	// 无需认证的存活探针:docker HEALTHCHECK 用(docker 官方语义:退出码 0=healthy)
+	r.GET("/healthz", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
 	r.GET("/api/config/bootstrap", serverauth.BearerAuth(db), func(c *gin.Context) {
 		resp, err := Build(db)
 		if err != nil {
