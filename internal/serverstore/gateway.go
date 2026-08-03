@@ -14,6 +14,7 @@ type GatewayProvider struct {
 	APIKeyEnc string
 	Models    []string
 	Enabled   int
+	Channel   string
 }
 
 type Model struct {
@@ -27,7 +28,7 @@ type Model struct {
 func scanProvider(scan interface{ Scan(...any) error }) (*GatewayProvider, error) {
 	var p GatewayProvider
 	var models string
-	if err := scan.Scan(&p.ID, &p.Name, &p.BaseURL, &p.APIKeyEnc, &models, &p.Enabled); err != nil {
+	if err := scan.Scan(&p.ID, &p.Name, &p.BaseURL, &p.APIKeyEnc, &models, &p.Enabled, &p.Channel); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(models), &p.Models)
@@ -36,7 +37,7 @@ func scanProvider(scan interface{ Scan(...any) error }) (*GatewayProvider, error
 
 // ListGatewayProviders returns all providers.
 func ListGatewayProviders(db *sql.DB) ([]GatewayProvider, error) {
-	rows, err := db.Query(`SELECT id, name, base_url, api_key_enc, models, enabled
+	rows, err := db.Query(`SELECT id, name, base_url, api_key_enc, models, enabled, channel
 		FROM gateway_providers ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -55,7 +56,7 @@ func ListGatewayProviders(db *sql.DB) ([]GatewayProvider, error) {
 
 // GetGatewayProvider loads one provider.
 func GetGatewayProvider(db *sql.DB, id int64) (*GatewayProvider, error) {
-	row := db.QueryRow(`SELECT id, name, base_url, api_key_enc, models, enabled
+	row := db.QueryRow(`SELECT id, name, base_url, api_key_enc, models, enabled, channel
 		FROM gateway_providers WHERE id = ?`, id)
 	p, err := scanProvider(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -67,8 +68,8 @@ func GetGatewayProvider(db *sql.DB, id int64) (*GatewayProvider, error) {
 // AddGatewayProvider inserts a provider; name conflicts return ErrDuplicate.
 func AddGatewayProvider(db *sql.DB, p *GatewayProvider) (int64, error) {
 	modelsJSON, _ := json.Marshal(p.Models)
-	res, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models, enabled)
-		VALUES (?, ?, ?, ?, ?)`, p.Name, p.BaseURL, p.APIKeyEnc, string(modelsJSON), p.Enabled)
+	res, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models, enabled, channel)
+		VALUES (?, ?, ?, ?, ?, ?)`, p.Name, p.BaseURL, p.APIKeyEnc, string(modelsJSON), p.Enabled, p.Channel)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			return 0, ErrDuplicate
@@ -82,8 +83,8 @@ func AddGatewayProvider(db *sql.DB, p *GatewayProvider) (int64, error) {
 // UpdateGatewayProvider updates all fields.
 func UpdateGatewayProvider(db *sql.DB, p *GatewayProvider) error {
 	modelsJSON, _ := json.Marshal(p.Models)
-	res, err := db.Exec(`UPDATE gateway_providers SET name=?, base_url=?, api_key_enc=?, models=?, enabled=?
-		WHERE id=?`, p.Name, p.BaseURL, p.APIKeyEnc, string(modelsJSON), p.Enabled, p.ID)
+	res, err := db.Exec(`UPDATE gateway_providers SET name=?, base_url=?, api_key_enc=?, models=?, enabled=?, channel=?
+		WHERE id=?`, p.Name, p.BaseURL, p.APIKeyEnc, string(modelsJSON), p.Enabled, p.Channel, p.ID)
 	if err != nil {
 		return err
 	}
