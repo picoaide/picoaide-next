@@ -168,6 +168,34 @@ func TestAdminProviderChannelAutofill(t *testing.T) {
 	}
 }
 
+func TestAdminChannelProviderUpdateKeepsSyncedModels(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	// create channel provider with models=[]
+	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+		`{"name":"deepseek","base_url":"https://api.deepseek.com","api_key":"sk","models":[],"channel":"deepseek"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create channel provider: %d %s", w.Code, w.Body.String())
+	}
+	p := out["provider"].(map[string]any)
+	id := int64(p["id"].(float64))
+
+	// channel sync puts a model into the models table directly
+	if err := serverstore.SyncProviderModel(db, id, "deepseek-v4-flash", "{}"); err != nil {
+		t.Fatal(err)
+	}
+
+	// update the provider (name change); must not wipe channel-synced models
+	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/providers/%d", id), `{"name":"deepseek-v2"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("update channel provider: %d %s", w.Code, w.Body.String())
+	}
+	models, _ := serverstore.ListModels(db)
+	if len(models) != 1 || models[0].Name != "deepseek-v4-flash" {
+		t.Fatalf("synced model wiped by update: %+v", models)
+	}
+}
+
 func TestAdminModelsAndDefaultModel(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()

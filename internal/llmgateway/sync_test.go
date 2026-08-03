@@ -64,6 +64,27 @@ func TestSyncOnceRemovesGoneModels(t *testing.T) {
 	}
 }
 
+func TestSyncEmptyFetchKeepsModels(t *testing.T) {
+	db := syncTestDB(t)
+	fetchFn := func(url string) ([]byte, error) {
+		return []byte(`{"data":[{"id":"deepseek-v4-flash"},{"id":"deepseek-v4-pro"}]}`), nil
+	}
+	if _, err := SyncOnce(db, fetchFn); err != nil {
+		t.Fatal(err)
+	}
+	// transient upstream quirk: empty data list
+	empty := func(url string) ([]byte, error) {
+		return []byte(`{"data":[]}`), nil
+	}
+	if _, err := SyncOnce(db, empty); err != nil {
+		t.Fatal(err)
+	}
+	models, _ := serverstore.ListModels(db)
+	if len(models) != 2 {
+		t.Fatalf("empty fetch wiped models: %+v", models)
+	}
+}
+
 func TestSyncOnceFetchFailureSkips(t *testing.T) {
 	db := syncTestDB(t)
 	fetchFn := func(url string) ([]byte, error) {
