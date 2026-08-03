@@ -42,6 +42,15 @@ export default function App() {
     }
     void window.picoaide.getTheme().then(applyTheme)
     const offTheme = window.picoaide.onThemeChanged(applyTheme)
+    // 启动恢复强调色(settings 表持久化)
+    void window.picoaide.accent().then((c) => {
+      if (c) {
+        const root = document.documentElement
+        root.style.setProperty('--primary', c)
+        root.style.setProperty('--primary-foreground', '210 40% 98%')
+        root.style.setProperty('--ring', c)
+      }
+    })
     // macOS 菜单命令:Cmd+, 设置 / Cmd+N 新建会话
     const offMenu = window.picoaide.onMenuCommand((cmd) => {
       if (cmd === 'settings') setView('settings')

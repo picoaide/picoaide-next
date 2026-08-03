@@ -18,6 +18,16 @@ import { pluginApi } from '../plugin-api'
 import { errCode } from '../api/picoaide'
 import type { McpListResult, McpRiskInfo, SettingsInfo, SkillRiskInfo, SkillsListResult } from '../../../main/plugin_ipc'
 
+// 强调色预设(chatbox accent color):hsl 值覆盖 --primary
+const ACCENTS: { name: string; value: string }[] = [
+  { name: '默认', value: '222.2 47.4% 11.2%' },
+  { name: '蓝', value: '221.2 83.2% 53.3%' },
+  { name: '绿', value: '142.1 76.2% 36.3%' },
+  { name: '紫', value: '262.1 83.3% 57.8%' },
+  { name: '橙', value: '24.6 95% 53.1%' },
+  { name: '红', value: '346.8 77.2% 49.8%' },
+]
+
 type RiskState = { kind: 'skill'; data: SkillRiskInfo } | { kind: 'mcp'; data: McpRiskInfo } | null
 
 export default function Settings({ onBack }: { onBack: () => void }) {
@@ -31,6 +41,23 @@ export default function Settings({ onBack }: { onBack: () => void }) {
   const [allowedDirs, setAllowedDirs] = useState<string[]>([])
   const [newDir, setNewDir] = useState('')
   const [cdp, setCdp] = useState<{ running: boolean; port: number } | null>(null)
+  const [accent, setAccent] = useState('')
+
+  // 应用强调色:覆盖 --primary(+dark 变体),浅色 foreground 恒白
+  const applyAccent = (color: string) => {
+    const root = document.documentElement
+    root.style.setProperty('--primary', color)
+    root.style.setProperty('--primary-foreground', '210 40% 98%')
+    const isDark = root.classList.contains('dark')
+    root.style.setProperty('--ring', color)
+    void isDark
+  }
+
+  const pickAccent = async (color: string) => {
+    setAccent(color)
+    applyAccent(color)
+    await pluginApi().accent(color)
+  }
 
   const load = useCallback(async () => {
     const api = pluginApi()
@@ -43,6 +70,7 @@ export default function Settings({ onBack }: { onBack: () => void }) {
       setMcp(m)
       setAllowedDirs(dirs)
       setCdp(c)
+      setAccent(await api.accent())
       setError('')
     } catch (e) {
       setError(errCode(e) === 'NETWORK' ? '无法连接服务器' : '加载失败,请重试')
@@ -136,6 +164,28 @@ export default function Settings({ onBack }: { onBack: () => void }) {
       </div>
 
       {error && <div className="mb-4 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>}
+
+      {/* 外观:强调色(chatbox accent color) */}
+      <Card className="mb-4">
+        <CardHeader>
+          <CardTitle>外观</CardTitle>
+          <CardDescription>强调色(按钮/选中态/链接主色)</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center gap-2">
+            {ACCENTS.map((a) => (
+              <button
+                key={a.name}
+                type="button"
+                title={a.name}
+                className={`h-7 w-7 rounded-full border-2 ${accent === a.value ? 'border-foreground' : 'border-transparent'}`}
+                style={{ backgroundColor: `hsl(${a.value})` }}
+                onClick={() => void pickAccent(a.value)}
+              />
+            ))}
+          </div>
+        </CardContent>
+      </Card>
 
       {/* 账户信息(只读展示) */}
       <Card className="mb-4">

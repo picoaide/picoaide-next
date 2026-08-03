@@ -5,7 +5,7 @@ export type AgentEvent =
   | { type: 'tool_start'; data: { id: string; name: string; input: unknown } }
   | { type: 'tool_end'; data: { id: string; name: string; output: unknown; duration_ms: number } }
   | { type: 'tool_error'; data: { id: string; name: string; error: string } }
-  | { type: 'confirm_required'; data: { request_id: string; op: string; target: string; reason: string } }
+  | { type: 'confirm_required'; data: { request_id: string; tool_call_id: string; op: string; target: string; reason: string } }
   | { type: 'artifact'; data: { path: string; type: string; size: number } }
   | { type: 'done'; data: { usage?: { prompt_tokens: number; completion_tokens: number } } }
   | { type: 'canceled'; data: { reason: string } }

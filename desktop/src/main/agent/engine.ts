@@ -1,7 +1,19 @@
-import { isStepCount, streamText, tool } from 'ai'
+import {
+  isStepCount,
+  streamText,
+  tool,
+  type LanguageModel,
+  type ModelMessage,
+  type Tool,
+  type ToolApprovalResponse,
+  type ToolCallPart,
+  type ToolExecutionOptions,
+  type ToolResultPart,
+  type ToolSet,
+  type TextPart,
+} from 'ai'
 import { z } from 'zod'
 import { isAbsolute } from 'node:path'
-import type { LanguageModel, ModelMessage, Tool, ToolCallPart, ToolExecutionOptions, ToolResultPart, ToolSet, TextPart } from 'ai'
 import type { AgentEvent } from './events'
 import { buildRunConfig, type Mode } from './modes'
 import { artifactType } from './artifacts'
@@ -16,16 +28,8 @@ export const DEFAULT_CONTEXT_WINDOW = 50
 export const DEFAULT_RETRY_COUNT = 1
 const ERROR_PREFIX = 'Error: '
 
-// 审批拒绝/超时/取消时抛出,SDK 记为该工具错误并回传模型(模型可见错误并重试)
-export class ApprovalError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'ApprovalError'
-  }
-}
-
 // 注册表工具可附带按调用参数动态判定的审批谓词(如 command_exec 的白名单策略,架构设计 §3.4)。
-// 注意:不能用 SDK 保留名 needsApproval(v7 自带审批 API 会拦截执行),这里用 requiresApproval
+// v7 用法:requiresApproval 谓词经 buildToolApproval 转成 streamText 的 toolApproval(SDK 原生审批)
 export type GatedTool = Tool & { requiresApproval?: (input: unknown) => boolean }
 
 export interface EngineConfig {
@@ -124,22 +128,15 @@ export interface DBMessage {
   is_error?: number
 }
 
-interface ApprovalEntry {
-  requestId: string
-  toolName: string
-  input: unknown
-  resolve: () => void
-  reject: (err: Error) => void
-  timer?: ReturnType<typeof setTimeout>
-  boundaryDir?: string
+// SDK 原生审批(v7 tool-approval-request/response):挂起的审批请求,等待用户回执或超时拒绝
+interface PendingApproval {
+  resolve: (ok: boolean) => void
 }
 
 export class AgentEngine {
   private cfg: EngineConfig
   private deps: EngineDeps
-  private queue: ApprovalEntry[] = []
-  private active: ApprovalEntry | null = null
-  private canceling = false
+  private pendingApprovals = new Map<string, PendingApproval>()
   private currentAbort: AbortController | null = null
   // 测试钩子:1=自动允许 0=自动拒绝,仅 env 显式设置时生效。
   // ponytail: 打包剔除靠 electron-vite/electron-builder 构建不含该 env;如需硬剔除可在 CI 构建脚本 `export -n PICOAI_TEST_AUTO_APPROVE`
@@ -158,7 +155,7 @@ export class AgentEngine {
   }
 
   get pendingApprovalCount(): number {
-    return this.queue.length + (this.active ? 1 : 0)
+    return this.pendingApprovals.size
   }
 
   // 测试钩子:注入的 session.fetch(TOFU 生效);ipc 层断言接线正确
@@ -231,10 +228,8 @@ export class AgentEngine {
           } else if (part.type === 'reasoning-delta') {
             this.deps.emit({ type: 'reasoning_delta', data: part.text })
           } else if (part.type === 'finish') {
-            usage = {
-              prompt_tokens: part.totalUsage?.inputTokens ?? 0,
-              completion_tokens: part.totalUsage?.outputTokens ?? 0,
-            }
+            usage.prompt_tokens += part.totalUsage?.inputTokens ?? 0
+            usage.completion_tokens += part.totalUsage?.outputTokens ?? 0
           } else if (part.type === 'error') {
             throw part.error instanceof Error ? part.error : new Error(String(part.error))
           } else if (part.type === 'abort') {
@@ -372,7 +367,7 @@ export class AgentEngine {
     const store = this.deps.store as StoreLike
     const abort = new AbortController()
     this.currentAbort = abort
-    const wrapped = this.wrapTools(tools, highRisk, conversationId) as ToolSet
+    const wrapped = this.wrapTools(tools, conversationId) as ToolSet
 
     let canceled = false
     let steps = 0
@@ -389,6 +384,8 @@ export class AgentEngine {
       output?: unknown
       error?: unknown
     }> = []
+    // 本轮收集的 SDK 审批请求(tool-approval-request part)
+    const approvalParts: Array<{ approvalId: string; toolCall: { toolCallId: string; toolName: string; input: unknown }; isAutomatic?: boolean }> = []
 
     // 每步结束(finish part)落库:assistant 行(文本+reasoning+tool_calls JSON)+ 每工具一行结果
     const flushStep = (): void => {
@@ -441,66 +438,85 @@ export class AgentEngine {
       }
     }
 
-    try {
-      // v7:streamText 内部多步循环;stopWhen 显式给步数预算(默认 isStepCount(1) 不会回传工具结果)
-      const result = streamText({
-        model: this.cfg.model,
-        system: this.cfg.sysPrompt,
-        messages,
-        tools: wrapped,
-        stopWhen: isStepCount(maxSteps),
-        abortSignal: abort.signal,
-        maxRetries: 0, // 快速失败,由上层/用户决定重试
-        // 不设 timeout:SDK 工具执行超时会掐断审批窗口;审批窗口由引擎自管(approvalTimeoutMs)
-        ...(this.cfg.fetch ? { fetch: this.cfg.fetch } : {}),
-      })
-      const iter = (async (): Promise<void> => {
-        for await (const part of result.fullStream) {
-          switch (part.type) {
-            case 'text-delta':
-              stepText += part.text
-              this.deps.emit({ type: 'text_delta', data: part.text })
-              break
-            case 'reasoning-delta':
-              stepReasoning += part.text
-              this.deps.emit({ type: 'reasoning_delta', data: part.text })
-              break
-            case 'tool-call':
-              stepToolCalls.push(part)
-              break
-            case 'tool-result':
-            case 'tool-error':
-              stepToolResults.push(part)
-              break
-            case 'finish-step':
-              flushStep()
-              break
-            case 'finish':
-              usage = {
-                prompt_tokens: part.totalUsage?.inputTokens ?? 0,
-                completion_tokens: part.totalUsage?.outputTokens ?? 0,
-              }
-              break
-            case 'error':
-              throw part.error instanceof Error ? part.error : new Error(String(part.error))
-            case 'abort':
-              canceled = true
-              return
+    // SDK v7 原生审批(v7 工具审批:模型执行不暂停,本轮返回 tool-approval-request part;
+    // 应用层回传 tool-approval-response 消息后再次调用模型继续)。
+    // 外层手动循环:每轮 streamText(1 步),轮末若有审批请求则挂起等用户回执再续跑。
+    while (steps < maxSteps) {
+      try {
+        const result = streamText({
+          model: this.cfg.model,
+          system: this.cfg.sysPrompt,
+          messages,
+          tools: wrapped,
+          toolApproval: this.buildToolApproval(tools, highRisk),
+          stopWhen: isStepCount(1),
+          abortSignal: abort.signal,
+          maxRetries: 0, // 快速失败,由上层/用户决定重试
+          ...(this.cfg.fetch ? { fetch: this.cfg.fetch } : {}),
+        })
+        const iter = (async (): Promise<void> => {
+          for await (const part of result.fullStream) {
+            switch (part.type) {
+              case 'text-delta':
+                stepText += part.text
+                this.deps.emit({ type: 'text_delta', data: part.text })
+                break
+              case 'reasoning-delta':
+                stepReasoning += part.text
+                this.deps.emit({ type: 'reasoning_delta', data: part.text })
+                break
+              case 'tool-call':
+                stepToolCalls.push(part)
+                break
+              case 'tool-result':
+              case 'tool-error':
+                stepToolResults.push(part)
+                break
+              case 'tool-approval-request':
+                // SDK 审批请求:工具未执行;本轮结束后等用户回执
+                if (!part.isAutomatic) approvalParts.push(part)
+                break
+              case 'finish-step':
+                flushStep()
+                break
+              case 'finish':
+                // 跨轮累加(外层循环每轮独立 streamText,SDK totalUsage 为单轮值)
+                usage.prompt_tokens += part.totalUsage?.inputTokens ?? 0
+                usage.completion_tokens += part.totalUsage?.outputTokens ?? 0
+                break
+              case 'error':
+                throw part.error instanceof Error ? part.error : new Error(String(part.error))
+              case 'abort':
+                canceled = true
+                return
+            }
           }
+        })()
+        await this.consumeWithAbort(iter, abort)
+        // 推进上下文:每轮模型调用结果(含 tool-call/tool-result/审批请求)追加到 messages,
+        // 审批 response 才能匹配对应 tool-call(SDK 自动执行已批准工具)
+        messages.push(...(await result.response).messages)
+      } catch (err) {
+        if (abort.signal.aborted || isAbortError(err)) {
+          canceled = true
+        } else {
+          this.markFailed(store, conversationId)
+          const message = err instanceof Error ? err.message : String(err)
+          this.deps.emit({ type: 'error', data: message })
+          throw err
         }
-      })()
-      await this.consumeWithAbort(iter, abort)
-    } catch (err) {
-      if (abort.signal.aborted || isAbortError(err)) {
-        canceled = true
-      } else {
-        this.markFailed(store, conversationId)
-        const message = err instanceof Error ? err.message : String(err)
-        this.deps.emit({ type: 'error', data: message })
-        throw err
       }
-    } finally {
-      this.currentAbort = null
+      if (canceled) break
+
+      // 审批回执 → tool-approval-response 消息续跑(SDK 原生机制);审批轮不消耗步数预算(工具尚未执行)
+      if (approvalParts.length > 0) {
+        steps--
+        await this.handleApprovalParts(approvalParts, messages)
+        approvalParts.length = 0
+        continue
+      }
+      // 无审批:本轮有工具调用 → 结果已随 response.messages 回传 → 续跑让模型继续;否则完成
+      if (!lastStepHadToolCalls) break
     }
 
     if (canceled) {
@@ -540,42 +556,65 @@ export class AgentEngine {
 
     const abort = new AbortController()
     this.currentAbort = abort
+    const approvalParts: Array<{ approvalId: string; toolCall: { toolCallId: string; toolName: string; input: unknown }; isAutomatic?: boolean }> = []
+    let usage = { prompt_tokens: 0, completion_tokens: 0 }
+    let hadToolCall = false
+    let rounds = 0
     try {
-      // v7 的 streamText 内部就是多步循环:模型调用 → 工具执行(execute 内审批门控)→ 结果回传 → 直到 stopWhen/自然终止
-      const result = streamText({
-        model: this.cfg.model,
-        system: this.cfg.sysPrompt,
-        messages,
-        tools: this.wrapTools(tools, opts.highRiskTools ?? new Set()) as ToolSet,
-        // ponytail: v7 默认 stopWhen=isStepCount(1) 不会把工具结果回传续跑;必须显式给步数预算
-        stopWhen: isStepCount(maxSteps),
-        abortSignal: abort.signal,
-        maxRetries: 0, // 快速失败,由上层循环/用户决定重试;避免模型错误时指数退避拖死 UI
-        // 不设 timeout:SDK 的 toolMs 会掐断审批窗口;审批窗口由引擎自管(approvalTimeoutMs)
-      })
-      for await (const part of result.fullStream) {
-        if (part.type === 'text-delta') {
-          this.deps.emit({ type: 'text_delta', data: part.text })
-        } else if (part.type === 'reasoning-delta') {
-          this.deps.emit({ type: 'reasoning_delta', data: part.text })
-        } else if (part.type === 'finish') {
-          this.deps.emit({
-            type: 'done',
-            data: {
-              usage: {
-                prompt_tokens: part.totalUsage?.inputTokens ?? 0,
-                completion_tokens: part.totalUsage?.outputTokens ?? 0,
-              },
-            },
-          })
-        } else if (part.type === 'error') {
-          // 抛给外层 catch 统一 emit error + rethrow(避免重复事件)
-          throw part.error instanceof Error ? part.error : new Error(String(part.error))
-        } else if (part.type === 'abort') {
-          this.deps.emit({ type: 'canceled', data: { reason: 'user_canceled' } })
-          return
+      // 外层循环 + SDK 原生审批:审批请求轮结束后等回执,回传 tool-approval-response 续跑;
+      // 模型调用工具 → 结果回传后续跑;无工具调用/无审批 → 完成;轮数超 maxSteps → 报错
+      for (;;) {
+        // maxSteps 检查用上一轮 hadToolCall(本轮尚未执行)
+        if (rounds >= maxSteps) {
+          if (hadToolCall) {
+            this.deps.emit({ type: 'error', data: '达到最大步骤数' })
+            return
+          }
+          break
         }
+        rounds++
+        hadToolCall = false
+        const result = streamText({
+          model: this.cfg.model,
+          system: this.cfg.sysPrompt,
+          messages,
+          tools: this.wrapTools(tools) as ToolSet,
+          toolApproval: this.buildToolApproval(tools, opts.highRiskTools ?? new Set()),
+          stopWhen: isStepCount(1),
+          abortSignal: abort.signal,
+          maxRetries: 0, // 快速失败,由上层循环/用户决定重试;避免模型错误时指数退避拖死 UI
+        })
+        for await (const part of result.fullStream) {
+          if (part.type === 'text-delta') {
+            this.deps.emit({ type: 'text_delta', data: part.text })
+          } else if (part.type === 'reasoning-delta') {
+            this.deps.emit({ type: 'reasoning_delta', data: part.text })
+          } else if (part.type === 'tool-approval-request') {
+            if (!part.isAutomatic) approvalParts.push(part)
+          } else if (part.type === 'tool-call') {
+            hadToolCall = true
+          } else if (part.type === 'finish') {
+            usage.prompt_tokens += part.totalUsage?.inputTokens ?? 0
+            usage.completion_tokens += part.totalUsage?.outputTokens ?? 0
+          } else if (part.type === 'error') {
+            // 抛给外层 catch 统一 emit error + rethrow(避免重复事件)
+            throw part.error instanceof Error ? part.error : new Error(String(part.error))
+          } else if (part.type === 'abort') {
+            this.deps.emit({ type: 'canceled', data: { reason: 'user_canceled' } })
+            return
+          }
+        }
+        // 推进上下文(审批 response 匹配 tool-call 依赖完整消息历史)
+        messages.push(...(await result.response).messages)
+        if (approvalParts.length > 0) {
+          await this.handleApprovalParts(approvalParts, messages)
+          approvalParts.length = 0
+          continue
+        }
+        if (hadToolCall) continue
+        break
       }
+      this.deps.emit({ type: 'done', data: { usage } })
     } catch (err) {
       if (abort.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
         this.deps.emit({ type: 'canceled', data: { reason: 'user_canceled' } })
@@ -589,40 +628,32 @@ export class AgentEngine {
     }
   }
 
+  // SDK 审批回执:resolve 挂起的审批请求(SDK 机制,60s 超时由 awaitApproval 自管)
   confirm(requestId: string, ok: boolean): void {
-    const entry =
-      this.active?.requestId === requestId ? this.active : this.queue.find((e) => e.requestId === requestId)
-    if (!entry) return // 已结(超时/取消)——幂等 no-op
-    this.settle(entry, ok ? null : new ApprovalError(`审批拒绝: ${entry.toolName}`))
+    this.pendingApprovals.get(requestId)?.resolve(ok)
   }
 
   cancel(): void {
     this.currentAbort?.abort()
-    this.canceling = true
-    const all = this.active ? [this.active, ...this.queue] : [...this.queue]
-    this.active = null
-    this.queue = []
-    for (const entry of all) {
-      if (entry.timer !== undefined) clearTimeout(entry.timer)
-      entry.reject(new ApprovalError(`已取消: ${entry.toolName}`))
-    }
-    this.canceling = false
+    // 挂起的审批全部按拒绝结清(迟到回执 no-op);循环退出后不续跑
+    for (const pending of this.pendingApprovals.values()) pending.resolve(false)
+    this.pendingApprovals.clear()
   }
 
-  // ---- 审批门控 ----
+  // ---- 工具包装(事件 + 越界引导;审批由 SDK toolApproval 处理) ----
 
-  private wrapTools(tools: Record<string, GatedTool>, highRisk: Set<string>, conversationId?: number): Record<string, Tool> {
+  private wrapTools(tools: Record<string, GatedTool>, conversationId?: number): Record<string, Tool> {
     const out: Record<string, Tool> = {}
-    for (const [name, t] of Object.entries(tools)) out[name] = this.wrapTool(name, t, highRisk.has(name), conversationId)
+    for (const [name, t] of Object.entries(tools)) out[name] = this.wrapTool(name, t, conversationId)
     return out
   }
 
-  // 测试钩子:包装单个工具(越界引导/审批门控单测用)
-  wrapToolForTest(name: string, t: GatedTool, flaggedHighRisk = false): Tool {
-    return this.wrapTool(name, t, flaggedHighRisk)
+  // 测试钩子:包装单个工具(越界引导单测用;审批走 SDK toolApproval,不入 wrapTool)
+  wrapToolForTest(name: string, t: GatedTool): Tool {
+    return this.wrapTool(name, t)
   }
 
-  private wrapTool(name: string, t: GatedTool, flaggedHighRisk: boolean, conversationId?: number): Tool {
+  private wrapTool(name: string, t: GatedTool, conversationId?: number): Tool {
     const execute = t.execute
     if (!execute) return t
     return {
@@ -632,8 +663,7 @@ export class AgentEngine {
         this.deps.emit({ type: 'tool_start', data: { id, name, input } })
         const startedAt = Date.now()
         try {
-          // 静态标记(highRiskTools)或工具自带的按调用参数判定谓词(如 command_exec 白名单策略)
-          if (flaggedHighRisk || t.requiresApproval?.(input) === true) await this.requestApproval(id, name, input)
+          // 审批由 SDK toolApproval 配置处理(v7 原生,不再包一层)
           const output = await this.runWithBoundaryGuide(id, name, input, options, execute)
           this.maybeEmitArtifact(conversationId, output)
           this.deps.emit({ type: 'tool_end', data: { id, name, output, duration_ms: Date.now() - startedAt } })
@@ -648,6 +678,7 @@ export class AgentEngine {
   }
 
   // 越界引导:工具访问可访问目录外路径 → 弹窗"是否将 X 加入可访问目录?" → 确认后加入并重试一次(旗舰场景一键授权)
+  // 走 SDK 审批机制:以 allow_dir 为审批名发出 confirm_required,回执 ok 后授权重试
   private async runWithBoundaryGuide(
     id: string,
     name: string,
@@ -661,21 +692,88 @@ export class AgentEngine {
       const boundary = isBoundaryError(err)
       if (!boundary || !this.deps.addAllowedDir) throw err
       const dir = boundary.path
-      await new Promise<void>((resolve, reject) => {
-        this.queue.push({
-          requestId: id,
-          toolName: 'allow_dir',
-          input,
-          resolve,
-          reject,
-          boundaryDir: dir,
-        })
-        this.pump()
+      this.deps.emit({
+        type: 'confirm_required',
+        data: {
+          request_id: id,
+          tool_call_id: id,
+          op: 'allow_dir',
+          target: dir,
+          reason: `是否将 ${dir} 加入可访问目录?`,
+        },
       })
+      const ok = await this.awaitApproval(id)
+      if (!ok) throw err // 拒绝/超时:按原越界错误回传模型
       this.deps.addAllowedDir(dir)
       // 授权后自动重试一次
       return execute(input, options)
     }
+  }
+
+  // 审批请求挂起:60s 超时自动拒绝;confirm() 回执结清。测试钩子 PICOAI_TEST_AUTO_APPROVE 直通
+  private awaitApproval(requestId: string): Promise<boolean> {
+    if (this.testAutoApprove !== undefined) {
+      return Promise.resolve(this.testAutoApprove)
+    }
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingApprovals.delete(requestId)
+        resolve(false)
+      }, this.cfg.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS)
+      this.pendingApprovals.set(requestId, {
+        resolve: (ok) => {
+          clearTimeout(timer)
+          this.pendingApprovals.delete(requestId)
+          resolve(ok)
+        },
+      })
+    })
+  }
+
+  // SDK 原生审批续跑:逐个发 confirm_required → 等回执 → 收集 response,合并为一条 tool 消息续跑(docs 语义)
+  private async handleApprovalParts(parts: Array<{ approvalId: string; toolCall: { toolCallId: string; toolName: string; input: unknown }; isAutomatic?: boolean }>, messages: ModelMessage[]): Promise<void> {
+    const responses: ToolApprovalResponse[] = []
+    for (const part of parts) {
+      // 测试钩子(PICOAI_TEST_AUTO_APPROVE)直接结清,不发 confirm_required(与旧门控语义一致)
+      if (this.testAutoApprove === undefined) {
+        this.deps.emit({
+          type: 'confirm_required',
+          data: {
+            request_id: part.approvalId,
+            tool_call_id: part.approvalId,
+            op: part.toolCall.toolName,
+            target: approvalTarget(part.toolCall.toolName, part.toolCall.input),
+            reason: `执行 ${part.toolCall.toolName} 需要确认`,
+          },
+        })
+      }
+      const ok = await this.awaitApproval(part.approvalId)
+      responses.push({
+        type: 'tool-approval-response',
+        approvalId: part.approvalId,
+        approved: ok,
+        reason: ok ? '用户已批准' : '用户拒绝或超时',
+      })
+    }
+    messages.push({ role: 'tool', content: responses })
+  }
+
+  // 把 requiresApproval 谓词 + highRiskTools 静态标记转成 SDK toolApproval 配置(动态判定)
+  private buildToolApproval(
+    tools: Record<string, GatedTool>,
+    highRisk: Set<string>,
+  ): Record<string, (input: unknown) => Promise<'user-approval' | 'approved' | undefined>> {
+    const out: Record<string, (input: unknown) => Promise<'user-approval' | 'approved' | undefined>> = {}
+    for (const [name, t] of Object.entries(tools)) {
+      if (highRisk.has(name) || t.requiresApproval) {
+        out[name] = async (input: unknown) => {
+          if (highRisk.has(name)) return 'user-approval'
+          if (t.requiresApproval?.(input) === true) return 'user-approval'
+          return undefined
+        }
+      }
+    }
+    return out
   }
 
   // 产物提取:工具结果含绝对路径 {path, size?} → artifact 事件 + artifacts 表落库;缺 path/相对路径 → 静默跳过
@@ -689,47 +787,6 @@ export class AgentEngine {
     const size = typeof rec.size === 'number' ? rec.size : 0
     this.deps.emit({ type: 'artifact', data: { path, type, size } })
     if (conversationId !== undefined) this.deps.store?.addArtifact?.({ conversationId, path, type, size })
-  }
-
-  private requestApproval(requestId: string, toolName: string, input: unknown): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      this.queue.push({ requestId, toolName, input, resolve, reject })
-      this.pump()
-    })
-  }
-
-  // 确认队列串行:任一时刻最多一个 confirm_required 在等回执
-  private pump(): void {
-    if (this.active || this.canceling) return
-    const entry = this.queue.shift()
-    if (!entry) return
-    if (this.testAutoApprove !== undefined) {
-      // 测试钩子:直接结清,不发 confirm_required、不弹窗
-      this.settle(entry, this.testAutoApprove ? null : new ApprovalError(`审批拒绝(测试钩子): ${entry.toolName}`))
-      return
-    }
-    this.active = entry
-    const isBoundary = entry.toolName === 'allow_dir'
-    this.deps.emit({
-      type: 'confirm_required',
-      data: {
-        request_id: entry.requestId,
-        op: isBoundary ? 'allow_dir' : entry.toolName,
-        target: isBoundary ? (entry.boundaryDir ?? '') : approvalTarget(entry.toolName, entry.input),
-        reason: isBoundary ? `是否将 ${entry.boundaryDir} 加入可访问目录?` : `执行 ${entry.toolName} 需要确认`,
-      },
-    })
-    // 超时自 confirm_required 发出起算(60s);settle 时清理 timer,防泄漏
-    entry.timer = setTimeout(() => this.settle(entry, new ApprovalError(`审批超时(${this.cfg.approvalTimeoutMs}ms): ${entry.toolName}`)), this.cfg.approvalTimeoutMs)
-  }
-
-  private settle(entry: ApprovalEntry, err: Error | null): void {
-    if (entry.timer !== undefined) clearTimeout(entry.timer)
-    if (this.active === entry) this.active = null
-    else this.queue = this.queue.filter((e) => e !== entry)
-    if (err) entry.reject(err)
-    else entry.resolve()
-    this.pump()
   }
 }
 

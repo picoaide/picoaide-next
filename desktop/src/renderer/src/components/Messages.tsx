@@ -108,7 +108,7 @@ export default function Messages({ messages, streaming, streamingText, streaming
                   </div>
                 )}
                 {deferredStreaming ? (
-                  <Markdown content={deferredStreaming} />
+                  <Markdown content={deferredStreaming} isAnimating />
                 ) : (
                   deferredReasoning && (
                     <div className="mb-2 border-l-2 border-muted pl-2 text-xs italic text-muted-foreground whitespace-pre-wrap">
@@ -201,6 +201,16 @@ function Bubble({
                 title="编辑"
               >
                 <Pencil className="h-3 w-3" /> 编辑
+              </button>
+            )}
+            {message.role === 'user' && message.is_error === 1 && (
+              <button
+                type="button"
+                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-destructive hover:bg-destructive/10"
+                onClick={() => void useChatStore.getState().sendMessage(message.content)}
+                title="发送失败,重试"
+              >
+                <RefreshCw className="h-3 w-3" /> 重发
               </button>
             )}
             <button

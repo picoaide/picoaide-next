@@ -1,5 +1,12 @@
 @import 'tailwindcss';
 
+/* streamdown 组件依赖的 Tailwind 工具类检测路径 */
+@source "../node_modules/streamdown/dist/*.js";
+@source "../node_modules/@streamdown/code/dist/*.js";
+@source "../node_modules/@streamdown/mermaid/dist/*.js";
+@source "../node_modules/@streamdown/math/dist/*.js";
+@source "../node_modules/@streamdown/cjk/dist/*.js";
+
 :root {
   --background: 0 0% 100%;
   --foreground: 222.2 84% 4.9%;

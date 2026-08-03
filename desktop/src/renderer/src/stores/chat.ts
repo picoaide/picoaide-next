@@ -35,7 +35,11 @@ export interface ToolCallView {
   output?: unknown
   duration_ms?: number
   error?: string
-  status: 'running' | 'done' | 'error'
+  status: 'running' | 'done' | 'error' | 'pending'
+  // 审批关联(chatbox paused 卡):confirm_required 后工具卡挂起,显示内嵌批准/拒绝
+  requestId?: string
+  target?: string
+  reason?: string
 }
 
 function mapMessages(rows: MessageRow[]): ChatMessage[] {
@@ -360,6 +364,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break
       case 'confirm_required':
         useApprovalsStore.getState().push(ev.data)
+        // 内嵌审批卡(chatbox paused 卡):同 id 工具卡标记 pending + 关联回执
+        set((s) => ({
+          toolCalls: s.toolCalls.map((t) =>
+            t.id === ev.data.tool_call_id
+              ? {
+                  ...t,
+                  status: 'pending',
+                  requestId: ev.data.request_id,
+                  target: ev.data.target,
+                  reason: ev.data.reason,
+                }
+              : t
+          ),
+        }))
         break
       case 'artifact':
         // 流式期间实时追加;最终以 done 后的 DB 重载为准(事件不含 conversationId)

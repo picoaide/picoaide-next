@@ -54,6 +54,22 @@ class MockProvider {
     )
   }
 
+  // 真实模型行为:prompt 里已有 assistant[tool-call](SDK 已执行/已处理)→ 输出最终文本;否则(首次)输出工具调用
+  private hasPreviousToolCall(prompt: unknown): boolean {
+    return (
+      Array.isArray(prompt) &&
+      prompt.some(
+        (m) =>
+          typeof m === 'object' &&
+          m !== null &&
+          (m as { role?: string }).role === 'assistant' &&
+          Array.isArray((m as { content?: unknown }).content) &&
+          ((m as { content: Array<{ type?: string }> }).content.some((p) => p?.type === 'tool-call') ||
+            (m as { content: Array<{ type?: string }> }).content.some((p) => p?.type === 'text')),
+      )
+    )
+  }
+
   private usage() {
     return {
       inputTokens: { total: 10, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
@@ -62,7 +78,8 @@ class MockProvider {
   }
 
   private contentFor(prompt: unknown) {
-    if (this.hasToolResults(prompt) && this.script !== 'always-tool-call')
+    // 已有工具调用历史(已执行/已处理)或工具结果消息 → 模型收尾输出文本;否则首次输出工具调用
+    if (this.script !== 'always-tool-call' && (this.hasToolResults(prompt) || this.hasPreviousToolCall(prompt)))
       return [{ type: 'text', text: 'final answer' }]
     if (this.script === 'tool-call' || this.script === 'always-tool-call')
       return [
@@ -349,7 +366,8 @@ describe('AgentEngine craft loop', () => {
       highRiskTools: new Set(['file_delete']),
     })
     await waitFor(() => eventsOf(events, 'confirm_required').length === 1)
-    engine.confirm('call_1', true)
+    const req = eventsOf(events, 'confirm_required')[0] as { data: { request_id: string } }
+    engine.confirm(req.data.request_id, true)
     await run
     expect(eventsOf(events, 'tool_start')).toHaveLength(1)
     expect(eventsOf(events, 'tool_end')).toHaveLength(1)
@@ -365,14 +383,13 @@ describe('AgentEngine craft loop', () => {
       content: 'delete the file',
       mode: 'craft',
       tools,
-      highRiskTools: new Set(['file_delete']),
     })
-    await waitFor(() => eventsOf(events, 'confirm_required').length === 1)
-    engine.confirm('call_1', true)
     await run
     expect(eventsOf(events, 'tool_end')).toHaveLength(1)
     expect(mock.callCount).toBe(1)
-    expect(eventsOf(events, 'done')).toHaveLength(1)
+    // 步数满且最后一轮仍在调工具:工具已执行但结果未回传 → 超限
+    expect(eventsOf(events, 'error')).toEqual([{ type: 'error', data: '达到最大步骤数' }])
+    expect(eventsOf(events, 'done')).toHaveLength(0)
   })
 })
 
@@ -430,17 +447,19 @@ describe('AgentEngine craft (store-backed)', () => {
     expect(store.getConversation(1)?.status).toBe('failed')
   })
 
-  it('persists a rejected tool as an is_error row and lets the agent retry', async () => {
+  it('deny skips the tool (SDK tool-output-denied) and lets the agent finish', async () => {
     const { mock, events, engine, store } = makeEngine('tool-call')
     const run = engine.craft({ conversationId: 1, content: 'delete it', tools, highRiskTools: new Set(['file_delete']) })
     await waitFor(() => eventsOf(events, 'confirm_required').length === 1)
-    engine.confirm('call_1', false)
+    const req0 = eventsOf(events, 'confirm_required')[0] as { data: { request_id: string } }
+    engine.confirm(req0.data.request_id, false)
     await run
     expect(deletedPaths).toEqual([])
     expect(mock.callCount).toBe(2)
-    const toolRow = store.listMessages(1).find((m) => m.role === 'tool')
-    expect(toolRow).toMatchObject({ toolName: 'file_delete', isError: true })
-    expect(eventsOf(events, 'tool_error')).toHaveLength(1)
+    // SDK 原生审批:拒绝 = 工具不执行(无 tool 行/无 tool_error),denial 回传模型后模型收尾
+    expect(store.listMessages(1).find((m) => m.role === 'tool')).toBeUndefined()
+    expect(eventsOf(events, 'tool_start')).toHaveLength(0)
+    expect(eventsOf(events, 'tool_error')).toHaveLength(0)
     expect(eventsOf(events, 'done')).toHaveLength(1)
     expect(store.getConversation(1)?.status).toBe('done')
   })
@@ -512,7 +531,9 @@ describe('AgentEngine craft (store-backed)', () => {
     await engine.craft({ conversationId: 1, content: 'delete it', tools, highRiskTools: new Set(['file_delete']) })
     expect(eventsOf(events, 'confirm_required')).toHaveLength(0)
     expect(deletedPaths).toEqual([])
-    expect(eventsOf(events, 'tool_error')).toHaveLength(1)
+    // SDK 拒绝 = 工具不执行(无 tool_error);denial 回传模型收尾
+    expect(eventsOf(events, 'tool_error')).toHaveLength(0)
+    expect(eventsOf(events, 'done')).toHaveLength(1)
   })
 
   it('gates tools via a per-tool requiresApproval predicate even without highRiskTools', async () => {
@@ -525,7 +546,8 @@ describe('AgentEngine craft (store-backed)', () => {
       highRiskTools: new Set(),
     })
     await waitFor(() => eventsOf(events, 'confirm_required').length === 1)
-    engine.confirm('call_1', true)
+    const req0 = eventsOf(events, 'confirm_required')[0] as { data: { request_id: string } }
+    engine.confirm(req0.data.request_id, true)
     await run
     expect(deletedPaths).toEqual(['/home/u/x.doc'])
   })
@@ -644,18 +666,25 @@ describe('approval gate', () => {
     })
     await waitFor(() => eventsOf(events, 'confirm_required').length === 1)
     expect(deletedPaths).toEqual([])
-    const req = eventsOf(events, 'confirm_required')[0]
+    const req = eventsOf(events, 'confirm_required')[0] as { data: { request_id: string; tool_call_id: string } }
     expect(req).toEqual({
       type: 'confirm_required',
-      data: { request_id: 'call_1', op: 'file_delete', target: '/home/u/x.doc', reason: expect.any(String) },
+      data: {
+        request_id: req.data.request_id,
+        tool_call_id: req.data.tool_call_id,
+        op: 'file_delete',
+        target: '/home/u/x.doc',
+        reason: expect.any(String),
+      },
     })
-    engine.confirm((req as { data: { request_id: string } }).data.request_id, true)
+    expect(req.data.request_id).toBeTruthy()
+    engine.confirm(req.data.request_id, true)
     await run
     expect(deletedPaths).toEqual(['/home/u/x.doc'])
     expect(eventsOf(events, 'tool_end')).toHaveLength(1)
   })
 
-  it('deny rejects the tool with an error that is fed back to the model', async () => {
+  it('deny rejects the tool (SDK tool-output-denied) and feeds denial back to the model', async () => {
     const { mock, events, engine } = makeEngine('tool-call')
     const run = engine.run({
       content: 'delete it',
@@ -664,11 +693,12 @@ describe('approval gate', () => {
       highRiskTools: new Set(['file_delete']),
     })
     await waitFor(() => eventsOf(events, 'confirm_required').length === 1)
-    engine.confirm('call_1', false)
+    const req0 = eventsOf(events, 'confirm_required')[0] as { data: { request_id: string } }
+    engine.confirm(req0.data.request_id, false)
     await run
     expect(deletedPaths).toEqual([])
-    const err = eventsOf(events, 'tool_error')[0]
-    expect(err).toEqual({ type: 'tool_error', data: { id: 'call_1', name: 'file_delete', error: expect.any(String) } })
+    // SDK 原生审批:拒绝 = 工具不执行,无 tool_error 事件;denial 消息回传模型后模型收尾
+    expect(eventsOf(events, 'tool_error')).toHaveLength(0)
     const secondPrompt = mock.prompts[1] as Array<{ role: string; content: Array<{ type: string; isError?: boolean }> }>
     const toolMsg = secondPrompt.find((m) => m.role === 'tool')
     expect(toolMsg).toBeTruthy()
@@ -685,11 +715,16 @@ describe('approval gate', () => {
       highRiskTools: new Set(['file_delete']),
     })
     await flushMicrotasks()
+    // 新机制:confirm_required 在轮末(SDK 审批请求)发出;fake timers 下多排几次微任务
+    await vi.advanceTimersByTimeAsync(0)
     expect(eventsOf(events, 'confirm_required')).toHaveLength(1)
     await vi.advanceTimersByTimeAsync(1000)
     await run
     expect(deletedPaths).toEqual([])
-    expect((eventsOf(events, 'tool_error')[0] as { data: { error: string } }).data.error).toMatch(/超时|timeout/i)
+    // 超时 = 自动拒绝:工具不执行(无 tool_error),denial 回传模型收尾
+    expect(eventsOf(events, 'tool_error')).toHaveLength(0)
+    expect(eventsOf(events, 'tool_start')).toHaveLength(0)
+    expect(eventsOf(events, 'done')).toHaveLength(1)
   })
 
   it('serializes confirmations when a step contains multiple high-risk tools', async () => {
@@ -701,20 +736,22 @@ describe('approval gate', () => {
       highRiskTools: new Set(['file_delete', 'file_wipe']),
     })
     await waitFor(() => eventsOf(events, 'confirm_required').length === 1)
-    const first = eventsOf(events, 'confirm_required')[0]
-    expect((first as { data: { request_id: string } }).data.request_id).toBe('call_1')
+    const first = eventsOf(events, 'confirm_required')[0] as { data: { request_id: string } }
+    expect(first.data.request_id).toBeTruthy()
     await new Promise((r) => setTimeout(r, 20))
     expect(eventsOf(events, 'confirm_required')).toHaveLength(1)
-    engine.confirm('call_1', true)
+    engine.confirm(first.data.request_id, true)
     await waitFor(() => eventsOf(events, 'confirm_required').length === 2)
-    const second = eventsOf(events, 'confirm_required')[1]
-    expect((second as { data: { request_id: string } }).data.request_id).toBe('call_2')
-    engine.confirm('call_2', false)
+    const second = eventsOf(events, 'confirm_required')[1] as { data: { request_id: string } }
+    expect(second.data.request_id).not.toBe(first.data.request_id)
+    engine.confirm(second.data.request_id, false)
     await run
     expect(deletedPaths).toEqual(['/a'])
     expect(wipedPaths).toEqual([])
     expect(eventsOf(events, 'tool_end')).toHaveLength(1)
-    expect(eventsOf(events, 'tool_error')).toHaveLength(1)
+    // SDK 拒绝 = tool-output-denied,不产生 tool_error(非错误,是用户决定)
+    expect(eventsOf(events, 'tool_error')).toHaveLength(0)
+    expect(eventsOf(events, 'done')).toHaveLength(1)
   })
 
   it('cancel rejects pending approvals and emits canceled, leaving no leaks', async () => {
@@ -738,7 +775,8 @@ describe('approval gate', () => {
       highRiskTools: new Set(['file_delete']),
     })
     await waitFor(() => eventsOf(events, 'confirm_required').length === 2)
-    engine.confirm('call_1', true)
+    const req1 = eventsOf(events, 'confirm_required')[1] as { data: { request_id: string } }
+    engine.confirm(req1.data.request_id, true)
     await again
     expect(engine.pendingApprovalCount).toBe(0)
   })
@@ -752,11 +790,13 @@ describe('approval gate', () => {
       highRiskTools: new Set(['file_delete']),
     })
     await waitFor(() => eventsOf(events, 'confirm_required').length === 1)
-    engine.confirm('call_1', false)
-    engine.confirm('call_1', true)
+    const reqA = eventsOf(events, 'confirm_required')[0] as { data: { request_id: string } }
+    engine.confirm(reqA.data.request_id, false)
+    engine.confirm(reqA.data.request_id, true)
     await run
     expect(deletedPaths).toEqual([])
-    expect(eventsOf(events, 'tool_error')).toHaveLength(1)
+    expect(eventsOf(events, 'tool_error')).toHaveLength(0)
+    expect(eventsOf(events, 'done')).toHaveLength(1)
   })
 })
 
@@ -840,7 +880,7 @@ describe('越界引导(boundary guide)', () => {
     const inner = vi.fn().mockRejectedValueOnce(new ToolError('路径不在允许目录内: /home/u/desktop'))
       .mockResolvedValueOnce('ok-after-retry')
     const t: GatedTool = { ...tool({ description: 't', inputSchema: z.object({}), execute: inner }), execute: inner }
-    const wrapped = engine.wrapToolForTest('file_read', t, false)
+    const wrapped = engine.wrapToolForTest('file_read', t)
     const run = (wrapped as any).execute({}, { toolCallId: 'call-1' })
     await new Promise((r) => setTimeout(r, 10))
     const confirm = events.find((e) => e.type === 'confirm_required')
@@ -865,7 +905,7 @@ describe('越界引导(boundary guide)', () => {
     )
     const inner = vi.fn().mockRejectedValue(new ToolError('路径不在允许目录内: /etc/passwd'))
     const t: GatedTool = { ...tool({ description: 't', inputSchema: z.object({}), execute: inner }), execute: inner }
-    const wrapped = engine.wrapToolForTest('file_read', t, false)
+    const wrapped = engine.wrapToolForTest('file_read', t)
     const run = (wrapped as any).execute({}, { toolCallId: 'call-2' })
     await new Promise((r) => setTimeout(r, 10))
     engine.confirm('call-2', false)

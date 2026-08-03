@@ -70,6 +70,7 @@ export interface PluginIpcDeps {
 export interface PluginHandlers {
   'settings:info': () => SettingsInfo
   'settings:allowedDirs': (input?: { dirs?: string[] }) => string[]
+  'settings:accent': (input?: { color?: string }) => string
   'settings:refreshBootstrap': () => Promise<BootstrapConfig>
   'plugin:skills.list': () => SkillsListResult
   'plugin:skills.install': (input: { name: string; confirmed?: boolean }) => Promise<InstalledSkillRecord | { risk: SkillRiskInfo }>
@@ -153,6 +154,14 @@ export function buildPluginHandlers(deps: PluginIpcDeps): Record<string, (...arg
         store.setSetting('allowed_dirs', JSON.stringify(input.dirs))
       }
       return getAllowedDirsFromSettings(store.getSetting)
+    },
+
+    // 强调色(chatbox accent color):空参读取,{color} 保存
+    'settings:accent': (input?: { color?: string }) => {
+      if (input?.color) {
+        store.setSetting('accent', input.color)
+      }
+      return store.getSetting('accent') ?? ''
     },
 
     'settings:refreshBootstrap': async () => {

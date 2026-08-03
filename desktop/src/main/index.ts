@@ -410,10 +410,8 @@ app.whenReady().then(async () => {
         let title = ''
         try {
           title = await generateTitle(
-            { serverURL: session.serverURL, token: session.token },
-            model.id,
+            makeGatewayModel(session.serverURL, session.token, model.id),
             firstUser.content,
-            gatewayFetch,
           )
         } catch {
           // 网关失败兜底:截取首条用户消息

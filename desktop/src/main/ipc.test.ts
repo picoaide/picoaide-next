@@ -428,7 +428,8 @@ describe('craft via ipc', () => {
     const id = handlers['chat:new']({ mode: 'craft' })
     const run = handlers['chat:ask']({ conversationId: id, content: 'delete it' })
     await waitFor(() => eventsOf(sent).some((e) => (e as { type: string }).type === 'confirm_required'))
-    handlers['agent:confirm']({ requestId: 'call_1', ok: true })
+    const req = eventsOf(sent).find((e) => (e as { type: string }).type === 'confirm_required') as { data: { request_id: string } }
+    handlers['agent:confirm']({ requestId: req.data.request_id, ok: true })
     await run
     expect(ipcDeleted).toEqual(['/home/u/x.doc'])
     const msgs = store.listMessages(id)
@@ -457,7 +458,8 @@ describe('craft via ipc', () => {
     expect(eventsOf(sent).some((e) => (e as { type: string }).type === 'confirm_required')).toBe(false)
     handlers['picoaide:rendererReady']()
     await waitFor(() => eventsOf(sent).some((e) => (e as { type: string }).type === 'confirm_required'))
-    handlers['agent:confirm']({ requestId: 'call_1', ok: true })
+    const req = eventsOf(sent).find((e) => (e as { type: string }).type === 'confirm_required') as { data: { request_id: string } }
+    handlers['agent:confirm']({ requestId: req.data.request_id, ok: true })
     await run
   })
 })
@@ -531,7 +533,8 @@ describe('chat:continue / chat:approvePlan / chat:listRunning / artifacts', () =
     model.script = 'tool-call'
     const run = handlers['chat:approvePlan']({ conversationId: id, ok: true })
     await waitFor(() => eventsOf(sent).some((e) => (e as { type: string }).type === 'confirm_required'))
-    handlers['agent:confirm']({ requestId: 'call_1', ok: true })
+    const req = eventsOf(sent).find((e) => (e as { type: string }).type === 'confirm_required') as { data: { request_id: string } }
+    handlers['agent:confirm']({ requestId: req.data.request_id, ok: true })
     await run
     expect(executed).toEqual(['/home/u/x.doc'])
     expect(store.getConversation(id)?.status).toBe('done')

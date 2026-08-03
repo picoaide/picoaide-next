@@ -19,7 +19,6 @@ import {
 import ArtifactsPanel from '../components/ArtifactsPanel'
 import ChatInput from '../components/ChatInput'
 import Messages from '../components/Messages'
-import ConfirmModal from '../components/ConfirmModal'
 import SearchDialog from '../components/SearchDialog'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore, type ProjectView } from '../stores/chat'
@@ -404,7 +403,6 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
         </DialogContent>
       </Dialog>
       <SearchDialog open={showSearch} onClose={() => setShowSearch(false)} />
-      <ConfirmModal />
     </div>
   )
 }

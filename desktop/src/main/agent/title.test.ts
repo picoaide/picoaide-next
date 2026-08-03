@@ -1,42 +1,74 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { fallbackTitle, generateTitle } from './title'
+import type { LanguageModel } from 'ai'
 
-const session = { serverURL: 'https://gw.example.com', token: 'tok' }
+// 仿 engine.test FakeProvider 的最小语言模型(mock generateText 所需的 doStream);cast 而非 implements
+class FakeTitleModel {
+  readonly specificationVersion = 'v4' as const
+  readonly provider = 'fake'
+  readonly modelId = 'fake-title'
 
-describe('generateTitle', () => {
-  it('解析网关返回的标题并截断 20 字', async () => {
-    const fetchFn = vi.fn(
-      async () =>
-        new Response(JSON.stringify({ choices: [{ message: { content: '这是一段很长的标题用来测试截断行为是否正常生效' } }] }), {
-          status: 200,
-        }),
-    ) as unknown as typeof fetch
-    const t = await generateTitle(session, 'm1', '帮我写周报', fetchFn)
-    expect(t).toHaveLength(20)
-    expect(fetchFn).toHaveBeenCalledWith(
-      'https://gw.example.com/v1/chat/completions',
-      expect.objectContaining({ method: 'POST' }),
-    )
-  })
+  script: 'text' | 'fail' | 'hang' | 'empty'
+  constructor(script: 'text' | 'fail' | 'hang' | 'empty' = 'text') {
+    this.script = script
+  }
 
-  it('网关失败时抛错(由调用方兜底)', async () => {
-    const fetchFn = vi.fn(async () => new Response('err', { status: 500 })) as unknown as typeof fetch
-    await expect(generateTitle(session, 'm1', 'x', fetchFn)).rejects.toThrow()
-  })
-
-  it('超时抛错', async () => {
-    const fetchFn = vi.fn(async () => {
+  async doGenerate(options: any) {
+    if (this.script === 'fail') throw new Error('upstream 502')
+    if (this.script === 'hang') {
       await new Promise((r) => setTimeout(r, 1000))
       throw new DOMException('Aborted', 'AbortError')
-    }) as unknown as typeof fetch
-    await expect(generateTitle(session, 'm1', 'x', fetchFn, 50)).rejects.toThrow()
+    }
+    const hasApprovalOrTool = Array.isArray(options.prompt) && options.prompt.some((m: any) => m?.role === 'tool')
+    void hasApprovalOrTool
+    return {
+      content: [{ type: 'text', text: this.script === 'empty' ? '  ' : '这是一段很长的标题用来测试截断行为是否正常生效' }],
+      finishReason: { unified: 'stop' as const, raw: undefined },
+      usage: { inputTokens: { total: 5 }, outputTokens: { total: 5 } },
+      warnings: [],
+    }
+  }
+
+  async doStream(options: any) {
+    if (this.script === 'fail') throw new Error('upstream 502')
+    if (this.script === 'hang') {
+      return {
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: 'text-start', id: 't1' })
+          },
+        }),
+      }
+    }
+    return {
+      stream: new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: 'text-start', id: 't1' })
+          controller.enqueue({ type: 'text-delta', id: 't1', delta: '这是一段很长的标题用来测试截断行为是否正常生效' })
+          controller.enqueue({ type: 'text-end', id: 't1' })
+          controller.enqueue({
+            type: 'finish',
+            usage: { promptTokens: { total: 5 }, completionTokens: { total: 5 } },
+            finishReason: { unified: 'stop', raw: undefined },
+          })
+        },
+      }),
+    }
+  }
+}
+
+describe('generateTitle', () => {
+  it('解析模型输出并截断 20 字', async () => {
+    const t = await generateTitle(new FakeTitleModel('text') as unknown as LanguageModel, '帮我写周报')
+    expect(t).toHaveLength(20)
+  })
+
+  it('模型失败时抛错(由调用方兜底)', async () => {
+    await expect(generateTitle(new FakeTitleModel('fail') as unknown as LanguageModel, 'x')).rejects.toThrow()
   })
 
   it('空内容返回空串', async () => {
-    const fetchFn = vi.fn(
-      async () => new Response(JSON.stringify({ choices: [{ message: { content: '  ' } }] }), { status: 200 }),
-    ) as unknown as typeof fetch
-    expect(await generateTitle(session, 'm1', 'x', fetchFn)).toBe('')
+    expect(await generateTitle(new FakeTitleModel('empty') as unknown as LanguageModel, 'x')).toBe('')
   })
 })
 

@@ -76,6 +76,7 @@ const api = {
   // 设置页(plugin 通道):技能/MCP 建议清单、安装、可访问目录、服务器信息
   settingsInfo: (): Promise<SettingsInfo> => ipcRenderer.invoke('settings:info'),
   allowedDirs: (dirs?: string[]): Promise<string[]> => ipcRenderer.invoke('settings:allowedDirs', { dirs }),
+  accent: (color?: string): Promise<string> => ipcRenderer.invoke('settings:accent', { color }),
   pluginSkillsList: (): Promise<SkillsListResult> => ipcRenderer.invoke('plugin:skills.list'),
   pluginSkillsInstall: (input: { name: string; confirmed?: boolean }): Promise<InstalledSkillRecord | { risk: SkillRiskInfo }> =>
     ipcRenderer.invoke('plugin:skills.install', input),

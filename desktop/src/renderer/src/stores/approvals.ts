@@ -3,6 +3,7 @@ import { picoaide } from '../api/picoaide'
 
 export interface ApprovalRequest {
   request_id: string
+  tool_call_id?: string
   op: string
   target: string
   reason: string
@@ -13,7 +14,7 @@ export const APPROVAL_TIMEOUT_MS = 60_000
 
 interface ApprovalsState {
   queue: ApprovalRequest[]
-  push: (data: { request_id: string; op: string; target: string; reason: string }) => void
+  push: (data: { request_id: string; tool_call_id?: string; op: string; target: string; reason: string }) => void
   // 回执后由引擎 settle,超时/取消的迟到回执是引擎侧 no-op
   resolve: (requestId: string, ok: boolean) => void
   clear: () => void
