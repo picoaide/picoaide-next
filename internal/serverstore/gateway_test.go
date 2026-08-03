@@ -4,6 +4,32 @@ import (
 	"testing"
 )
 
+func TestModelDefaultParams(t *testing.T) {
+	db := openTestDB(t)
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	pid, err := AddGatewayProvider(db, &GatewayProvider{Name: "p", BaseURL: "http://a", APIKeyEnc: "k"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncProviderModel(db, pid, "m1", `{"context_length":1048576,"max_output":393216}`); err != nil {
+		t.Fatal(err)
+	}
+	params, err := ModelDefaultParams(db, "m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params != `{"context_length":1048576,"max_output":393216}` {
+		t.Fatalf("params = %q", params)
+	}
+	// missing model -> ErrNotFound
+	if _, err := ModelDefaultParams(db, "nope"); err != ErrNotFound {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
 func TestGatewayProviderChannelField(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()
