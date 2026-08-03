@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # PicoAide 服务端一键部署脚本(Ubuntu)
-# 用法:
-#   curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-next/master/scripts/install-server.sh | sudo bash
-#   curl -fsSL ... | sudo DOMAIN=picoaide.example.com bash           # 非交互指定域名
-#   curl -fsSL ... | sudo bash -s -- --domain picoaide.example.com --admin-pass secret
+# 用法(需 root 用户直接运行;若系统有 sudo 也可 sudo bash):
+#   curl -fsSL https://raw.githubusercontent.com/picoaide/picoaide-next/master/scripts/install-server.sh | bash
+#   curl -fsSL ... | DOMAIN=picoaide.example.com bash                 # 非交互指定域名
+#   curl -fsSL ... | bash -s -- --domain picoaide.example.com --admin-pass secret
 #
 # 行为:
 #   1. 检查系统(Ubuntu)与依赖(docker/compose/curl/jq/openssl),缺失自动安装
@@ -23,12 +23,6 @@ DOCKER_MIRROR="${DOCKER_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/docker-ce}"
 SERVER_IMAGE="${SERVER_IMAGE:-ghcr.io/picoaide/picoaide-server:latest}"
 LOG_FILE="${LOG_FILE:-/tmp/picoaide-install.log}"
 
-# ---- 展示与日志 ----
-installed=()
-: > "$LOG_FILE"
-log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$LOG_FILE"; }
-fail() { log "错误: $*"; exit 1; }
-
 # ---- 解析参数 --domain / --admin-pass ----
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -38,18 +32,35 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# ---- 环境检查 ----
-[ "$(id -u)" = 0 ] || fail "需要 root 权限(请用 sudo 运行)"
+# ---- 环境检查(最先,非 root 直接退出) ----
+[ "$(id -u)" = 0 ] || { echo "错误: 必须以 root 用户运行。请用 root 登录后重试(例如: curl -fsSL ... | bash),或使用 sudo 运行。" >&2; exit 1; }
+
+# ---- 展示与日志 ----
+installed=()
+: > "$LOG_FILE"
+log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$LOG_FILE"; }
+fail() { log "错误: $*"; exit 1; }
+# step 输出醒目的阶段标题
+step() {
+  log ""
+  log "──────────────────────────────────────────────"
+  log "▶ $*"
+  log "──────────────────────────────────────────────"
+}
+step "检查系统与依赖"
 command -v lsb_release >/dev/null 2>&1 || { log "安装 lsb-release"; apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq lsb-release; installed+=("lsb-release"); }
 distro="$(lsb_release -is 2>/dev/null || echo unknown)"
 [ "$distro" = "Ubuntu" ] || log "警告: 检测到 $distro,脚本针对 Ubuntu 优化"
 
 # ---- 依赖安装 ----
+step "安装基础依赖(curl/jq/openssl/ca-certificates)"
 install_if_missing() {
   if ! command -v "$1" >/dev/null 2>&1; then
     log "安装 $3($1)..."
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$2"
     installed+=("$2")
+  else
+    log "已存在: $1"
   fi
 }
 for cmd in curl jq openssl ca-certificates; do
@@ -57,6 +68,7 @@ for cmd in curl jq openssl ca-certificates; do
 done
 
 # ---- Docker 安装(含 compose 插件) ----
+step "检查/安装 Docker 与 compose"
 ensure_docker() {
   if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     log "docker 已安装"
@@ -85,15 +97,19 @@ docker compose version >/dev/null 2>&1 || fail "docker compose 插件不可用"
 log "docker compose 已就绪"
 
 # ---- 参数/输入 ----
+step "配置部署参数(域名 / 管理员密码)"
 [ -n "$DOMAIN" ] || { read -r -p "请输入部署域名(如 picoaide.example.com): " DOMAIN; }
 [ -n "$DOMAIN" ] || fail "未提供域名"
 case "$DOMAIN" in
   */*) fail "域名不合法: $DOMAIN" ;;
 esac
+log "域名: $DOMAIN"
 [ -n "$ADMIN_PASS" ] || ADMIN_PASS="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 16)"
 [ ${#ADMIN_PASS} -ge 8 ] || fail "管理员密码过短"
+log "管理员账号: $ADMIN_USER(密码由下方展示)"
 
 # ---- 已有目录检查:是否重装 ----
+step "检查部署目录 $INSTALL_DIR"
 if [ -d "$INSTALL_DIR" ] && [ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]; then
   log "检测到 $INSTALL_DIR 已存在且非空(已有部署或文件)"
   log "如果重新安装:将停止相关容器、检查 80/443 端口、并清空 $INSTALL_DIR 下所有文件"
@@ -119,6 +135,7 @@ if [ -d "$INSTALL_DIR" ] && [ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]; then
 fi
 
 # ---- 部署目录 ----
+step "创建部署目录并生成配置"
 mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/.picoaide-data"
 cd "$INSTALL_DIR"
 
@@ -185,12 +202,15 @@ COMPOSE
 installed+=("生成 Caddyfile 与 docker-compose.yml")
 
 # ---- 启动 ----
-log "拉取镜像并启动服务..."
+step "拉取镜像并启动服务"
+log "拉取镜像..."
 docker compose pull 2>/dev/null || true
+log "启动容器..."
 docker compose up -d
 installed+=("docker compose up -d(启动服务)")
 
 # ---- 等待就绪(最多 90s) ----
+log "等待服务就绪(最多 90s)..."
 ready=0
 for _ in $(seq 1 30); do
   code="$(curl -sk -o /dev/null -w '%{http_code}' --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/admin/" 2>/dev/null || true)"
