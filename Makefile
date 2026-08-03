@@ -15,7 +15,8 @@ test-server:
 test-client:
 	cd desktop && npm test && npm run typecheck
 
-build-server:
+# webadmin 是编译进 Go 二进制的临时产物:build-server 自动先构建,不单独编译
+build-server: webadmin
 	go build -o $(BIN) ./cmd/server
 
 build-client:
