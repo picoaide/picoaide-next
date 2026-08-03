@@ -32,7 +32,6 @@ type fakeUpstream struct {
 	streamResp string
 	nonStream  string
 	status     int
-	first500   bool
 	firstDelay time.Duration
 }
 
@@ -54,11 +53,6 @@ data: [DONE]
 		f.gotBody.Store(string(body))
 		f.gotAuth.Store(r.Header.Get("Authorization"))
 		f.requests.Add(1)
-		if f.first500 && f.requests.Load() == 1 {
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(`{"error":{"message":"boom"}}`))
-			return
-		}
 		if f.firstDelay > 0 {
 			time.Sleep(f.firstDelay)
 		}
@@ -293,7 +287,7 @@ func TestProxyUnauthorized(t *testing.T) {
 	}
 }
 
-func TestProxyRetryOnceThen502(t *testing.T) {
+func TestProxyNoRetryOn5xx(t *testing.T) {
 	f := newFakeUpstream(t)
 	f.status = http.StatusInternalServerError
 	r, _, token := newGateway(t, f)
@@ -302,8 +296,8 @@ func TestProxyRetryOnceThen502(t *testing.T) {
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502", w.Code)
 	}
-	if n := f.requests.Load(); n != 2 {
-		t.Fatalf("upstream calls = %d, want exactly 2 (initial + 1 retry)", n)
+	if n := f.requests.Load(); n != 1 {
+		t.Fatalf("upstream calls = %d, want exactly 1 (no retry on 5xx: avoids double-billing)", n)
 	}
 	var out map[string]any
 	json.Unmarshal(w.Body.Bytes(), &out)
@@ -312,17 +306,24 @@ func TestProxyRetryOnceThen502(t *testing.T) {
 	}
 }
 
-func TestProxyRetryRecovers(t *testing.T) {
-	f := newFakeUpstream(t)
-	f.first500 = true
-	r, _, token := newGateway(t, f)
+func TestProxyRetriesTransportError(t *testing.T) {
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+
+	r, db, token := newGateway(t, nil)
+	if _, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models) VALUES ('dead', ?, 'k', '["deepseek-chat"]')`, deadURL); err != nil {
+		t.Fatal(err)
+	}
 
 	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", w.Code)
 	}
-	if n := f.requests.Load(); n != 2 {
-		t.Fatalf("upstream calls = %d, want 2", n)
+	var out map[string]any
+	json.Unmarshal(w.Body.Bytes(), &out)
+	if code := out["error"].(map[string]any)["code"]; code != "UPSTREAM" {
+		t.Fatalf("code = %v", code)
 	}
 }
 
