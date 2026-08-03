@@ -11,6 +11,7 @@
     "postinstall": "electron-rebuild -f -o better-sqlite3 && node scripts/clean-better-sqlite3-prebuilds.js"
   },
   "dependencies": {
+    "@ai-sdk/mcp": "^2.0.22",
     "@ai-sdk/openai-compatible": "^3.0.20",
     "@ai-sdk/sandbox-just-bash": "^1.0.54",
     "@modelcontextprotocol/sdk": "^1.30.0",

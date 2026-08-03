@@ -250,24 +250,25 @@ async function loadMcpTools(db: ReturnType<typeof openDb>): Promise<{ tools: Rec
     const highRisk = new Set<string>()
     for (const rec of installedMcpList().filter((r) => r.enabled)) {
       const creds = getCredentials(rec.id)
-      const runner = mod.createMcpRunner({
-        transport: (rec.transport === 'http' ? 'http' : 'stdio') as 'stdio' | 'http',
-        command: rec.command,
-        args: rec.args ?? [],
-        url: rec.url ?? '',
-        headers: creds?.headers ?? {},
-        env: creds?.env ?? {},
-        fetch: gatewayFetch,
-      })
+      let handle: { tools: Record<string, import('ai').Tool>; close: () => Promise<void> } | null = null
       try {
-        const conn = await mod.connectRunner(runner)
-        for (const t of conn.tools) {
-          const name = mod.pluginToolName(rec.name, t.name)
-          tools[name] = mod.toAiSdkTool(t, (args) => conn.callTool(t.name, args))
-          if (mod.isHighRiskTool(t.name, t.description ?? '')) highRisk.add(name)
+        handle = await mod.createMcpToolsClient({
+          transport: rec.transport === 'http' ? 'http' : 'stdio',
+          command: rec.command,
+          args: rec.args ?? [],
+          url: rec.url ?? '',
+          headers: creds?.headers ?? {},
+          env: creds?.env ?? {},
+          fetch: gatewayFetch,
+        })
+        for (const [tname, t] of Object.entries(handle.tools)) {
+          const name = mod.pluginToolName(rec.name, tname)
+          tools[name] = t as GatedTool
+          const desc = typeof t.description === 'string' ? t.description : ''
+          if (mod.isHighRiskTool(tname, desc)) highRisk.add(name)
         }
       } catch {
-        runner.close().catch(() => {})
+        handle?.close().catch(() => {})
       }
     }
     return { tools, highRisk }
