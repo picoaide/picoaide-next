@@ -22,30 +22,53 @@ interface Model {
   id: number
   name: string
   display_name: string
+  default_params: string
+}
+
+function formatCaps(defaultParams: string): string {
+  try {
+    const p = JSON.parse(defaultParams)
+    const fmt = (n?: number) => {
+      if (!n) return ''
+      if (n % (1024 * 1024) === 0) return `${n / (1024 * 1024)}M`
+      if (n % 1024 === 0) return `${n / 1024}K`
+      return `${Math.round(n / 1024)}K`
+    }
+    const cl = fmt(p.context_length)
+    const mo = fmt(p.max_output)
+    if (cl && mo) return `${cl} / ${mo}`
+    return cl || mo || '-'
+  } catch {
+    return '-'
+  }
 }
 
 export default function Gateway() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [models, setModels] = useState<Model[]>([])
+  const [channels, setChannels] = useState<string[]>([])
   const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', allow_private: false, search_endpoint: '', server_base_url: '' })
   const [error, setError] = useState('')
   const [okMsg, setOkMsg] = useState('')
+  const [syncMsg, setSyncMsg] = useState('')
 
   const [provDialog, setProvDialog] = useState(false)
-  const [provForm, setProvForm] = useState({ name: '', base_url: '', api_key: '', models: '' })
+  const [provForm, setProvForm] = useState({ name: '', channel: '', base_url: '', api_key: '', models: '' })
   const [modelDialog, setModelDialog] = useState(false)
   const [modelForm, setModelForm] = useState({ name: '', provider_id: '', display_name: '' })
 
   const load = useCallback(async () => {
     try {
-      const [p, m, g] = await Promise.all([
+      const [p, m, g, ch] = await Promise.all([
         request('/api/admin/providers'),
         request('/api/admin/models'),
         request('/api/admin/gateway'),
+        request('/api/admin/channels'),
       ])
       setProviders(p.providers ?? [])
       setModels(m.models ?? [])
       setCfg(g)
+      setChannels(ch.channels ?? [])
     } catch (err: any) {
       setError(err.message)
     }
@@ -69,13 +92,14 @@ export default function Gateway() {
         method: 'POST',
         body: JSON.stringify({
           name: provForm.name,
+          channel: provForm.channel,
           base_url: provForm.base_url,
           api_key: provForm.api_key,
           models: provForm.models.split(',').map((s) => s.trim()).filter(Boolean),
         }),
       })
       setProvDialog(false)
-      setProvForm({ name: '', base_url: '', api_key: '', models: '' })
+      setProvForm({ name: '', channel: '', base_url: '', api_key: '', models: '' })
       load()
     } catch (err: any) {
       setError(err.message)
@@ -115,11 +139,27 @@ export default function Gateway() {
     }
   }
 
+  async function syncAll() {
+    try {
+      const r = await request('/api/admin/providers/sync-all', { method: 'POST' })
+      const results: { provider: string; added: number; removed: number; error?: string }[] = r.results ?? []
+      const summary = results
+        .map((x) => (x.error ? `${x.provider}: ${x.error}` : `${x.provider}: +${x.added}/-${x.removed}`))
+        .join('; ')
+      setSyncMsg(summary || '没有可同步的上游')
+      setTimeout(() => setSyncMsg(''), 4000)
+      load()
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
   return (
     <div className="space-y-6">
       <h1 className="text-xl font-bold">网关配置</h1>
       {error && <div className="text-sm text-destructive">{error}</div>}
       {okMsg && <div className="text-sm text-green-600">{okMsg}</div>}
+      {syncMsg && <div className="text-sm text-green-600">{syncMsg}</div>}
 
       <Card>
         <CardHeader>
@@ -207,7 +247,8 @@ export default function Gateway() {
         <CardHeader>
           <CardTitle>模型管理</CardTitle>
           <CardDescription>对客户端可见的模型列表</CardDescription>
-          <div className="flex justify-end">
+          <div className="flex justify-end gap-2">
+            <Button size="sm" variant="outline" onClick={syncAll}>立即同步</Button>
             <Button size="sm" onClick={() => setModelDialog(true)}>新增模型</Button>
           </div>
         </CardHeader>
@@ -217,6 +258,7 @@ export default function Gateway() {
               <TableRow>
                 <TableHead>模型名</TableHead>
                 <TableHead>显示名</TableHead>
+                <TableHead>能力</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
@@ -225,6 +267,7 @@ export default function Gateway() {
                 <TableRow key={m.id}>
                   <TableCell className="font-mono">{m.name}</TableCell>
                   <TableCell>{m.display_name}</TableCell>
+                  <TableCell className="font-mono text-xs text-muted-foreground">{formatCaps(m.default_params)}</TableCell>
                   <TableCell className="text-right">
                     <Button size="sm" variant="destructive" onClick={() => deleteModel(m.id)}>删除</Button>
                   </TableCell>
@@ -239,6 +282,17 @@ export default function Gateway() {
         <DialogContent>
           <DialogHeader><DialogTitle>添加上游</DialogTitle></DialogHeader>
           <div className="space-y-3">
+            <div className="space-y-1">
+              <Label>渠道</Label>
+              <Select value={provForm.channel} onValueChange={(v) => setProvForm({ ...provForm, channel: v })}>
+                <SelectTrigger><SelectValue placeholder="选择渠道" /></SelectTrigger>
+                <SelectContent>
+                  {channels.map((c) => (
+                    <SelectItem key={c} value={c}>{c}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             <div className="space-y-1">
               <Label>名称(如 deepseek)</Label>
               <Input value={provForm.name} onChange={(e) => setProvForm({ ...provForm, name: e.target.value })} />
