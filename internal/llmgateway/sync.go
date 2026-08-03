@@ -57,6 +57,10 @@ func SyncProvider(db *sql.DB, ch channels.Channel, p *serverstore.GatewayProvide
 	if err != nil {
 		return SyncResult{Provider: p.Name, Error: err.Error()}
 	}
+	// 空列表可能是上游瞬时异常,不当作"模型全部下架"清空目录
+	if len(models) == 0 {
+		return SyncResult{Provider: p.Name, Added: 0, Removed: 0}
+	}
 	cl, mo := ch.DefaultModelCaps()
 	type caps struct {
 		ContextLength int64 `json:"context_length"`

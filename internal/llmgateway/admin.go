@@ -152,10 +152,13 @@ func createProvider(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 		return
 	}
-	// 同步 models 表:provider 的模型清单即客户端可见模型(单一数据源)
-	if err := serverstore.SyncProviderModels(db, p.ID, req.Models); err != nil {
-		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "模型同步失败")
-		return
+	// 同步 models 表:provider 的模型清单即客户端可见模型(单一数据源)。
+	// channel provider 的模型由渠道同步维护,不走 provider.models 列表覆盖
+	if p.Channel == "" {
+		if err := serverstore.SyncProviderModels(db, p.ID, req.Models); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "模型同步失败")
+			return
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(*p, true)})
 }
@@ -209,10 +212,13 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 		return
 	}
-	// 模型清单变更同步到 models 表(单一数据源)
-	if err := serverstore.SyncProviderModels(db, p.ID, p.Models); err != nil {
-		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "模型同步失败")
-		return
+	// 模型清单变更同步到 models 表(单一数据源)。
+	// channel provider 的模型由渠道同步维护,不走 provider.models 列表覆盖
+	if p.Channel == "" {
+		if err := serverstore.SyncProviderModels(db, p.ID, p.Models); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "模型同步失败")
+			return
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(*p, true)})
 }
