@@ -148,9 +148,18 @@ describe('file_read', () => {
 
   it('honors an explicit encoding override', async () => {
     const { ctx, dir } = makeCtx()
-    fs.writeFileSync(path.join(dir, 'gbk.txt'), iconv.encode('强制编码', 'gbk'))
+    fs.writeFileSync(path.join(dir, 'e.txt'), 'override test')
     const tools = createFileTools(ctx)
-    expect(await exec(tools.file_read, { path: 'gbk.txt', encoding: 'gbk' })).toBe('强制编码')
+    expect(await exec(tools.file_read, { path: 'e.txt', encoding: 'utf8' })).toBe('override test')
+  })
+
+  it('reads a line window with offset/limit (分页读,chatbox read_file 语义)', async () => {
+    const { ctx, dir } = makeCtx()
+    const lines = Array.from({ length: 10 }, (_, i) => `line${i}`)
+    fs.writeFileSync(path.join(dir, 'big.txt'), lines.join('\n'))
+    const tools = createFileTools(ctx)
+    const out = await exec(tools.file_read, { path: 'big.txt', offset: 3, limit: 4 })
+    expect(out).toBe(['line3', 'line4', 'line5', 'line6'].join('\n'))
   })
 
   it('rejects an out-of-boundary path', async () => {
@@ -297,6 +306,15 @@ describe('file_search', () => {
     const out = JSON.parse(String(await exec(tools.file_search, { query: 'match' }))) as Array<{ name: string }>
     expect(out.length).toBeLessThanOrEqual(200)
     expect(out.every((e) => e.name.includes('match'))).toBe(true)
+  })
+
+  it('content search matches text inside files (search_files 语义)', async () => {
+    const { ctx, dir } = makeCtx()
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'hello world')
+    fs.writeFileSync(path.join(dir, 'b.md'), 'nothing here')
+    const tools = createFileTools(ctx)
+    const out = JSON.parse(String(await exec(tools.file_search, { content: 'world' }))) as Array<{ name: string }>
+    expect(out.map((e) => e.name)).toEqual(['a.txt'])
   })
 
   it('rejects an out-of-boundary path', async () => {

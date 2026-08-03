@@ -84,12 +84,21 @@ async function readTextFile(absPath: string, forced?: string): Promise<string> {
 export function createFileTools(ctx: FileToolContext): Record<string, Tool> {
   return {
     file_read: tool({
-      description: '读取文本文件,自动检测编码(UTF-8/UTF-16 BOM/GBK);.docx 自动抽取纯文本',
+      description: '读取文本文件,自动检测编码(UTF-8/UTF-16 BOM/GBK);.docx 自动抽取纯文本;offset/limit 按行分页读大文件',
       inputSchema: z.object({
         path: z.string().describe('文件路径(相对 cwd 或绝对路径)'),
         encoding: z.string().optional().describe('强制编码,如 gbk/utf8;缺省自动检测'),
+        offset: z.number().int().min(0).optional().describe('起始行号(0 起),缺省从头'),
+        limit: z.number().int().min(1).max(5000).optional().describe('读取行数,缺省全部'),
       }),
-      execute: async ({ path: p, encoding }) => readTextFile(resolvePath(ctx, p), encoding),
+      execute: async ({ path: p, encoding, offset, limit }) => {
+        const text = await readTextFile(resolvePath(ctx, p), encoding)
+        if (offset === undefined && limit === undefined) return text
+        const lines = text.split('\n')
+        const start = offset ?? 0
+        const end = limit === undefined ? lines.length : Math.min(lines.length, start + limit)
+        return lines.slice(start, end).join('\n')
+      },
     }),
 
     file_write: tool({
@@ -176,18 +185,29 @@ export function createFileTools(ctx: FileToolContext): Record<string, Tool> {
     }),
 
     file_search: tool({
-      description: '按文件名子串搜索文件(大小写不敏感,递归,最多 200 条)',
+      description: '搜索文件:按文件名子串(query)或文件内容(content,正则)匹配,大小写不敏感,递归,最多 200 条',
       inputSchema: z.object({
-        query: z.string().describe('文件名子串'),
+        query: z.string().optional().describe('文件名子串(与 content 二选一,可同时给:先按文件名过滤再按内容匹配)'),
+        content: z.string().optional().describe('文件内容正则(chatbox search_files 语义;仅扫文本文件,单文件 ≤1MB)'),
         path: z.string().optional().describe('搜索起始目录(相对 cwd 或绝对路径),缺省为 cwd'),
         recursive: z.boolean().optional().describe('是否递归子目录,默认 true'),
       }),
-      execute: async ({ query, path: p, recursive }) => {
+      execute: async ({ query, content, path: p, recursive }) => {
         const abs = resolvePath(ctx, p ?? '')
-        const q = query.toLowerCase()
+        const q = (query ?? '').toLowerCase()
+        let contentRe: RegExp | null = null
+        if (content) {
+          try {
+            contentRe = new RegExp(content, 'i')
+          } catch {
+            throw new ToolError(`非法正则: ${content.slice(0, 50)}`)
+          }
+        }
+        if (!q && !contentRe) throw new ToolError('请提供 query(文件名)或 content(内容)')
         const out: FileEntry[] = []
         const stack: string[] = [abs]
         const rec = recursive ?? true
+        const MAX_FILE_BYTES = 1024 * 1024
         while (stack.length > 0 && out.length < MAX_SEARCH_RESULTS) {
           const dir = stack.pop() as string
           for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -195,9 +215,21 @@ export function createFileTools(ctx: FileToolContext): Record<string, Tool> {
             const full = path.join(dir, ent.name)
             const isDir = ent.isDirectory()
             if (isDir && rec) stack.push(full)
-            if (!ent.name.toLowerCase().includes(q)) continue
+            if (isDir) continue
+            if (q && !ent.name.toLowerCase().includes(q)) continue
+            if (contentRe) {
+              const st = fs.statSync(full)
+              if (st.size > MAX_FILE_BYTES) continue
+              let text = ''
+              try {
+                text = fs.readFileSync(full, 'utf8')
+              } catch {
+                continue
+              }
+              if (!contentRe.test(text)) continue
+            }
             const entry: FileEntry = { name: ent.name, path: full, isDir }
-            if (!isDir) entry.size = fs.statSync(full).size
+            entry.size = fs.statSync(full).size
             out.push(entry)
           }
         }
