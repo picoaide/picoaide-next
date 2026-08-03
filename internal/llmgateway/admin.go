@@ -265,10 +265,11 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 	}
 	allowPrivate := settings["web.allow_private"] == "true"
 	c.JSON(http.StatusOK, gin.H{
-		"default_model":   settings["gateway.default_model"],
-		"rate_limit":      rateLimit,
-		"allow_private":   allowPrivate,
-		"search_endpoint": settings["web.search_endpoint"],
+		"default_model":    settings["gateway.default_model"],
+		"rate_limit":       rateLimit,
+		"allow_private":    allowPrivate,
+		"search_endpoint":  settings["web.search_endpoint"],
+		"server_base_url":  settings["server.base_url"],
 	})
 }
 
@@ -279,6 +280,7 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		RateLimit      string `json:"rate_limit"`
 		AllowPrivate   bool   `json:"allow_private"`
 		SearchEndpoint string `json:"search_endpoint"`
+		ServerBaseURL  string `json:"server_base_url"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
@@ -313,6 +315,13 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	if err := serverstore.SetSetting(db, "web.search_endpoint", req.SearchEndpoint); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 		return
+	}
+	if req.ServerBaseURL != "" {
+		// 对外 HTTPS 地址(经 Caddy 反代后的访问入口),webadmin 配置展示用
+		if err := serverstore.SetSetting(db, "server.base_url", req.ServerBaseURL); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

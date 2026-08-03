@@ -146,6 +146,15 @@ func TestAdminModelsAndDefaultModel(t *testing.T) {
 	if w.Code != http.StatusOK || out["default_model"] != "deepseek-chat" || out["allow_private"] != true {
 		t.Fatalf("gateway config: %d %v", w.Code, out)
 	}
+	// server_base_url:对外 HTTPS 地址,webadmin 配置并读回
+	w, _ = adminReq(t, r, "PUT", "/api/admin/gateway", `{"server_base_url":"https://picoaide.example.com"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("set server_base_url: %d %s", w.Code, w.Body.String())
+	}
+	w, out = adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	if w.Code != http.StatusOK || out["server_base_url"] != "https://picoaide.example.com" {
+		t.Fatalf("server_base_url not persisted: %d %v", w.Code, out)
+	}
 	// delete model
 	if w, _ := adminReq(t, r, "DELETE", "/api/admin/models/1", "", hdr); w.Code != http.StatusOK {
 		t.Fatalf("delete model: %d", w.Code)

@@ -27,7 +27,7 @@ interface Model {
 export default function Gateway() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [models, setModels] = useState<Model[]>([])
-  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', allow_private: false, search_endpoint: '' })
+  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', allow_private: false, search_endpoint: '', server_base_url: '' })
   const [error, setError] = useState('')
   const [okMsg, setOkMsg] = useState('')
 
@@ -154,6 +154,14 @@ export default function Gateway() {
               <Input placeholder="https://search.example.com/q" value={cfg.search_endpoint}
                 onChange={(e) => setCfg({ ...cfg, search_endpoint: e.target.value })} />
             </div>
+          </div>
+          <div className="space-y-1">
+            <Label>对外访问地址 (Server Base URL)</Label>
+            <Input placeholder="https://picoaide.example.com" value={cfg.server_base_url}
+              onChange={(e) => setCfg({ ...cfg, server_base_url: e.target.value })} />
+            <p className="text-xs text-muted-foreground">
+              客户端登录与员工访问入口(经 Caddy HTTPS 反代后的地址);填写后管理页顶部展示
+            </p>
           </div>
           <Button onClick={saveGateway}>保存</Button>
         </CardContent>
