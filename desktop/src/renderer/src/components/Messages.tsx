@@ -24,7 +24,6 @@ export default function Messages({ messages, streaming, streamingText, streaming
   const deferredStreaming = useDeferredValue(streamingText)
   const deferredReasoning = useDeferredValue(streamingReasoning)
   const [editingId, setEditingId] = useState<number | null>(null)
-  console.warn("MSG-MOUNT", Date.now())
   const [editValue, setEditValue] = useState('')
 
   useEffect(() => {
@@ -43,14 +42,10 @@ export default function Messages({ messages, streaming, streamingText, streaming
   }
 
   const startEdit = (m: ChatMessage) => {
-    console.warn('START-EDIT', m.id, '->', m.content.slice(0, 10))
     setEditingId(m.id)
     setEditValue(m.content)
   }
-  const setEditIdWrapped = (v: number | null) => {
-    console.warn('SET-EDITING', v)
-    setEditingId(v)
-  }
+
 
   const saveEdit = (m: ChatMessage) => {
     setEditingId(null)
@@ -89,7 +84,7 @@ export default function Messages({ messages, streaming, streamingText, streaming
                       e.preventDefault()
                       saveEdit(m)
                     }
-                    if (e.key === 'Escape') setEditIdWrapped(null)
+                    if (e.key === 'Escape') setEditingId(null)
                   }}
                 />
               </div>
