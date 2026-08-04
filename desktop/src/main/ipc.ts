@@ -26,6 +26,7 @@ export interface ConversationRow {
   archived: number
   created_at: string
   updated_at: string
+  preview?: string | null
 }
 
 export interface ProjectRow {

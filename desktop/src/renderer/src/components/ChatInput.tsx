@@ -2,15 +2,17 @@ import { useEffect, useRef, useState } from 'react'
 import { FileText, Square, Send, Sparkles } from 'lucide-react'
 import { Button } from './ui/button'
 import { Textarea } from './ui/textarea'
+import { Tabs, TabsList, TabsTrigger } from './ui/tabs'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip'
 import { cn } from '../lib/utils'
 import { useChatStore, type Mode } from '../stores/chat'
 
 import { parseCommandLine, parseMentionLine, type ChatboxLine } from '../lib/chatbox'
 
-const MODES: { id: Mode; label: string; available: boolean }[] = [
-  { id: 'ask', label: 'Ask', available: true },
-  { id: 'plan', label: 'Plan', available: true },
-  { id: 'craft', label: 'Craft', available: true },
+const MODES: { id: Mode; label: string; hint: string }[] = [
+  { id: 'ask', label: 'Ask', hint: '直接回答,不调用任何本地工具' },
+  { id: 'plan', label: 'Plan', hint: '先制定执行计划,你确认后再执行' },
+  { id: 'craft', label: 'Craft', hint: '完整智能体:自主调用文件/终端/浏览器等工具完成任务' },
 ]
 
 const MAX_ROWS = 8
@@ -167,19 +169,20 @@ export default function ChatInput() {
     <div className="border-t bg-background px-4 py-3">
       <div className="mx-auto flex max-w-3xl flex-col gap-2">
         <div className="flex items-center gap-1">
-          {MODES.map((m) => (
-            <Button
-              key={m.id}
-              type="button"
-              size="sm"
-              variant={mode === m.id ? 'default' : 'ghost'}
-              disabled={!m.available}
-              title={m.available ? undefined : '即将推出'}
-              onClick={() => setMode(m.id)}
-            >
-              {m.label}
-            </Button>
-          ))}
+          <Tabs value={mode} onValueChange={(v) => setMode(v as Mode)}>
+            <TabsList>
+              <TooltipProvider delayDuration={300}>
+                {MODES.map((m) => (
+                  <Tooltip key={m.id}>
+                    <TooltipTrigger asChild>
+                      <TabsTrigger value={m.id}>{m.label}</TabsTrigger>
+                    </TooltipTrigger>
+                    <TooltipContent>{m.hint}</TooltipContent>
+                  </Tooltip>
+                ))}
+              </TooltipProvider>
+            </TabsList>
+          </Tabs>
         </div>
         {planning ? (
           <div className="flex items-center justify-center gap-3 rounded-md border bg-muted/30 px-3 py-3">

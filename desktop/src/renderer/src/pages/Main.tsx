@@ -24,8 +24,10 @@ import Messages from '../components/Messages'
 import SearchDialog from '../components/SearchDialog'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore, type ProjectView } from '../stores/chat'
+import type { ConversationRow } from '../../../main/ipc'
 import { useConnectionStore } from '../stores/connection'
 import { useToastStore } from '../stores/toast'
+import { formatRelativeTime } from '../lib/time'
 import { cn } from '../lib/utils'
 
 export default function Main({ onOpenSettings }: { onOpenSettings: () => void }) {
@@ -54,6 +56,7 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
   const [renamingId, setRenamingId] = useState<number | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [showArchived, setShowArchived] = useState(false)
+  const [showUncategorized, setShowUncategorized] = useState(true)
   const [showSearch, setShowSearch] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null)
   const [showBrowserHelp, setShowBrowserHelp] = useState(false)
@@ -121,7 +124,7 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
   const conversationsOf = (projectId: number | null) =>
     conversations.filter((c) => (projectId === null ? c.project_id == null : c.project_id === projectId) && c.archived === 0)
 
-  const renderConversationRow = (c: { id: number; title: string; starred?: number; archived?: number }) => {
+  const renderConversationRow = (c: ConversationRow) => {
     const startRename = () => {
       setRenamingId(c.id)
       setRenameValue(c.title)
@@ -163,16 +166,20 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
       <div
         key={c.id}
         className={cn(
-          'group ml-4 mb-1 flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-sm hover:bg-accent',
+          'group relative ml-4 mb-1 flex cursor-pointer flex-col rounded-md px-3 py-1.5 text-sm hover:bg-accent',
           c.id === activeId && 'bg-accent'
         )}
         onClick={() => void selectConversation(c.id)}
       >
-        <span className="flex min-w-0 items-center gap-1">
-          {c.starred === 1 && <Pin className="h-3 w-3 shrink-0 text-amber-500" />}
-          <span className="truncate">{c.title || '新会话'}</span>
-        </span>
-        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
+        <div className="flex min-w-0 items-center justify-between gap-1">
+          <span className="flex min-w-0 items-center gap-1">
+            {c.starred === 1 && <Pin className="h-3 w-3 shrink-0 text-amber-500" />}
+            <span className="truncate">{c.title || '新会话'}</span>
+          </span>
+          <span className="shrink-0 text-[10px] text-muted-foreground">{formatRelativeTime(c.updated_at)}</span>
+        </div>
+        {c.preview && <div className="mt-0.5 truncate text-xs text-muted-foreground">{c.preview}</div>}
+        <div className="absolute right-1.5 top-1.5 flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="icon" className="h-6 w-6" title="更多操作">
@@ -299,8 +306,14 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
             {projects.map(renderProjectGroup)}
             {conversationsOf(null).length > 0 && (
               <>
-                <div className="mb-1 mt-2 px-3 py-1 text-xs text-muted-foreground">未分类</div>
-                {conversationsOf(null).map(renderConversationRow)}
+                <div
+                  className="mb-1 mt-2 flex cursor-pointer items-center gap-1 px-3 py-1 text-xs text-muted-foreground hover:text-foreground"
+                  onClick={() => setShowUncategorized((v) => !v)}
+                >
+                  {showUncategorized ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                  未分类 ({conversationsOf(null).length})
+                </div>
+                {showUncategorized && conversationsOf(null).map(renderConversationRow)}
               </>
             )}
             {conversations.some((c) => c.archived === 1) && (

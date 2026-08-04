@@ -14,6 +14,7 @@ export interface ConversationRow {
   archived: number
   created_at: string
   updated_at: string
+  preview?: string | null
 }
 
 export interface CreateConversationInput {
@@ -36,7 +37,15 @@ export function setConversationWorkspace(db: Database.Database, id: number, work
 }
 
 export function listConversations(db: Database.Database): ConversationRow[] {
-  return db.prepare('SELECT * FROM conversations ORDER BY updated_at DESC, id DESC').all() as ConversationRow[]
+  return db
+    .prepare(
+      `SELECT c.*,
+        (SELECT substr(m.content, 1, 60) FROM messages m
+          WHERE m.conversation_id = c.id AND m.role = 'assistant' AND m.content <> ''
+          ORDER BY m.id DESC LIMIT 1) AS preview
+        FROM conversations c ORDER BY c.updated_at DESC, c.id DESC`,
+    )
+    .all() as ConversationRow[]
 }
 
 export function getConversation(db: Database.Database, id: number): ConversationRow | null {

@@ -44,6 +44,19 @@ describe('conversations', () => {
     }
   })
 
+  it('listConversations includes the latest assistant message preview per conversation', async () => {
+    const { db, cleanup } = openTestDb()
+    try {
+      const cid = createConversation(db, { title: 'c' })
+      appendMessage(db, { conversationId: cid, role: 'user', content: '帮我写周报' })
+      appendMessage(db, { conversationId: cid, role: 'assistant', content: '这是本周的周报草稿,请查收。'.repeat(5) })
+      const rows = listConversations(db)
+      expect(rows[0].preview).toBe('这是本周的周报草稿,请查收。'.repeat(5).slice(0, 60))
+    } finally {
+      cleanup()
+    }
+  })
+
   it('getConversation returns null for missing id', () => {
     const { db, cleanup } = openTestDb()
     try {
