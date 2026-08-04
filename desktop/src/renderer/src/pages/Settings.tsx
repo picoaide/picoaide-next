@@ -14,7 +14,7 @@ import {
   DialogTitle,
 } from '../components/ui/dialog'
 import { useAuthStore } from '../stores/auth'
-import { useToastStore } from '../stores/toast'
+import { toast } from 'sonner'
 import { pluginApi } from '../plugin-api'
 import { errCode } from '../api/picoaide'
 import type { McpListResult, McpRiskInfo, SettingsInfo, SkillRiskInfo, SkillsListResult } from '../../../main/plugin_ipc'
@@ -214,7 +214,7 @@ export default function Settings({ onBack }: { onBack: () => void }) {
                   title="复制服务器地址"
                   onClick={() => {
                     void navigator.clipboard.writeText(info.serverURL!)
-                    useToastStore.getState().show('服务器地址已复制')
+                    toast('服务器地址已复制')
                   }}
                 >
                   <Copy className="h-3 w-3" />

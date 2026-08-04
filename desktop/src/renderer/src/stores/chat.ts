@@ -89,6 +89,9 @@ interface ChatState {
   quoteMessage: (content: string) => void
   pendingQuote: string | null
   consumeQuote: () => string | null
+  pendingPrompt: string | null
+  applyPrompt: (text: string) => void
+  consumePrompt: () => string | null
   checkInterrupted: () => Promise<void>
   onInterrupted: (list: ConversationRow[]) => void
   clearInterrupted: () => void
@@ -122,6 +125,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   loadedTotal: 0,
   loadingEarlier: false,
   pendingQuote: null,
+  pendingPrompt: null,
 
   newConversation: async () => {
     const id = await picoaide().chatNew({ mode: get().mode, projectId: get().activeProjectId })
@@ -300,6 +304,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const q = get().pendingQuote
     set({ pendingQuote: null })
     return q
+  },
+
+  // 空状态示例提示词:点击填入输入框(与 quote 同机制,一次消费)
+  applyPrompt: (text) => set({ pendingPrompt: text }),
+  consumePrompt: () => {
+    const p = get().pendingPrompt
+    set({ pendingPrompt: null })
+    return p
   },
 
   deleteMessage: async (messageId) => {

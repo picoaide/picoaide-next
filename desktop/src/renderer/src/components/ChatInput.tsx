@@ -69,6 +69,17 @@ export default function ChatInput() {
     }
   }, [pendingQuote, consumeQuote])
 
+  // 空状态示例提示词:点击后填入输入框
+  const pendingPrompt = useChatStore((s) => s.pendingPrompt)
+  const consumePrompt = useChatStore((s) => s.consumePrompt)
+  useEffect(() => {
+    if (pendingPrompt) {
+      setValue((v) => (v.length === 0 ? pendingPrompt : v))
+      consumePrompt()
+      textareaRef.current?.focus()
+    }
+  }, [pendingPrompt, consumePrompt])
+
   // / 命令候选 = 本地已装技能(服务端 bootstrap.skills 只是商店建议清单,未安装的不可用)
   const commandItems = installedSkills
   const line: ChatboxLine =

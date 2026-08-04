@@ -26,7 +26,7 @@ import { useAuthStore } from '../stores/auth'
 import { useChatStore, type ProjectView } from '../stores/chat'
 import type { ConversationRow } from '../../../main/ipc'
 import { useConnectionStore } from '../stores/connection'
-import { useToastStore } from '../stores/toast'
+import { toast } from 'sonner'
 import { formatRelativeTime } from '../lib/time'
 import { cn } from '../lib/utils'
 
@@ -138,9 +138,9 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
       const md = await window.picoaide.chatExport(c.id)
       try {
         await navigator.clipboard.writeText(md)
-        useToastStore.getState().show('已复制到剪贴板')
+        toast('已复制到剪贴板')
       } catch {
-        useToastStore.getState().show('导出失败')
+        toast('导出失败', { description: '请检查剪贴板权限' })
       }
     }
     if (renamingId === c.id) {

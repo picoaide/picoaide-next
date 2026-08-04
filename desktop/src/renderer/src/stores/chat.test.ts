@@ -113,6 +113,13 @@ describe('chat store', () => {
     expect(useChatStore.getState().conversations[0].title).toBe('修复登录页样式')
   })
 
+  it('applyPrompt queues a prompt consumed once by ChatInput', () => {
+    useChatStore.getState().applyPrompt('帮我整理桌面文件')
+    expect(useChatStore.getState().pendingPrompt).toBe('帮我整理桌面文件')
+    expect(useChatStore.getState().consumePrompt()).toBe('帮我整理桌面文件')
+    expect(useChatStore.getState().consumePrompt()).toBeNull()
+  })
+
   it('sendMessage creates a conversation when none is active and calls chatAsk', async () => {
     await useChatStore.getState().sendMessage('你好')
     expect(fake.api.chatNew).toHaveBeenCalled()

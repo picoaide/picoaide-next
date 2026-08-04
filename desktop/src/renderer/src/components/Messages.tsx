@@ -1,10 +1,11 @@
 import { useDeferredValue, useEffect, useRef, useState } from 'react'
-import { Check, Copy, MessageSquareQuote, Pencil, RefreshCw, Trash2 } from 'lucide-react'
+import { Check, Copy, FileText, MessageSquareQuote, Pencil, RefreshCw, Sparkles, Trash2 } from 'lucide-react'
 import { ScrollArea } from './ui/scroll-area'
 import { cn } from '../lib/utils'
 import ToolCalls from './ToolCalls'
 import Markdown from './Markdown'
 import { Button } from './ui/button'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip'
 import { useChatStore, type ChatMessage, type ToolCallView } from '../stores/chat'
 import ConfirmDialog from './ConfirmDialog'
 
@@ -37,9 +38,36 @@ export default function Messages({ messages, streaming, streamingText, streaming
   }, [messages, streamingText, streamingReasoning, toolCalls])
 
   if (messages.length === 0 && !streaming && !error) {
+    const EXAMPLES: { icon: typeof FileText; title: string; prompt: string }[] = [
+      { icon: FileText, title: '整理文档', prompt: '帮我总结 /tmp 下的周报文件,输出要点清单' },
+      { icon: RefreshCw, title: '处理表格', prompt: '读取工作目录里的 Excel,按部门汇总销售额' },
+      { icon: Trash2, title: '清理文件', prompt: '列出工作目录中的临时文件,确认后删除' },
+      { icon: Sparkles, title: '生成报告', prompt: '根据最近的对话内容生成一份项目周报' },
+    ]
     return (
-      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-        开始与 PicoAide 对话吧
+      <div className="flex h-full flex-col items-center justify-center gap-6 p-6">
+        <div className="text-center">
+          <h2 className="text-lg font-semibold">开始与 PicoAide 对话吧</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Agent 运行在本机,可安全操作你的文件、终端与浏览器
+          </p>
+        </div>
+        <div className="grid w-full max-w-xl grid-cols-2 gap-3">
+          {EXAMPLES.map((e) => (
+            <button
+              key={e.title}
+              type="button"
+              className="group rounded-md border bg-card p-3 text-left text-sm transition-colors hover:border-ring hover:bg-accent"
+              onClick={() => useChatStore.getState().applyPrompt(e.prompt)}
+            >
+              <div className="flex items-center gap-2 font-medium">
+                <e.icon className="h-4 w-4 text-muted-foreground group-hover:text-foreground" />
+                {e.title}
+              </div>
+              <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{e.prompt}</p>
+            </button>
+          ))}
+        </div>
       </div>
     )
   }
@@ -199,61 +227,63 @@ function Bubble({
         </div>
         {showActions && (
           <div className="mt-0.5 flex items-center gap-1 text-muted-foreground opacity-0 transition-opacity group-hover/message:opacity-100">
-            <button
-              type="button"
-              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs hover:bg-accent hover:text-foreground"
-              onClick={() => void copy()}
-              title="复制"
-            >
-              {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-              {copied ? '已复制' : '复制'}
-            </button>
-            {message.role === 'assistant' && (
-              <button
-                type="button"
-                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs hover:bg-accent hover:text-foreground"
-                onClick={onRegenerate}
-                title="重新生成"
-              >
-                <RefreshCw className="h-3 w-3" /> 重新生成
-              </button>
-            )}
-            {message.role === 'user' && (
-              <button
-                type="button"
-                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs hover:bg-accent hover:text-foreground"
-                onClick={onEdit}
-                title="编辑"
-              >
-                <Pencil className="h-3 w-3" /> 编辑
-              </button>
-            )}
-            {message.role === 'user' && message.is_error === 1 && (
-              <button
-                type="button"
-                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-destructive hover:bg-destructive/10"
-                onClick={() => void useChatStore.getState().sendMessage(message.content)}
-                title="发送失败,重试"
-              >
-                <RefreshCw className="h-3 w-3" /> 重发
-              </button>
-            )}
-            <button
-              type="button"
-              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs hover:bg-accent hover:text-foreground"
-              onClick={onQuote}
-              title="引用"
-            >
-              <MessageSquareQuote className="h-3 w-3" /> 引用
-            </button>
-            <button
-              type="button"
-              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs hover:bg-destructive/10 hover:text-destructive"
-              onClick={onDelete}
-              title="删除"
-            >
-              <Trash2 className="h-3 w-3" /> 删除
-            </button>
+            <TooltipProvider delayDuration={300}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button type="button" variant="ghost" size="sm" className="h-6 px-1.5 text-xs font-normal" onClick={() => void copy()}>
+                    {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                    {copied ? '已复制' : '复制'}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>复制消息内容</TooltipContent>
+              </Tooltip>
+              {message.role === 'assistant' && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button type="button" variant="ghost" size="sm" className="h-6 px-1.5 text-xs font-normal" onClick={onRegenerate}>
+                      <RefreshCw className="h-3 w-3" /> 重新生成
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>截断并重跑最后一条消息</TooltipContent>
+                </Tooltip>
+              )}
+              {message.role === 'user' && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button type="button" variant="ghost" size="sm" className="h-6 px-1.5 text-xs font-normal" onClick={onEdit}>
+                      <Pencil className="h-3 w-3" /> 编辑
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>修改后重新生成回复</TooltipContent>
+                </Tooltip>
+              )}
+              {message.role === 'user' && message.is_error === 1 && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button type="button" variant="ghost" size="sm" className="h-6 px-1.5 text-xs font-normal text-destructive hover:bg-destructive/10" onClick={() => void useChatStore.getState().sendMessage(message.content)}>
+                      <RefreshCw className="h-3 w-3" /> 重发
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>发送失败,点击重试</TooltipContent>
+                </Tooltip>
+              )}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button type="button" variant="ghost" size="sm" className="h-6 px-1.5 text-xs font-normal" onClick={onQuote}>
+                    <MessageSquareQuote className="h-3 w-3" /> 引用
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>以引用格式插入输入框</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button type="button" variant="ghost" size="sm" className="h-6 px-1.5 text-xs font-normal hover:bg-destructive/10 hover:text-destructive" onClick={onDelete}>
+                    <Trash2 className="h-3 w-3" /> 删除
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>删除这条消息</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
           </div>
         )}
       </div>

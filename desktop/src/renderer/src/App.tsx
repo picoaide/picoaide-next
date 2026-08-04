@@ -5,7 +5,7 @@ import Settings from './pages/Settings'
 import { useAuthStore } from './stores/auth'
 import { useChatStore } from './stores/chat'
 import { useConnectionStore } from './stores/connection'
-import Toast from './components/Toast'
+import { Toaster } from './components/ui/sonner'
 
 export default function App() {
   const authStatus = useAuthStore((s) => s.status)
@@ -74,7 +74,7 @@ export default function App() {
       ) : (
         <Main onOpenSettings={() => setView('settings')} />
       )}
-      <Toast />
+      <Toaster />
     </>
   )
 }
