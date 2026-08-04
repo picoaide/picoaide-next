@@ -328,9 +328,10 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
           <header className="flex items-center justify-between border-b px-4 py-2">
             <span className="truncate text-sm text-muted-foreground">
               {activeProject ? `${activeProject.name} · ` : ''}
-              {modelName}
-            </span>
-            <div className="flex items-center gap-2">
+              <Badge variant="outline" title="模型由管理员在服务端统一配置">
+                {modelName}
+              </Badge>
+            </span>            <div className="flex items-center gap-2">
               <Badge variant={browserConnected ? 'success' : 'outline'} title="浏览器插件桥(127.0.0.1:54321)">
                 <Globe className="mr-1 h-3 w-3" />
                 {browserConnected ? '浏览器已连接' : '浏览器未连接'}
@@ -355,10 +356,10 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
                   onLoadEarlier={() => void loadEarlierMessages()}
                 />
               </div>
-              <ChatInput />
-            </div>
-            <ArtifactsPanel artifacts={artifacts} />
+            <ChatInput />
           </div>
+          {artifacts.length > 0 && <ArtifactsPanel artifacts={artifacts} />}
+        </div>
         </main>
       </div>
       <ConfirmModal />
