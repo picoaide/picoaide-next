@@ -148,6 +148,10 @@ export class AgentEngine {
   private deps: EngineDeps
   private pendingApprovals = new Map<string, PendingApproval>()
   private currentAbort: AbortController | null = null
+  // 排队消息(回复中用户发新消息 → 当前步骤完成后处理,不打断):落库立即、处理在轮末
+  private pendingQueue: Array<{ conversationId: number; content: string }> = []
+  // 当前运行任务所属会话(队列仅对运行会话开放)
+  private runningConversationId: number | null = null
   // 测试钩子:1=自动允许 0=自动拒绝,仅 env 显式设置时生效。
   // ponytail: 打包剔除靠 electron-vite/electron-builder 构建不含该 env;如需硬剔除可在 CI 构建脚本 `export -n PICOAI_TEST_AUTO_APPROVE`
   private testAutoApprove: boolean | undefined
@@ -166,6 +170,25 @@ export class AgentEngine {
 
   get pendingApprovalCount(): number {
     return this.pendingApprovals.size
+  }
+
+  // 回复中用户发新消息:入队,当前步骤(轮)完成后自动处理,不打断运行。
+  // 仅对正在运行的多步任务(craft/continue)开放;消息立即落库 user 行,
+  // 中断/步数超限后 continue 截断重跑会自然从这条消息继续。
+  queueMessage(conversationId: number, content: string): boolean {
+    if (!this.currentAbort) return false
+    if (this.runningConversationId !== conversationId) return false
+    const store = this.deps.store
+    if (!store?.getConversation(conversationId)) return false
+    store.appendMessage({ conversationId, role: 'user', content })
+    this.pendingQueue.push({ conversationId, content })
+    return true
+  }
+
+  private dequeueMessage(conversationId: number): string | undefined {
+    const idx = this.pendingQueue.findIndex((q) => q.conversationId === conversationId)
+    if (idx === -1) return undefined
+    return this.pendingQueue.splice(idx, 1)[0].content
   }
 
   // 测试钩子:注入的 session.fetch(TOFU 生效);ipc 层断言接线正确
@@ -400,6 +423,7 @@ ${PLAN_SYSTEM_NOTICE}`
   ): Promise<void> {
     const store = this.deps.store as StoreLike
     const abort = this.beginRun()
+    this.runningConversationId = conversationId
     const wrapped = this.wrapTools(tools, conversationId) as ToolSet
 
     let canceled = false
@@ -566,6 +590,12 @@ ${PLAN_SYSTEM_NOTICE}`
           approvalParts.length = 0
           continue
         }
+        // 排队消息:当前步骤完成后处理(用户回复中发的新消息,不打断当前轮)
+        const queued = this.dequeueMessage(conversationId)
+        if (queued !== undefined) {
+          messages.push({ role: 'user', content: queued })
+          continue
+        }
         // 无审批:本轮有工具调用 → 结果已随 response.messages 回传 → 续跑让模型继续;否则完成
         if (!lastStepHadToolCalls) break
       }
@@ -575,6 +605,8 @@ ${PLAN_SYSTEM_NOTICE}`
         this.deps.emit({ type: 'canceled', data: { reason: 'user_canceled' } })
         return
       }
+      // 队列剩余消息(步数耗尽):已在 DB 落库,用户点"继续"从最后一条 user 消息重跑
+      this.pendingQueue = this.pendingQueue.filter((q) => q.conversationId !== conversationId)
       if (steps >= maxSteps && lastStepHadToolCalls) {
         // 步数超限:Agent 还想继续;UI 后续提供"继续/停止"(继续 = 截断到最后一条 user 消息重发 run)
         this.markFailed(store, conversationId)
@@ -584,6 +616,7 @@ ${PLAN_SYSTEM_NOTICE}`
       if (store.getConversation(conversationId)) store.updateConversationStatus(conversationId, finalStatus)
       this.deps.emit({ type: 'done', data: { usage } })
     } finally {
+      if (this.runningConversationId === conversationId) this.runningConversationId = null
       this.currentAbort = null
     }
   }
@@ -692,6 +725,8 @@ ${PLAN_SYSTEM_NOTICE}`
     // 挂起的审批全部按拒绝结清(迟到回执 no-op);循环退出后不续跑
     for (const pending of this.pendingApprovals.values()) pending.resolve(false)
     this.pendingApprovals.clear()
+    // 排队消息清空(已落库的 user 行保留,重跑可继续)
+    this.pendingQueue = []
   }
 
   // ---- 工具包装(事件 + 越界引导;审批由 SDK toolApproval 处理) ----

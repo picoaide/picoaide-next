@@ -32,14 +32,29 @@ class MockProvider {
   specificationVersion = 'v4' as const
   provider = 'mock'
   modelId = 'mock-model'
-  script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang' | 'approval-chain'
+  script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang' | 'approval-chain' | 'gated-tool'
   toolName: string
   toolInput: unknown
   callCount = 0
   prompts: unknown[] = []
+  private gate: Promise<void> | null = null
+  private gateResolve: (() => void) | null = null
+
+  openGate(): void {
+    this.gateResolve?.()
+  }
+
+  private waitGate(): Promise<void> {
+    if (!this.gate) {
+      this.gate = new Promise((resolve) => {
+        this.gateResolve = resolve
+      })
+    }
+    return this.gate
+  }
 
   constructor(
-    script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang' | 'approval-chain' = 'text',
+    script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang' | 'approval-chain' | 'gated-tool' = 'text',
     toolName = 'file_delete',
     toolInput: unknown = { path: '/home/u/x.doc' },
   ) {
@@ -81,6 +96,30 @@ class MockProvider {
   }
 
   private contentFor(prompt: unknown) {
+    if (this.script === 'gated-tool') {
+      // call1:工具调用;call2:挂起等 gate(测试在挂起期间排队消息);call3:文本收尾
+      if (this.callCount === 1) {
+        return [
+          {
+            type: 'tool-call',
+            toolCallId: 'call_1',
+            toolName: this.toolName,
+            input: JSON.stringify(this.toolInput),
+          },
+        ]
+      }
+      if (this.callCount === 2) {
+        return [
+          {
+            type: 'tool-call',
+            toolCallId: 'call_2',
+            toolName: 'file_read',
+            input: JSON.stringify({ path: '/b' }),
+          },
+        ]
+      }
+      return [{ type: 'text', text: 'final answer' }]
+    }
     if (this.script === 'approval-chain') {
       // call1:需审批的工具;call2(审批执行轮,模型被再次调用):发免审批工具;call3:文本收尾
       if (this.callCount === 1) {
@@ -155,6 +194,7 @@ class MockProvider {
   async doStream(options: any) {
     this.callCount++
     this.prompts.push(options.prompt)
+    if (this.script === 'gated-tool' && this.callCount === 2) await this.waitGate()
     if (this.script === 'throw') throw new Error('mock upstream failed')
     if (this.script === 'throw-once' && this.callCount === 1) throw new Error('mock upstream failed')
     if (this.script === 'throw-local') throw new Error('local fs error')
@@ -236,7 +276,7 @@ function makeStore() {
 }
 
 function makeEngine(
-  script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang' | 'approval-chain',
+  script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang' | 'approval-chain' | 'gated-tool',
   cfg: Partial<{ maxSteps: number; approvalTimeoutMs: number; retryCount: number; fetch: typeof fetch }> = {},
   store: ReturnType<typeof makeStore> = makeStore(),
   toolName = 'file_delete',
@@ -489,6 +529,35 @@ describe('AgentEngine craft (store-backed)', () => {
     expect(eventsOf(events, 'error')).toEqual([{ type: 'error', data: '达到最大步骤数' }])
     expect(eventsOf(events, 'done')).toHaveLength(0)
     expect(store.getConversation(1)?.status).toBe('failed')
+  })
+
+  it('queueMessage enqueues to the running conversation and the next step consumes it', async () => {
+    const { mock, events, engine, store } = makeEngine('gated-tool', { maxSteps: 5 }, makeStore(), 'file_read')
+    const run = engine.craft({ conversationId: 1, content: '任务一', tools, highRiskTools: new Set() })
+    // 第二轮模型调用挂起(gate),引擎保持运行:排队接受,立即落库 user 行
+    await waitFor(() => mock.callCount >= 2)
+    expect(engine.queueMessage(1, '排队消息')).toBe(true)
+    expect(store.listMessages(1).some((m) => m.role === 'user' && m.content === '排队消息')).toBe(true)
+    mock.openGate()
+    await run
+    // 排队消息已作为 user 消息推进到下一轮模型调用(第三轮 prompt)
+    const prompts = mock.prompts.map((p) => JSON.stringify(p))
+    expect(prompts[2]?.includes('排队消息')).toBe(true)
+    expect(eventsOf(events, 'done')).toHaveLength(1)
+  })
+
+  it('queueMessage rejects when not running, on another conversation, or after cancel', async () => {
+    const { mock, events, engine, store } = makeEngine('gated-tool', { maxSteps: 5 }, makeStore(), 'file_read')
+    // 未运行:拒绝
+    expect(engine.queueMessage(1, 'x')).toBe(false)
+    const run = engine.craft({ conversationId: 1, content: '任务一', tools, highRiskTools: new Set() })
+    await waitFor(() => mock.callCount >= 2)
+    // 会话不匹配:拒绝
+    expect(engine.queueMessage(999, 'x')).toBe(false)
+    // 取消后:拒绝(队列清空)
+    engine.cancel()
+    await run
+    expect(engine.queueMessage(1, 'x')).toBe(false)
   })
 
   it('deny skips the tool (SDK tool-output-denied) and lets the agent finish', async () => {
