@@ -135,6 +135,9 @@ function startPoller(session: Session) {
       stopPoller()
       clearCaches()
       void clearSession()
+      // token 过期:中止旧引擎(不再用失效 token 重试),并清 MCP 凭证内存(与显式登出一致)
+      resetAgentEngine()
+      clearMcpCredentials()
     }
     mainWindow?.webContents.send('connection:status', status)
   })
@@ -352,6 +355,8 @@ app.whenReady().then(async () => {
     getBootstrap,
     openExternal: (url) => shell.openExternal(url),
     onSessionEstablished: (session) => {
+      // 任何登录/恢复路径都重建引擎:丢弃旧会话引擎(中止其运行,防止旧 token 继续跑)
+      resetAgentEngine()
       startPoller(session)
       lastServerURL = session.serverURL
       setSetting(db, 'last_server_url', session.serverURL)

@@ -164,6 +164,9 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
   // 引擎单例(持有 currentAbort/审批队列);模型经 createModel 惰性创建(登录后 token 就绪)
   let engine: AgentEngine | null = null
   const resetEngine = (): void => {
+    // 登出/换账号/过期:必须先中止运行中的任务(循环、审批、网关调用),
+    // 否则旧引擎继续用旧 token 跑并 emit 事件串到新会话 UI
+    engine?.cancel()
     engine = null
   }
   deps.registerEngineReset?.(resetEngine)

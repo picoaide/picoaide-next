@@ -188,12 +188,12 @@ describe('chat store', () => {
 
   it('onAgentEvent text_delta appends to the streaming text, done finalizes from DB', async () => {
     const id = (await useChatStore.getState().newConversation())!
-    useChatStore.getState().onAgentEvent({ type: 'text_delta', data: '流式' })
-    useChatStore.getState().onAgentEvent({ type: 'text_delta', data: '增量' })
+    useChatStore.getState().onAgentEvent({ conversationId: 1, type: 'text_delta', data: '流式' })
+    useChatStore.getState().onAgentEvent({ conversationId: 1, type: 'text_delta', data: '增量' })
     expect(useChatStore.getState().streamingText).toBe('流式增量')
     // 引擎在 done 前已把 assistant 落库(镜像 fake)
     fake.messages.push({ id: 2, conversation_id: id, role: 'assistant', content: 'answer', reasoning: '', tool_calls: '', tool_call_id: '', tool_name: '', is_error: 0, created_at: '' })
-    const done: AgentEvent = { type: 'done', data: { usage: { prompt_tokens: 1, completion_tokens: 1 } } }
+    const done: AgentEvent = { conversationId: 1, type: 'done', data: { usage: { prompt_tokens: 1, completion_tokens: 1 } } }
     useChatStore.getState().onAgentEvent(done)
     expect(useChatStore.getState().streamingText).toBe('')
     await vi.waitFor(() => {
@@ -203,18 +203,19 @@ describe('chat store', () => {
   })
 
   it('error event surfaces the message and stops streaming', () => {
-    useChatStore.setState({ streaming: true })
-    useChatStore.getState().onAgentEvent({ type: 'error', data: 'upstream 502' })
+    useChatStore.setState({ streaming: true, activeId: 1 })
+    useChatStore.getState().onAgentEvent({ conversationId: 1, type: 'error', data: 'upstream 502' })
     const s = useChatStore.getState()
     expect(s.streaming).toBe(false)
     expect(s.localError).toContain('upstream 502')
   })
 
   it('reasoning_delta appends to streamingReasoning; done clears it', () => {
-    useChatStore.getState().onAgentEvent({ type: 'reasoning_delta', data: '先分析需求' })
-    useChatStore.getState().onAgentEvent({ type: 'reasoning_delta', data: ',再写代码' })
+    useChatStore.setState({ activeId: 1 })
+    useChatStore.getState().onAgentEvent({ conversationId: 1, type: 'reasoning_delta', data: '先分析需求' })
+    useChatStore.getState().onAgentEvent({ conversationId: 1, type: 'reasoning_delta', data: ',再写代码' })
     expect(useChatStore.getState().streamingReasoning).toBe('先分析需求,再写代码')
-    useChatStore.getState().onAgentEvent({ type: 'done', data: {} })
+    useChatStore.getState().onAgentEvent({ conversationId: 1, type: 'done', data: {} })
     expect(useChatStore.getState().streamingReasoning).toBe('')
   })
 
@@ -227,11 +228,25 @@ describe('chat store', () => {
     ])
   })
 
+  it('ignores events from other conversations (stale run after switching)', () => {
+    // 回归:切会话后旧会话运行的迟到事件不得污染当前视图
+    useChatStore.setState({ streaming: true, activeId: 2 })
+    useChatStore.getState().onAgentEvent({ conversationId: 1, type: 'text_delta', data: '旧会话文本' })
+    useChatStore.getState().onAgentEvent({ conversationId: 1, type: 'error', data: '旧会话错误' })
+    useChatStore.getState().onAgentEvent({ conversationId: 1, type: 'done', data: {} })
+    const s = useChatStore.getState()
+    expect(s.streamingText).toBe('')
+    expect(s.localError).toBeNull()
+    // 当前会话(2)的事件正常处理
+    useChatStore.getState().onAgentEvent({ conversationId: 2, type: 'done', data: {} })
+    expect(useChatStore.getState().streaming).toBe(false)
+  })
+
   it('artifact events append live and done reloads from DB', async () => {
     const id = (await useChatStore.getState().newConversation())!
-    useChatStore.getState().onAgentEvent({ type: 'artifact', data: { path: '/w/a.md', type: 'report', size: 1 } })
+    useChatStore.getState().onAgentEvent({ conversationId: id, type: 'artifact', data: { path: '/w/a.md', type: 'report', size: 1 } })
     expect(useChatStore.getState().artifacts.map((a) => a.path)).toEqual(['/w/a.md'])
-    useChatStore.getState().onAgentEvent({ type: 'done', data: {} })
+    useChatStore.getState().onAgentEvent({ conversationId: 1, type: 'done', data: {} })
     await vi.waitFor(() => {
       expect(useChatStore.getState().artifacts).toEqual([])
     })

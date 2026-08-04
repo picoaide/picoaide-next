@@ -303,8 +303,14 @@ async function flushMicrotasks(times = 200): Promise<void> {
   for (let i = 0; i < times; i++) await Promise.resolve()
 }
 
+// 事件契约 v2:引擎自动附加 conversationId(专项测试验证归属),常规断言剥离该字段
 function eventsOf(events: AgentEvent[], type: string) {
-  return events.filter((e) => e.type === type)
+  return events
+    .filter((e) => e.type === type)
+    .map((e) => {
+      const { conversationId: _c, ...rest } = e
+      return rest as AgentEvent
+    })
 }
 
 const fileRead = tool({
@@ -365,7 +371,7 @@ describe('AgentEngine ask mode', () => {
     const { mock, events, engine, store } = makeEngine('text')
     await engine.ask({ conversationId: 1, content: 'hello' })
     expect(eventsOf(events, 'text_delta').map((e) => e.data)).toEqual(['hello world'])
-    const done = events.find((e) => e.type === 'done')
+    const done = eventsOf(events, 'done')[0]
     expect(done).toEqual({ type: 'done', data: { usage: { prompt_tokens: 10, completion_tokens: 5 } } })
     expect(mock.callCount).toBe(1)
     const msgs = store.listMessages(1)
@@ -506,7 +512,7 @@ describe('AgentEngine craft (store-backed)', () => {
       is_error: 0,
     })
     expect(store.getConversation(1)?.status).toBe('done')
-    const done = events.find((e) => e.type === 'done')
+    const done = eventsOf(events, 'done')[0]
     // totalUsage 累计整个多步 run(两轮 10/5)
     expect(done).toEqual({ type: 'done', data: { usage: { prompt_tokens: 20, completion_tokens: 10 } } })
   })
@@ -1256,7 +1262,7 @@ describe('越界引导(boundary guide)', () => {
     const wrapped = engine.wrapToolForTest('file_read', t)
     const run = (wrapped as any).execute({}, { toolCallId: 'call-1' })
     await new Promise((r) => setTimeout(r, 10))
-    const confirm = events.find((e) => e.type === 'confirm_required')
+    const confirm = eventsOf(events, 'confirm_required')[0]
     expect(confirm).toBeDefined()
     const d = (confirm as any).data
     expect(d.op).toBe('allow_dir')

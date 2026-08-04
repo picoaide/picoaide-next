@@ -9,6 +9,8 @@ export interface RunConfig<T extends Record<string, unknown> = Record<string, un
 
 // 只读工具白名单(计划模式):可读文件/搜索/浏览/查知识库,禁止一切写入、执行与浏览器操作。
 // 白名单按工具名前缀/精确名匹配,新增工具默认在计划模式下不可用(安全默认)。
+// 注意:screen_capture/clipboard_read 虽是"读",但属高危敏感操作(架构 §5 审批门控),
+// 不进只读名单 —— 它们在计划模式也要走审批(engine.plan 传 highRiskTools)。
 const READ_ONLY_MATCHERS: Array<{ prefix?: string; exact?: string }> = [
   { exact: 'file_read' },
   { exact: 'file_list' },
@@ -17,8 +19,6 @@ const READ_ONLY_MATCHERS: Array<{ prefix?: string; exact?: string }> = [
   { exact: 'browser_tab_info' },
   { exact: 'browser_get_content' },
   { prefix: 'kb_' },
-  { exact: 'screen_capture' },
-  { exact: 'clipboard_read' },
 ]
 // kb_upload 走 kb_ 前缀但实际是数据外发,计划模式必须排除
 const READ_ONLY_EXCLUDE = new Set(['kb_upload'])

@@ -355,7 +355,7 @@ describe('chat:ask', () => {  it('persists user+assistant messages and streams e
 
     const events = eventsOf(sent)
     expect(events.some((e) => (e as { type: string }).type === 'text_delta')).toBe(true)
-    expect(events.at(-1)).toEqual({ type: 'done', data: { usage: { prompt_tokens: 7, completion_tokens: 3 } } })
+    expect(events.at(-1)).toEqual({ conversationId: id, type: 'done', data: { usage: { prompt_tokens: 7, completion_tokens: 3 } } })
 
     const readBack = await handlers['chat:messages']({ conversationId: id })
     expect(readBack.map((m) => m.role)).toEqual(['user', 'assistant'])

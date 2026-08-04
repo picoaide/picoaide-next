@@ -169,6 +169,12 @@ export class AgentEngine {
     this.testAutoApprove = auto === '1' ? true : auto === '0' ? false : undefined
   }
 
+  // 事件自动附加运行会话 id(renderer 按 activeId 过滤,旧 run 迟到事件不污染新会话 UI);
+  // 未运行(探针/断言错误)时用 0,renderer 侧忽略
+  private emitEvent(ev: Omit<AgentEvent, 'conversationId'>): void {
+    this.deps.emit({ ...ev, conversationId: this.runningConversationId ?? 0 } as AgentEvent)
+  }
+
   get pendingApprovalCount(): number {
     return this.pendingApprovals.size
   }
@@ -203,7 +209,9 @@ export class AgentEngine {
     if (!store) throw new Error('ask requires a store (EngineDeps.store)')
     const { conversationId, content } = input
     this.assertConversation(conversationId)
-    await this.runAskLoop(conversationId, content, 'running', 'done')
+    // 先占运行槽再写 DB
+    const abort = this.acquireRun(conversationId)
+    await this.runAskLoop(conversationId, content, 'running', 'done', abort)
   }
 
   // Plan 模式(对齐 opencode plan agent):只读工具多步调研出计划,不做任何修改;
@@ -214,6 +222,8 @@ export class AgentEngine {
     const { conversationId, content } = input
     const maxSteps = input.maxSteps ?? this.cfg.maxSteps ?? DEFAULT_MAX_STEPS
     this.assertConversation(conversationId)
+    // 先占运行槽再写 DB(单运行守卫失败不落库)
+    const abort = this.acquireRun(conversationId)
     store.updateConversationStatus(conversationId, 'planning')
     // 上下文窗口:发送给 LLM 的历史最多最近 50 条(超出仅存 DB 供 UI 查看)
     const history = historyMessages(store.listMessages(conversationId))
@@ -223,13 +233,24 @@ export class AgentEngine {
     const system = `${this.cfg.sysPrompt}
 
 ${PLAN_SYSTEM_NOTICE}`
-    await this.runCraftLoop(conversationId, messages, tools, new Set(), Math.min(maxSteps, PLAN_MAX_STEPS), 'planning', system)
+    await this.runCraftLoop(
+      conversationId,
+      messages,
+      tools,
+      // 计划(只读)模式也要保留高危审批:screen_capture/clipboard_read 已移出只读名单,
+      // 若工具集仍含它们(调用方传入)则需审批,不得静默免审批执行
+      input.highRiskTools ?? new Set(),
+      Math.min(maxSteps, PLAN_MAX_STEPS),
+      'planning',
+      system,
+      abort,
+    )
   }
 
   private assertConversation(conversationId: number): void {
     const store = this.deps.store
     if (!store?.getConversation(conversationId)) {
-      this.deps.emit({ type: 'error', data: `conversation ${conversationId} not found` })
+      this.emitEvent({ type: 'error', data: `conversation ${conversationId} not found` })
       throw new Error(`conversation ${conversationId} not found`)
     }
   }
@@ -245,21 +266,31 @@ ${PLAN_SYSTEM_NOTICE}`
     return abort
   }
 
+  // 所有任务入口在写 DB 之前先占运行槽:单运行守卫失败时不得留下
+  // "status=running + 孤儿 user 消息"的卡死会话(否则重启后进 interrupted 提示,永久无法恢复)
+  private acquireRun(conversationId: number): AbortController {
+    const abort = this.beginRun()
+    this.runningConversationId = conversationId
+    return abort
+  }
+
   // Ask 与 Plan 首轮共用的单步无工具循环(重试 1 次;cancel → failed)
   private async runAskLoop(
     conversationId: number,
     content: string,
     runStatus: ConversationStatus,
     finalStatus: ConversationStatus,
+    acquiredAbort: AbortController | null = null,
   ): Promise<void> {
     const store = this.deps.store as StoreLike
+    // 入口已 acquireRun 时复用;直接调用(测试)自行占槽
+    const abort = acquiredAbort ?? this.acquireRun(conversationId)
     store.updateConversationStatus(conversationId, runStatus)
     // 上下文窗口:发送给 LLM 的历史最多最近 50 条(超出仅存 DB 供 UI 查看)
     const history = historyMessages(store.listMessages(conversationId))
     store.appendMessage({ conversationId, role: 'user', content })
     const messages: ModelMessage[] = [...lastN(history, DEFAULT_CONTEXT_WINDOW), { role: 'user', content }]
 
-    const abort = this.beginRun()
     let fullText = ''
     let usage: { prompt_tokens: number; completion_tokens: number } = { prompt_tokens: 0, completion_tokens: 0 }
 
@@ -279,9 +310,9 @@ ${PLAN_SYSTEM_NOTICE}`
         for await (const part of result.fullStream) {
           if (part.type === 'text-delta') {
             fullText += part.text
-            this.deps.emit({ type: 'text_delta', data: part.text })
+            this.emitEvent({ type: 'text_delta', data: part.text })
           } else if (part.type === 'reasoning-delta') {
-            this.deps.emit({ type: 'reasoning_delta', data: part.text })
+            this.emitEvent({ type: 'reasoning_delta', data: part.text })
           } else if (part.type === 'finish') {
             usage.prompt_tokens += part.totalUsage?.inputTokens ?? 0
             usage.completion_tokens += part.totalUsage?.outputTokens ?? 0
@@ -313,7 +344,7 @@ ${PLAN_SYSTEM_NOTICE}`
       }
       if (outcome === 'canceled') {
         this.markFailed(store, conversationId)
-        this.deps.emit({ type: 'canceled', data: { reason: 'user_canceled' } })
+        this.emitEvent({ type: 'canceled', data: { reason: 'user_canceled' } })
         return
       }
       if (store.getConversation(conversationId)) {
@@ -323,15 +354,15 @@ ${PLAN_SYSTEM_NOTICE}`
         // 会话中途被删:跳过落库,不崩溃(消息即状态:UI 侧已无此会话)
         console.warn(`[agent] conversation ${conversationId} deleted mid-run; skipping writes`)
       }
-      this.deps.emit({ type: 'done', data: { usage } })
+      this.emitEvent({ type: 'done', data: { usage } })
     } catch (err) {
       if (abort.signal.aborted || isAbortError(err)) {
         this.markFailed(store, conversationId)
-        this.deps.emit({ type: 'canceled', data: { reason: 'user_canceled' } })
+        this.emitEvent({ type: 'canceled', data: { reason: 'user_canceled' } })
       } else {
         this.markFailed(store, conversationId)
         const message = err instanceof Error ? err.message : String(err)
-        this.deps.emit({ type: 'error', data: message })
+        this.emitEvent({ type: 'error', data: message })
         throw err
       }
     } finally {
@@ -351,12 +382,14 @@ ${PLAN_SYSTEM_NOTICE}`
     const { conversationId, content } = input
     const maxSteps = input.maxSteps ?? this.cfg.maxSteps ?? DEFAULT_MAX_STEPS
     this.assertConversation(conversationId)
+    // 先占运行槽再写 DB(单运行守卫失败不落库)
+    const abort = this.acquireRun(conversationId)
     store.updateConversationStatus(conversationId, 'running')
     // 上下文窗口:发送给 LLM 的历史最多最近 50 条(超出仅存 DB 供 UI 查看)
     const history = historyMessages(store.listMessages(conversationId))
     store.appendMessage({ conversationId, role: 'user', content })
     const messages: ModelMessage[] = [...lastN(history, DEFAULT_CONTEXT_WINDOW), { role: 'user', content }]
-    await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps)
+    await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps, 'done', this.cfg.sysPrompt, abort)
   }
 
   // 重跑恢复(架构设计 §3.3.1a):截断到最后一条 user 消息(其后的 assistant/tool 行不进入上下文)重新多步循环
@@ -366,26 +399,28 @@ ${PLAN_SYSTEM_NOTICE}`
     const { conversationId } = input
     const conv = store.getConversation(conversationId)
     if (!conv) {
-      this.deps.emit({ type: 'error', data: `conversation ${conversationId} not found` })
+      this.emitEvent({ type: 'error', data: `conversation ${conversationId} not found` })
       throw new Error(`conversation ${conversationId} not found`)
     }
     const resumable =
       conv.status === 'running' || conv.status === 'executing' || conv.status === 'planning' || conv.status === 'failed'
     if (!resumable) {
-      this.deps.emit({ type: 'error', data: `conversation ${conversationId} 无需继续(status=${conv.status})` })
+      this.emitEvent({ type: 'error', data: `conversation ${conversationId} 无需继续(status=${conv.status})` })
       throw new Error(`conversation ${conversationId} is not resumable (status=${conv.status})`)
     }
     const rows = store.listMessages(conversationId)
     const idx = lastUserMessageIndex(rows)
     if (idx === -1) {
-      this.deps.emit({ type: 'error', data: `conversation ${conversationId} 没有可继续的用户消息` })
+      this.emitEvent({ type: 'error', data: `conversation ${conversationId} 没有可继续的用户消息` })
       throw new Error(`conversation ${conversationId} has no user message`)
     }
+    // 先占运行槽再写 DB(单运行守卫失败不落库)
+    const abort = this.acquireRun(conversationId)
     store.updateConversationStatus(conversationId, input.status ?? 'running')
     const history = historyMessages(rows.slice(0, idx + 1))
     const messages = lastN(history, DEFAULT_CONTEXT_WINDOW)
     const maxSteps = input.maxSteps ?? this.cfg.maxSteps ?? DEFAULT_MAX_STEPS
-    await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps)
+    await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps, 'done', this.cfg.sysPrompt, abort)
   }
 
   // Plan 确认(架构设计 §3.3.4):ok → 第二轮带 tools 执行(截断到最后一条 user 消息);!ok → rejected
@@ -395,7 +430,7 @@ ${PLAN_SYSTEM_NOTICE}`
     const { conversationId, ok } = input
     const conv = store.getConversation(conversationId)
     if (!conv) {
-      this.deps.emit({ type: 'error', data: `conversation ${conversationId} not found` })
+      this.emitEvent({ type: 'error', data: `conversation ${conversationId} not found` })
       throw new Error(`conversation ${conversationId} not found`)
     }
     if (conv.status !== 'planning') return // 幂等:非计划待确认状态不处理(重复点击/迟到回执)
@@ -421,10 +456,11 @@ ${PLAN_SYSTEM_NOTICE}`
     maxSteps: number,
     finalStatus: ConversationStatus = 'done',
     system = this.cfg.sysPrompt,
+    acquiredAbort: AbortController | null = null,
   ): Promise<void> {
     const store = this.deps.store as StoreLike
-    const abort = this.beginRun()
-    this.runningConversationId = conversationId
+    // 入口已 acquireRun(写 DB 前占槽)时复用;直接调用(测试)自行占槽
+    const abort = acquiredAbort ?? this.acquireRun(conversationId)
     const wrapped = this.wrapTools(tools, conversationId) as ToolSet
 
     let canceled = false
@@ -535,11 +571,11 @@ ${PLAN_SYSTEM_NOTICE}`
               switch (part.type) {
                 case 'text-delta':
                   stepText += part.text
-                  this.deps.emit({ type: 'text_delta', data: part.text })
+                  this.emitEvent({ type: 'text_delta', data: part.text })
                   break
                 case 'reasoning-delta':
                   stepReasoning += part.text
-                  this.deps.emit({ type: 'reasoning_delta', data: part.text })
+                  this.emitEvent({ type: 'reasoning_delta', data: part.text })
                   break
                 case 'tool-call':
                   stepToolCalls.push(part)
@@ -578,7 +614,7 @@ ${PLAN_SYSTEM_NOTICE}`
           } else {
             this.markFailed(store, conversationId)
             const message = err instanceof Error ? err.message : String(err)
-            this.deps.emit({ type: 'error', data: message })
+            this.emitEvent({ type: 'error', data: message })
             throw err
           }
         }
@@ -603,7 +639,7 @@ ${PLAN_SYSTEM_NOTICE}`
 
       if (canceled) {
         this.markFailed(store, conversationId)
-        this.deps.emit({ type: 'canceled', data: { reason: 'user_canceled' } })
+        this.emitEvent({ type: 'canceled', data: { reason: 'user_canceled' } })
         return
       }
       // 队列剩余消息(步数耗尽):已在 DB 落库,用户点"继续"从最后一条 user 消息重跑
@@ -611,11 +647,11 @@ ${PLAN_SYSTEM_NOTICE}`
       if (steps >= maxSteps && lastStepHadToolCalls) {
         // 步数超限:Agent 还想继续;UI 后续提供"继续/停止"(继续 = 截断到最后一条 user 消息重发 run)
         this.markFailed(store, conversationId)
-        this.deps.emit({ type: 'error', data: '达到最大步骤数' })
+        this.emitEvent({ type: 'error', data: '达到最大步骤数' })
         return
       }
       if (store.getConversation(conversationId)) store.updateConversationStatus(conversationId, finalStatus)
-      this.deps.emit({ type: 'done', data: { usage } })
+      this.emitEvent({ type: 'done', data: { usage } })
     } finally {
       if (this.runningConversationId === conversationId) this.runningConversationId = null
       this.currentAbort = null
@@ -655,7 +691,7 @@ ${PLAN_SYSTEM_NOTICE}`
         // maxSteps 检查用上一轮 hadToolCall(本轮尚未执行)
         if (rounds >= maxSteps) {
           if (hadToolCall) {
-            this.deps.emit({ type: 'error', data: '达到最大步骤数' })
+            this.emitEvent({ type: 'error', data: '达到最大步骤数' })
             return
           }
           break
@@ -674,9 +710,9 @@ ${PLAN_SYSTEM_NOTICE}`
         })
         for await (const part of result.fullStream) {
           if (part.type === 'text-delta') {
-            this.deps.emit({ type: 'text_delta', data: part.text })
+            this.emitEvent({ type: 'text_delta', data: part.text })
           } else if (part.type === 'reasoning-delta') {
-            this.deps.emit({ type: 'reasoning_delta', data: part.text })
+            this.emitEvent({ type: 'reasoning_delta', data: part.text })
           } else if (part.type === 'tool-approval-request') {
             if (!part.isAutomatic) approvalParts.push(part)
           } else if (part.type === 'tool-call') {
@@ -688,7 +724,7 @@ ${PLAN_SYSTEM_NOTICE}`
             // 抛给外层 catch 统一 emit error + rethrow(避免重复事件)
             throw part.error instanceof Error ? part.error : new Error(String(part.error))
           } else if (part.type === 'abort') {
-            this.deps.emit({ type: 'canceled', data: { reason: 'user_canceled' } })
+            this.emitEvent({ type: 'canceled', data: { reason: 'user_canceled' } })
             return
           }
         }
@@ -702,13 +738,13 @@ ${PLAN_SYSTEM_NOTICE}`
         if (hadToolCall) continue
         break
       }
-      this.deps.emit({ type: 'done', data: { usage } })
+      this.emitEvent({ type: 'done', data: { usage } })
     } catch (err) {
       if (abort.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
-        this.deps.emit({ type: 'canceled', data: { reason: 'user_canceled' } })
+        this.emitEvent({ type: 'canceled', data: { reason: 'user_canceled' } })
       } else {
         const message = err instanceof Error ? err.message : String(err)
-        this.deps.emit({ type: 'error', data: message })
+        this.emitEvent({ type: 'error', data: message })
         throw err
       }
     } finally {
@@ -750,17 +786,17 @@ ${PLAN_SYSTEM_NOTICE}`
       ...t,
       execute: async (input: unknown, options: ToolExecutionOptions<unknown>) => {
         const id = options.toolCallId
-        this.deps.emit({ type: 'tool_start', data: { id, name, input } })
+        this.emitEvent({ type: 'tool_start', data: { id, name, input } })
         const startedAt = Date.now()
         try {
           // 审批由 SDK toolApproval 配置处理(v7 原生,不再包一层)
           const output = await this.runWithBoundaryGuide(id, name, input, options, execute)
           this.maybeEmitArtifact(conversationId, output)
-          this.deps.emit({ type: 'tool_end', data: { id, name, output, duration_ms: Date.now() - startedAt } })
+          this.emitEvent({ type: 'tool_end', data: { id, name, output, duration_ms: Date.now() - startedAt } })
           return output
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
-          this.deps.emit({ type: 'tool_error', data: { id, name, error: message } })
+          this.emitEvent({ type: 'tool_error', data: { id, name, error: message } })
           throw err // SDK 记为工具错误回传模型
         }
       },
@@ -782,7 +818,7 @@ ${PLAN_SYSTEM_NOTICE}`
       const boundary = isBoundaryError(err)
       if (!boundary || !this.deps.addAllowedDir) throw err
       const dir = boundary.path
-      this.deps.emit({
+      this.emitEvent({
         type: 'confirm_required',
         data: {
           request_id: id,
@@ -826,7 +862,7 @@ ${PLAN_SYSTEM_NOTICE}`
     for (const part of parts) {
       // 测试钩子(PICOAI_TEST_AUTO_APPROVE)直接结清,不发 confirm_required(与旧门控语义一致)
       if (this.testAutoApprove === undefined) {
-        this.deps.emit({
+        this.emitEvent({
           type: 'confirm_required',
           data: {
             request_id: part.approvalId,
@@ -896,7 +932,7 @@ ${PLAN_SYSTEM_NOTICE}`
     if (typeof path !== 'string' || path === '') return
     if (!isAbsolute(path)) return
     const type = artifactType(path)
-    this.deps.emit({ type: 'artifact', data: { path, type, size } })
+    this.emitEvent({ type: 'artifact', data: { path, type, size } })
     if (conversationId !== undefined) this.deps.store?.addArtifact?.({ conversationId, path, type, size })
   }
 }

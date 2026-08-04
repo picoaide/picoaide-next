@@ -53,8 +53,10 @@ function isPrivateIPv6(n: bigint): boolean {
   if (n === 0n || n === 1n) return true // :: 与 ::1
   if (n >> 120n === 0xfdn) return true // fd00::/8 ULA
   if (n >> 118n === 0x3fan) return true // fe80::/10 link-local
-  if (n >> 48n === 0n && ((n >> 32n) & 0xffffn) === 0xffffn) {
-    // ::ffff:a.b.c.d IPv4-mapped → 按 IPv4 判定
+  // ::ffff:a.b.c.d IPv4-mapped:前 80 位全零 + 第 5-6 组 0xffff,按 IPv4 判定。
+  // 注意高位检查是 >> 80n(前 80 位为零),不是 >> 48n:
+  // 0xffff7f000001(::ffff:127.0.0.1)>> 48n 非零会漏判,直连回环。
+  if (n >> 80n === 0n && ((n >> 64n) & 0xffffn) === 0xffffn) {
     const v4 = Number(n & 0xffffffffn)
     return isPrivateIPv4([(v4 >>> 24) & 0xff, (v4 >>> 16) & 0xff, (v4 >>> 8) & 0xff, v4 & 0xff])
   }
@@ -64,10 +66,12 @@ function isPrivateIPv6(n: bigint): boolean {
 export function isPrivateHost(hostname: string): boolean {
   const h = hostname.toLowerCase().replace(/^\[|\]$/g, '')
   if (h === 'localhost') return true
-  const mapped = h.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)
-  if (mapped) {
-    const v4 = parseIPv4(mapped[1])
-    return v4 !== null && isPrivateIPv4(v4)
+  // IPv4-mapped / IPv4-compatible 带点形式(::ffff:a.b.c.d、::127.0.0.1):
+  // 尾段按 IPv4 判定,parseIPv6 无法解析含点串
+  if (h.includes('.')) {
+    const tail = h.split(':').pop() ?? ''
+    const v4 = parseIPv4(tail)
+    if (v4) return isPrivateIPv4(v4)
   }
   const v4 = parseIPv4(h)
   if (v4) return isPrivateIPv4(v4)
@@ -96,20 +100,36 @@ export async function webFetch(url: string, opts: WebFetchOptions = {}): Promise
   }
   if (!opts.allowPrivate) await assertPublicHost(u.hostname)
 
-  const res = await fetch(u.toString(), { signal: AbortSignal.timeout(timeoutSec * 1000) })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  if (!res.body) return ''
-  const reader = res.body.getReader()
-  const chunks: Uint8Array[] = []
-  let total = 0
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    total += value.byteLength
-    if (total > maxBytes) throw new Error('页面超过大小限制')
-    chunks.push(value)
+  // 重定向逐跳 SSRF 校验:fetch 自动跟随会把公网站点 302 到 127.0.0.1/内网,
+  // 初始 URL 校验形同虚设 → manual 模式每跳重新校验(最多 5 跳)
+  let current = u
+  for (let hop = 0; hop < 5; hop++) {
+    if (!opts.allowPrivate) await assertPublicHost(current.hostname)
+    const res = await fetch(current.toString(), {
+      signal: AbortSignal.timeout(timeoutSec * 1000),
+      redirect: 'manual',
+    })
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get('location')
+      if (!loc) throw new Error(`重定向缺少 Location: HTTP ${res.status}`)
+      current = new URL(loc, current)
+      continue
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    if (!res.body) return ''
+    const reader = res.body.getReader()
+    const chunks: Uint8Array[] = []
+    let total = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > maxBytes) throw new Error('页面超过大小限制')
+      chunks.push(value)
+    }
+    return htmlToText(Buffer.concat(chunks).toString('utf8'))
   }
-  return htmlToText(Buffer.concat(chunks).toString('utf8'))
+  throw new Error('重定向次数过多')
 }
 
 // pragmatism: 字面 IP/localhost 直接判定;主机名做一次 DNS 查询,任一解析地址落在

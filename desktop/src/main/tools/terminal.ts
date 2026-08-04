@@ -122,7 +122,15 @@ export function needsApprovalFor(command: string, allowedDirs: string[]): boolea
     const arg = stripQuotes(raw.trim())
     if (!arg || arg === '-' || arg.startsWith('-')) continue
     // 赋值 token 不是路径(如 FOO=bar cmd),跳过路径判定
-    if (/['"=]/.test(arg)) continue
+    if (arg.includes('=')) continue
+    // 引号拼接(se'c'ret → secret)是 shell 合法语法:剥离全部引号后仍按路径判定,
+    // 否则 cat ../se'c'ret.txt 等拼接可绕过路径校验免审批越界读写
+    const dequoted = arg.replace(/['"]/g, '')
+    if (dequoted !== arg) {
+      if (!isPathLike(dequoted)) continue
+      if (!isAllowed(expandHome(dequoted), allowedDirs)) return true
+      continue
+    }
     // glob/brace 展开发生在 shell 侧,静态无法判定展开后的目标路径。
     // 含路径前缀(/、~、..)的通配符(cat /etc/*、mkdir /root/{a,b})可能越界
     // → 一律需要审批;纯相对 glob(cat *.md,展开限于 cwd 允许目录)放行。
