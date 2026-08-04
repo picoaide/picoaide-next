@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { tool } from 'ai'
 import { z } from 'zod'
 import type { LanguageModel, ModelMessage, Tool } from 'ai'
-import { AgentEngine, createKbTools, fromModelMessage, toModelMessage } from './engine'
+import { AgentEngine, createKbTools, fromModelMessage, historyMessages, sanitizeMessages, toModelMessage } from './engine'
 import type { AppendMessageInput, DBMessage } from './engine'
 import type { AgentEvent } from './events'
 import { createGatewayModel } from './provider'
@@ -703,8 +703,39 @@ describe('AgentEngine continueConversation', () => {
     expect(JSON.stringify(prompt)).not.toContain('部分输出')
   })
 
-  it('strips orphan tool_calls from history so the SDK never sees unmatched tool calls', async () => {
-    // 场景:审批轮落库 assistant(tool_calls) 后会话终止(取消/步数超限),tool 行永不落库 → 历史孤儿
+  it('sanitizeMessages strips orphan tool-calls but keeps matched ones', () => {
+    const msgs: ModelMessage[] = [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'orphan', toolName: 'file_delete', input: '{}' }] },
+      { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'paired', toolName: 'file_read', input: '{}' }] },
+      { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'paired', toolName: 'file_read', output: { type: 'text', value: 'ok' } }] },
+    ]
+    const out = sanitizeMessages(msgs)
+    const calls = out.filter((m) => m.role === 'assistant').flatMap((m) => m.content as Array<{ type: string; toolCallId: string }>)
+    expect(calls.map((p) => p.toolCallId)).toEqual(['paired'])
+  })
+
+  it('sanitizeMessages keeps tool-calls when an approval response is present (SDK resume needs them)', () => {
+    const msgs: ModelMessage[] = [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'call_1', toolName: 'file_delete', input: '{}' }] },
+      { role: 'tool', content: [{ type: 'tool-approval-response', approvalId: 'aitxt-1', approved: false, reason: 'denied' }] },
+    ]
+    const out = sanitizeMessages(msgs)
+    const calls = out.filter((m) => m.role === 'assistant').flatMap((m) => m.content as Array<{ type: string; toolCallId: string }>)
+    expect(calls.map((p) => p.toolCallId)).toEqual(['call_1'])
+  })
+
+  it('historyMessages strips orphans from DB rows', () => {
+    const rows: DBMessage[] = [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: '', tool_calls: JSON.stringify([{ tool_call_id: 'x1', tool_name: 'file_delete', args: {} }]) },
+    ]
+    const out = historyMessages(rows)
+    expect(JSON.stringify(out)).not.toContain('x1')
+  })
+
+  it('strips orphan tool_calls from history so the SDK never sees unmatched tool calls', async () => {    // 场景:审批轮落库 assistant(tool_calls) 后会话终止(取消/步数超限),tool 行永不落库 → 历史孤儿
     const store = makeStore()
     store.appendMessage({ conversationId: 1, role: 'user', content: '删除文件' })
     store.appendMessage({

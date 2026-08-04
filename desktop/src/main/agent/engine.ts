@@ -243,7 +243,7 @@ ${PLAN_SYSTEM_NOTICE}`
       const result = streamText({
         model: this.cfg.model,
         system: this.cfg.sysPrompt,
-        messages,
+        messages: sanitizeMessages(messages),
         tools: {},
         stopWhen: isStepCount(1),
         abortSignal: abort.signal,
@@ -480,7 +480,7 @@ ${PLAN_SYSTEM_NOTICE}`
           const result = streamText({
             model: this.cfg.model,
             system,
-            messages,
+            messages: sanitizeMessages(messages),
             tools: wrapped,
             toolApproval: this.buildToolApproval(tools, highRisk),
             stopWhen: isStepCount(1),
@@ -614,7 +614,7 @@ ${PLAN_SYSTEM_NOTICE}`
         const result = streamText({
           model: this.cfg.model,
           system: this.cfg.sysPrompt,
-          messages,
+          messages: sanitizeMessages(messages),
           tools: this.wrapTools(tools) as ToolSet,
           toolApproval: this.buildToolApproval(tools, opts.highRiskTools ?? new Set()),
           stopWhen: isStepCount(1),
@@ -899,25 +899,33 @@ export function createKbTools(session: Session): { tools: Record<string, Tool>; 
 
 // ---- 消息转换(DB 行 ↔ AI SDK 消息) ----
 
-// 历史清洗:丢弃无配对 tool 结果的 tool-call part。
-// 孤儿产生路径:审批轮 finish-step 落库 assistant(tool_calls) 后会话终止(取消/步数超限/进程中断),
-// 工具结果行永不落库 → 下次从 DB 加载历史时 SDK 抛 MissingToolResultsError。防御式过滤,配对的保留。
-export function historyMessages(rows: DBMessage[]): ModelMessage[] {
-  const messages = rows.map(toModelMessage)
+// 送模型前的最终防线:剥离无配对 tool 结果的 tool-call part(配对的保留)。
+// 孤儿来源(全部路径):① 审批轮 finish-step 落库 assistant(tool_calls) 后会话终止(取消/步数超限/进程中断),
+// 工具结果行永不落库;② SDK response.messages 异常/审批响应不完整;③ 历史残缺。
+// 每次 streamText 前调用,SDK 永不看到 unmatched tool calls。
+export function sanitizeMessages(messages: ModelMessage[]): ModelMessage[] {
   const toolIds = new Set<string>()
+  let hasApproval = false
   for (const m of messages) {
     if (m.role !== 'tool' || !Array.isArray(m.content)) continue
-    for (const p of m.content as ToolResultPart[]) {
+    for (const p of m.content as (ToolResultPart | ToolApprovalResponse)[]) {
       if (p.type === 'tool-result' && p.toolCallId) toolIds.add(p.toolCallId)
+      // approval-response 的 approvalId 与 tool-call 的 toolCallId 由 SDK 内部映射,消息层无法推导;
+      // 存在任何审批响应时保守保留全部 tool-call(SDK 续跑依赖它们),孤儿清洗只对无审批消息生效
+      if (p.type === 'tool-approval-response') hasApproval = true
     }
   }
   return messages.map((m) => {
     if (m.role !== 'assistant' || !Array.isArray(m.content)) return m
     const parts = m.content as (TextPart | ToolCallPart)[]
-    const orphans = parts.some((p) => p.type === 'tool-call' && !toolIds.has(p.toolCallId))
-    if (!orphans) return m
+    if (hasApproval) return m
+    if (!parts.some((p) => p.type === 'tool-call' && !toolIds.has(p.toolCallId))) return m
     return { ...m, content: parts.filter((p) => p.type !== 'tool-call' || toolIds.has(p.toolCallId)) }
   })
+}
+
+export function historyMessages(rows: DBMessage[]): ModelMessage[] {
+  return sanitizeMessages(rows.map(toModelMessage))
 }
 
 export function toModelMessage(row: DBMessage): ModelMessage {

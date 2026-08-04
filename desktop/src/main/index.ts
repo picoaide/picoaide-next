@@ -98,6 +98,8 @@ let lastServerURL: string | null = null
 let appStore: StoreLike | null = null
 // 引擎重置钩子:登出/换账号时丢弃缓存的 AgentEngine(持有旧会话 model/token)
 let resetAgentEngine: () => void = () => {}
+// 当前活跃工具注册表的可访问目录数组(addAllowedDir 就地更新,越界授权后自动重试立即生效)
+let activeAllowedDirs: string[] | null = null
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -167,6 +169,8 @@ async function buildToolsRegistry(db: ReturnType<typeof openDb>, workspace?: str
   // 无项目会话 workspace 默认 ''(falsy)→ 回退全局工作目录,防止 cwd/allowedDirs 变成空
   const base = resolveWorkspace(workspace, workspaceDir())
   const allowedDirs = resolveAllowedDirs(base, getAllowedDirsFromSettings((k) => getSetting(db, k)))
+  // 登记当前注册表的目录数组:addAllowedDir 就地 push 让工具闭包立即生效(单引擎单 run,无并发)
+  activeAllowedDirs = allowedDirs
   const cwd = base
   const web = getBootstrapCache().web
   const commandTool: GatedTool = {
@@ -437,6 +441,9 @@ app.whenReady().then(async () => {
       },
       fetch: gatewayFetch,
       addAllowedDir: (dir) => {
+        // 关键:必须同步更新当前活跃工具注册表持有的 allowedDirs 数组(工具 execute 闭包引用它),
+        // 否则越界授权后的"自动重试"仍走旧目录清单再次越界失败(要等下次 getTools 重建才生效)。
+        if (activeAllowedDirs && !activeAllowedDirs.includes(dir)) activeAllowedDirs.push(dir)
         const current = getAllowedDirsFromSettings((k) => getSetting(db, k))
         if (!current.includes(dir)) {
           current.push(dir)
