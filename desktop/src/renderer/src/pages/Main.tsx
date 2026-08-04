@@ -56,6 +56,7 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
   const [showArchived, setShowArchived] = useState(false)
   const [showSearch, setShowSearch] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null)
+  const [showBrowserHelp, setShowBrowserHelp] = useState(false)
   const { newConversation, loadConversations, selectConversation, deleteConversation, loadProjects, createProject, deleteProject, moveConversation, setActiveProject, toggleProjectCollapsed } = useChatStore.getState()
 
   useEffect(() => {
@@ -332,13 +333,22 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
             <span className="truncate text-sm text-muted-foreground">
               {activeProject ? `${activeProject.name} · ` : ''}
               <Badge variant="outline" title="模型由管理员在服务端统一配置">
-                {modelName}
+                模型: {modelName}
               </Badge>
-            </span>            <div className="flex items-center gap-2">
-              <Badge variant={browserConnected ? 'success' : 'outline'} title="浏览器插件桥(127.0.0.1:54321)">
-                <Globe className="mr-1 h-3 w-3" />
-                {browserConnected ? '浏览器已连接' : '浏览器未连接'}
-              </Badge>
+            </span>
+            <div className="flex items-center gap-2">
+              {browserConnected ? (
+                <Badge variant="success" title="浏览器插件桥(127.0.0.1:54321)">
+                  <Globe className="mr-1 h-3 w-3" />
+                  浏览器已连接
+                </Badge>
+              ) : (
+                <Button variant="outline" size="sm" className="h-6 gap-1 px-2 text-xs" onClick={() => setShowBrowserHelp(true)}>
+                  <Globe className="h-3 w-3" />
+                  浏览器未连接
+                  <span className="underline decoration-dotted underline-offset-2">安装插件</span>
+                </Button>
+              )}
               <Badge variant={connStatus === 'online' ? 'success' : 'destructive'}>
                 {connStatus === 'online' ? '在线' : connStatus === 'offline' ? '离线' : '已过期'}
               </Badge>
@@ -432,6 +442,36 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
         </DialogContent>
       </Dialog>
       <SearchDialog open={showSearch} onClose={() => setShowSearch(false)} />
+      <Dialog open={showBrowserHelp} onOpenChange={setShowBrowserHelp}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <Globe className="h-4 w-4" /> 连接浏览器插件
+            </DialogTitle>
+            <DialogDescription>让 Agent 操作你正在使用的 Chrome/Edge 浏览器</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            <div className="flex gap-2">
+              <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs">1</span>
+              <span>在 Chrome / Edge 扩展商店安装 <b>PicoAide Bridge</b> 扩展(扩展位于仓库 <code>browser-extension/</code> 目录,加载已解压的扩展程序)。</span>
+            </div>
+            <div className="flex gap-2">
+              <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs">2</span>
+              <span>安装后无需任何配置,扩展默认直连本机 <code>127.0.0.1:54321</code>,即装即用。</span>
+            </div>
+            <div className="flex gap-2">
+              <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs">3</span>
+              <span>连接成功后此处会变为 <b>“浏览器已连接”</b>,Agent 即可打开网页、搜索、点击与填写表单。</span>
+            </div>
+            <p className="rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
+              浏览器工具完全走本机回环通道,不经服务端,离线可用;首次操作高风险动作(点击/输入)会弹出确认。
+            </p>
+          </div>
+          <DialogFooter>
+            <Button onClick={() => setShowBrowserHelp(false)}>知道了</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

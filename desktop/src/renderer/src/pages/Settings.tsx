@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ArrowDownToLine, LogOut, RefreshCw, Trash2 } from 'lucide-react'
+import { ArrowDownToLine, Check, Copy, LogOut, RefreshCw, Trash2 } from 'lucide-react'
 import { Input } from '../components/ui/input'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from '../components/ui/dialog'
 import { useAuthStore } from '../stores/auth'
+import { useToastStore } from '../stores/toast'
 import { pluginApi } from '../plugin-api'
 import { errCode } from '../api/picoaide'
 import type { McpListResult, McpRiskInfo, SettingsInfo, SkillRiskInfo, SkillsListResult } from '../../../main/plugin_ipc'
@@ -173,16 +174,22 @@ export default function Settings({ onBack }: { onBack: () => void }) {
         </CardHeader>
         <CardContent>
           <div className="flex items-center gap-2">
-            {ACCENTS.map((a) => (
-              <button
-                key={a.name}
-                type="button"
-                title={a.name}
-                className={`h-7 w-7 rounded-full border-2 ${accent === a.value ? 'border-foreground' : 'border-transparent'}`}
-                style={{ backgroundColor: `hsl(${a.value})` }}
-                onClick={() => void pickAccent(a.value)}
-              />
-            ))}
+            {ACCENTS.map((a) => {
+              const active = accent === a.value
+              return (
+                <button
+                  key={a.name}
+                  type="button"
+                  title={`${a.name}${active ? '(当前)' : ''}`}
+                  aria-pressed={active}
+                  className={`relative h-7 w-7 rounded-full transition-transform hover:scale-105 ${active ? 'scale-110 ring-2 ring-foreground ring-offset-2' : ''}`}
+                  style={{ backgroundColor: `hsl(${a.value})` }}
+                  onClick={() => void pickAccent(a.value)}
+                >
+                  {active && <Check className="absolute inset-0 m-auto h-4 w-4 text-white drop-shadow" />}
+                </button>
+              )
+            })}
           </div>
         </CardContent>
       </Card>
@@ -193,9 +200,27 @@ export default function Settings({ onBack }: { onBack: () => void }) {
           <CardTitle>账户</CardTitle>
         </CardHeader>
         <CardContent className="space-y-2 text-sm">
-          <div className="flex justify-between">
-            <span className="text-muted-foreground">服务器</span>
-            <span className="max-w-[70%] truncate">{info?.serverURL ?? '—'}</span>
+          <div className="flex items-center justify-between gap-3">
+            <span className="shrink-0 text-muted-foreground">服务器</span>
+            <span className="flex min-w-0 items-center gap-1">
+              <span className="max-w-[70%] truncate" title={info?.serverURL}>
+                {info?.serverURL ?? '—'}
+              </span>
+              {info?.serverURL && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 shrink-0"
+                  title="复制服务器地址"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(info.serverURL!)
+                    useToastStore.getState().show('服务器地址已复制')
+                  }}
+                >
+                  <Copy className="h-3 w-3" />
+                </Button>
+              )}
+            </span>
           </div>
           <div className="flex justify-between">
             <span className="text-muted-foreground">用户名</span>
@@ -205,8 +230,8 @@ export default function Settings({ onBack }: { onBack: () => void }) {
             <span className="text-muted-foreground">当前模型</span>
             <span>{info?.model || '—'}</span>
           </div>
-          <div className="pt-2">
-            <Button variant="outline" size="sm" onClick={() => void logout()}>
+          <div className="border-t pt-3">
+            <Button variant="outline" size="sm" className="text-destructive hover:text-destructive" onClick={() => void logout()}>
               <LogOut className="h-4 w-4" /> 登出
             </Button>
           </div>

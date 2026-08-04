@@ -4,6 +4,7 @@ import { ScrollArea } from './ui/scroll-area'
 import { cn } from '../lib/utils'
 import ToolCalls from './ToolCalls'
 import Markdown from './Markdown'
+import { Button } from './ui/button'
 import { useChatStore, type ChatMessage, type ToolCallView } from '../stores/chat'
 import ConfirmDialog from './ConfirmDialog'
 
@@ -63,8 +64,17 @@ export default function Messages({ messages, streaming, streamingText, streaming
   return (
     <div className="flex h-full flex-col">
       {error && (
-        <div className="mx-4 mt-3 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          {error}
+        <div className="mx-4 mt-3 flex items-center justify-between gap-3 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <span className="min-w-0 break-words">{error}</span>
+          <Button
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            onClick={regenerate}
+            title="重新发送最后一条消息"
+          >
+            <RefreshCw className="h-3 w-3" /> 重试
+          </Button>
         </div>
       )}
       <ScrollArea className="flex-1" onViewportScroll={(e) => {
