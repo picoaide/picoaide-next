@@ -197,6 +197,8 @@ function Bubble({
   const [copied, setCopied] = useState(false)
   const isUser = message.role === 'user'
   const showActions = isUser || message.role === 'assistant'
+  // 历史遗留的空 assistant 行(早期版本产生)不渲染气泡,避免大片空白
+  if (message.role === 'assistant' && !message.content && !message.reasoning) return null
 
   const copy = async () => {
     try {

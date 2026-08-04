@@ -98,8 +98,6 @@ export default function Main({ onOpenSettings }: { onOpenSettings: (section?: 'm
     }
   }, [loadConversations, loadProjects])
 
-  const model = bootstrap?.models.find((m) => m.id === bootstrap.default_model) ?? bootstrap?.models[0]
-  const modelName = model?.display_name ?? bootstrap?.default_model ?? '—'
   const activeProject = projects.find((p) => p.id === activeProjectId)
 
   const handleDelete = async (id: number) => {
@@ -383,8 +381,21 @@ export default function Main({ onOpenSettings }: { onOpenSettings: (section?: 'm
                 {((session?.username ?? 'U')[0] ?? 'U').toUpperCase()}
               </div>
               <span className="min-w-0 flex-1 truncate text-sm font-medium">{session?.username ?? '用户'}</span>
+              <span className="flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground" title={browserConnected ? '浏览器插件已连接(127.0.0.1:54321)' : '浏览器插件未连接'}>
+                <span className={cn('h-1.5 w-1.5 rounded-full', connStatus === 'online' ? 'bg-green-500' : 'bg-red-500')} />
+                {connStatus === 'online' ? '在线' : '离线'}
+              </span>
             </div>
             <div className="mt-1.5 space-y-0.5 border-t pt-1.5">
+              {!browserConnected && (
+                <Button
+                  variant="ghost"
+                  className="h-8 w-full justify-start gap-2 text-sm text-muted-foreground hover:text-foreground"
+                  onClick={() => setShowBrowserHelp(true)}
+                >
+                  <Globe className="h-4 w-4" /> 浏览器未连接
+                </Button>
+              )}
               <Button
                 variant="ghost"
                 className="h-8 w-full justify-start gap-2 text-sm text-muted-foreground hover:text-foreground"
@@ -417,43 +428,6 @@ export default function Main({ onOpenSettings }: { onOpenSettings: (section?: 'm
           </div>
         </aside>
         <main className="flex min-w-0 flex-1 flex-col">
-          <header className="flex items-center justify-between border-b px-4 py-2">
-            <span className="truncate text-sm text-muted-foreground">
-              {activeProject ? `${activeProject.name} · ` : ''}
-              <Badge variant="outline" title="模型由管理员在服务端统一配置">
-                模型: {modelName}
-              </Badge>
-            </span>
-            <div className="flex items-center gap-2">
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Badge
-                      variant={connStatus === 'online' ? 'success' : 'destructive'}
-                      className="cursor-default"
-                    >
-                      <span
-                        className={cn(
-                          'mr-1 h-1.5 w-1.5 rounded-full',
-                          connStatus === 'online' ? 'bg-green-500' : 'bg-red-500'
-                        )}
-                      />
-                      {connStatus === 'online' ? '在线' : connStatus === 'offline' ? '离线' : '已过期'}
-                    </Badge>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    {browserConnected ? '浏览器插件已连接(127.0.0.1:54321)' : '浏览器插件未连接,点击顶部图标安装'}
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-              {!browserConnected && (
-                <Button variant="ghost" size="sm" className="h-6 gap-1 px-2 text-xs text-muted-foreground" onClick={() => setShowBrowserHelp(true)}>
-                  <Globe className="h-3 w-3" />
-                  浏览器未连接
-                </Button>
-              )}
-            </div>
-          </header>
           <div className="flex min-h-0 flex-1">
             <div className="flex min-w-0 flex-1 flex-col">
               <div className="min-h-0 flex-1">

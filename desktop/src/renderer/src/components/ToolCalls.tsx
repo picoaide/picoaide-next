@@ -5,6 +5,20 @@ import type { ToolCallView } from '../stores/chat'
 
 // 工具执行卡片:tool_start/tool_end/tool_error/confirm_required 事件驱动
 // pending = 审批挂起:审批交互统一由全局 ConfirmModal 接管(一次一个 + 60s 倒计时),卡片只显示状态
+// 输入/输出限高滚动 + 截断:大 JSON(文件内容/长文本)不撑破消息气泡(大片空白根因之一)
+const MAX_JSON_CHARS = 4000
+
+function formatJson(value: unknown): string {
+  if (value === undefined) return '(无参数)'
+  let s: string
+  try {
+    s = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+  } catch {
+    s = String(value)
+  }
+  return s.length > MAX_JSON_CHARS ? s.slice(0, MAX_JSON_CHARS) + `\n…[内容过长已截断,共 ${s.length} 字符]` : s
+}
+
 export default function ToolCalls({ calls }: { calls: ToolCallView[] }) {
   if (calls.length === 0) return null
   return (
@@ -37,10 +51,10 @@ function ToolCard({ call }: { call: ToolCallView }) {
         ) : (
           <Badge variant="success">✓</Badge>
         )}
-        <span className={cn('font-medium', failed ? 'text-destructive' : pending && 'text-amber-600')}>
+        <span className={cn('truncate font-medium', failed ? 'text-destructive' : pending && 'text-amber-600')}>
           {call.name}
         </span>
-        <span className="ml-auto text-muted-foreground">
+        <span className="ml-auto shrink-0 text-muted-foreground">
           {pending ? '等待批准' : call.status === 'running' ? '执行中…' : call.error !== undefined ? '失败' : call.duration_ms !== undefined ? `${call.duration_ms}ms` : ''}
         </span>
       </summary>
@@ -51,22 +65,22 @@ function ToolCard({ call }: { call: ToolCallView }) {
             <span>目标:</span> {call.target}
           </div>
         )}
-        <div>
-          <div className="text-muted-foreground">输入</div>
-          <pre className="whitespace-pre-wrap break-all">{JSON.stringify(call.input)}</pre>
-        </div>
+        {call.input !== undefined && (
+          <div>
+            <div className="text-muted-foreground">输入</div>
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all">{formatJson(call.input)}</pre>
+          </div>
+        )}
         {call.error !== undefined && (
           <div className="text-destructive">
             <div>错误</div>
-            <pre className="whitespace-pre-wrap break-all">{call.error}</pre>
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all">{call.error}</pre>
           </div>
         )}
         {call.output !== undefined && (
           <div>
             <div className="text-muted-foreground">输出</div>
-            <pre className="whitespace-pre-wrap break-all">
-              {typeof call.output === 'string' ? call.output : JSON.stringify(call.output, null, 2)}
-            </pre>
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all">{formatJson(call.output)}</pre>
           </div>
         )}
       </div>
