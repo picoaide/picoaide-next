@@ -123,6 +123,18 @@ describe('chat store', () => {
     expect(s.messages.some((m) => m.role === 'assistant' && m.content === 'answer')).toBe(true)
   })
 
+  it('sendMessage 首条消息后 activeId 保持,后续消息不新建会话', async () => {
+    useChatStore.setState({ activeId: null })
+    await useChatStore.getState().sendMessage('第一句')
+    const firstId = useChatStore.getState().activeId
+    expect(firstId).not.toBeNull()
+    fake.api.chatNew.mockClear()
+    await useChatStore.getState().sendMessage('第二句')
+    expect(fake.api.chatNew).not.toHaveBeenCalled()
+    expect(useChatStore.getState().activeId).toBe(firstId)
+    expect(useChatStore.getState().messages.every((m) => m.content !== '第二句') === false).toBe(true)
+  })
+
   it('refuses to send while offline and surfaces a local error', async () => {
     useConnectionStore.setState({ status: 'offline' })
     await useChatStore.getState().sendMessage('你好')

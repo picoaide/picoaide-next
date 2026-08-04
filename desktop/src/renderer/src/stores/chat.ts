@@ -232,6 +232,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       let activeId = get().activeId
       if (activeId === null) {
         activeId = await picoaide().chatNew({ mode: get().mode })
+        // 首条消息创建会话后必须选中,否则后续消息每次都新建会话
+        set({ activeId })
       }
       const id = activeId
       // 乐观追加用户消息;assistant 内容以流式增量呈现,结束后从 DB 重载
