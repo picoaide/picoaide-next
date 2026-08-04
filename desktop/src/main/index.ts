@@ -41,9 +41,14 @@ import { buildPluginHandlers } from './plugin_ipc'
 let mainWindow: BrowserWindow | null = null
 let poller: ReturnType<typeof createHealthPoller> | null = null
 
-// macOS 原生应用菜单(HIG):Cmd+Q 退出、Cmd+, 设置、Cmd+N 新建会话;菜单命令经 menu:command 事件下发 renderer
+// 去掉客户端框架菜单栏(File/Edit/View/Window/Help 等,用户反馈干扰):
+// macOS 系统菜单栏保留最小应用菜单(关于/设置/退出 + 编辑快捷键,符合 HIG,Cmd+Q/+/N 不失效);
+// Windows/Linux 应用菜单移除 + 窗口菜单栏隐藏(Alt 不可呼出,界面完全无菜单栏)
 function buildMenu(): void {
-  if (process.platform !== 'darwin') return
+  if (process.platform !== 'darwin') {
+    Menu.setApplicationMenu(null)
+    return
+  }
   const send = (command: string): void => {
     mainWindow?.webContents.send('menu:command', command)
   }
@@ -54,6 +59,7 @@ function buildMenu(): void {
         { role: 'about' },
         { type: 'separator' },
         { label: '设置…', accelerator: 'Cmd+,', click: () => send('settings') },
+        { label: '新建会话', accelerator: 'Cmd+N', click: () => send('new-chat') },
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },
@@ -65,14 +71,7 @@ function buildMenu(): void {
       ],
     },
     {
-      label: '文件',
-      submenu: [
-        { label: '新建会话', accelerator: 'Cmd+N', click: () => send('new-chat') },
-        { type: 'separator' },
-        { role: 'close' },
-      ],
-    },
-    {
+      // 文本编辑快捷键(复制/粘贴/全选)在无菜单时失效,保留编辑菜单
       label: '编辑',
       submenu: [
         { role: 'undo' },
@@ -83,10 +82,6 @@ function buildMenu(): void {
         { role: 'paste' },
         { role: 'selectAll' },
       ],
-    },
-    {
-      label: '窗口',
-      submenu: [{ role: 'minimize' }, { role: 'zoom' }, { role: 'front' }],
     },
   ]
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
@@ -107,6 +102,8 @@ function createWindow() {
     height: 720,
     minWidth: 900,
     minHeight: 600,
+    // Windows/Linux:窗口不显示菜单栏(菜单已整体移除)
+    autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
