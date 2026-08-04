@@ -189,7 +189,17 @@ function makeStore() {
     listMessages: (conversationId: number): DBMessage[] =>
       (messages.filter((m) => m.conversationId === conversationId) as unknown as DBMessage[]),
     appendMessage: (input: AppendMessageInput): number => {
-      messages.push({ ...input, id: messages.length + 1 })
+      // 镜像真实 store:AppendMessageInput → DBMessage(列名转换)
+      const row: DBMessage = {
+        role: input.role,
+        content: input.content ?? '',
+        reasoning: input.reasoning ?? '',
+        tool_calls: input.toolCalls ?? '[]',
+        tool_call_id: input.toolCallId ?? '',
+        tool_name: input.toolName ?? '',
+        is_error: input.isError ? 1 : 0,
+      }
+      messages.push({ ...row, id: messages.length + 1, conversationId: input.conversationId } as AppendMessageInput & { id: number })
       return messages.length
     },
     addArtifact: (a: { conversationId: number; path: string; type: string; size: number }): number => {
@@ -427,9 +437,9 @@ describe('AgentEngine craft (store-backed)', () => {
     const toolRow = msgs.find((m) => m.role === 'tool')
     expect(toolRow).toMatchObject({
       content: 'contents of /home/u/x.doc',
-      toolCallId: 'call_1',
-      toolName: 'file_read',
-      isError: false,
+      tool_call_id: 'call_1',
+      tool_name: 'file_read',
+      is_error: 0,
     })
     expect(store.getConversation(1)?.status).toBe('done')
     const done = events.find((e) => e.type === 'done')
@@ -470,8 +480,8 @@ describe('AgentEngine craft (store-backed)', () => {
     // 但必须落一条 is_error tool 行,保证 DB 历史 tool_call 有配对结果(重跑不 MissingToolResultsError)
     const denied = store.listMessages(1).filter((m) => m.role === 'tool')
     expect(denied).toHaveLength(1)
-    expect(denied[0].isError).toBe(true)
-    expect(denied[0].toolName).toBe("file_delete")
+    expect(denied[0].is_error).toBe(1)
+    expect(denied[0].tool_name).toBe("file_delete")
     expect(eventsOf(events, 'tool_start')).toHaveLength(0)
     expect(eventsOf(events, 'tool_error')).toHaveLength(0)
     expect(eventsOf(events, 'done')).toHaveLength(1)

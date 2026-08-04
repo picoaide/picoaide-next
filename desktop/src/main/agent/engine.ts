@@ -122,6 +122,7 @@ export interface RunOptions {
 export interface DBMessage {
   role: string
   content: string
+  reasoning?: string
   tool_calls?: string
   tool_call_id?: string
   tool_name?: string
@@ -768,7 +769,7 @@ export class AgentEngine {
         approved: ok,
         reason: ok ? '用户已批准' : '用户拒绝或超时',
       })
-      if (!ok && this.deps.store?.getConversation(conversationId)) {
+      if (!ok && conversationId !== undefined && this.deps.store?.getConversation(conversationId)) {
         // 拒绝必须落一条 is_error tool 行:否则 DB 里 assistant(tool_call) 无配对结果,
         // 下次发消息/重跑从历史加载时 SDK 抛 MissingToolResultsError → 会话 failed
         this.deps.store.appendMessage({

@@ -344,6 +344,7 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
             <div className="flex min-w-0 flex-1 flex-col">
               <div className="min-h-0 flex-1">
                 <Messages
+                  key={activeId ?? 'none'}
                   messages={messages}
                   streaming={streaming}
                   streamingText={streamingText}

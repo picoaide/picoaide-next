@@ -28,7 +28,10 @@ export default function Messages({ messages, streaming, streamingText, streaming
   const [editValue, setEditValue] = useState('')
 
   useEffect(() => {
-    if (nearBottom.current) bottomRef.current?.scrollIntoView({ block: 'end' })
+    // 新消息/切会话后滚到底;rAF 延迟到 ScrollArea 布局完成,否则 scrollIntoView 会落到旧高度
+    if (!nearBottom.current) return
+    const raf = requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ block: 'end' }))
+    return () => cancelAnimationFrame(raf)
   }, [messages, streamingText, streamingReasoning, toolCalls])
 
   if (messages.length === 0 && !streaming && !error) {
