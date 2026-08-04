@@ -116,6 +116,7 @@ export interface IpcHandlers {
   'theme:get': () => 'dark' | 'light'
   'chat:new': (input?: { title?: string; mode?: string; projectId?: number | null }) => number
   'chat:ask': (input: { conversationId: number; content: string; mode?: string }) => Promise<void>
+  'chat:queue': (input: { conversationId: number; content: string }) => Promise<boolean>
   'chat:continue': (input: { conversationId: number }) => Promise<void>
   'chat:approvePlan': (input: { conversationId: number; ok: boolean }) => Promise<void>
   'chat:cancel': () => void
@@ -246,6 +247,8 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
       // 自动标题:后台生成,不阻塞对话完成;内部处理兜底与去重
       if (deps.autoTitle) void deps.autoTitle({ conversationId })
     },
+    // 回复中排队:当前步骤完成后自动处理(引擎单运行守卫内队列)
+    'chat:queue': async ({ conversationId, content }) => (await getEngine()).queueMessage(conversationId, content),
     // 重跑恢复(架构设计 §3.3.1a):ask 会话无工具重跑;craft/plan 带全量工具
     'chat:continue': async ({ conversationId }) => {
       const mode = deps.store.getConversation(conversationId)?.mode ?? 'ask'

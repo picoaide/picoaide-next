@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { toast } from 'sonner'
 import { picoaide } from '../api/picoaide'
 import type { AgentEvent } from '../../../main/agent/events'
 import type { ArtifactRow, ConversationRow, MessageRow } from '../../../main/ipc'
@@ -10,6 +11,8 @@ export type Mode = 'plan' | 'craft'
 let pendingDelta = ''
 let rafScheduled = false
 const PAGE_SIZE = 100
+// 取消后事件回执丢失时的强制复位窗口(canceled/done 事件正常到达时提前复位,此兜底不生效)
+const CANCEL_FALLBACK_MS = 3000
 
 export interface ChatMessage {
   id: number
@@ -224,7 +227,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   sendMessage: async (content) => {
     const text = content.trim()
-    if (!text || get().streaming) return
+    if (!text) return
+    if (get().streaming) {
+      // 回复中发新消息 → 排队到当前步骤后(引擎多步队列,不打断);消息立即落库并刷新列表
+      const id = get().activeId
+      if (id === null) return
+      const ok = await picoaide().chatQueue(id, text)
+      if (ok) {
+        toast('已排队,当前步骤完成后自动处理')
+        void reloadMessages()
+      } else {
+        set({ localError: '当前任务即将结束或会话已切换,请稍后再发' })
+      }
+      return
+    }
     const conn = useConnectionStore.getState().status
     if (conn !== 'online') {
       set({ localError: '网络已断开,请恢复连接后再发送' })
@@ -280,6 +296,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   cancel: async () => {
     await picoaide().chatCancel()
+    // 兜底:事件回执丢失(主进程异常/竞态)时强制复位,避免停止按钮永久卡死;
+    // 正常路径 done/canceled/error 事件会提前复位,此定时器空转
+    setTimeout(() => {
+      const s = useChatStore.getState()
+      if (s.streaming) {
+        useChatStore.setState({ streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [] })
+        useApprovalsStore.getState().clear()
+      }
+    }, CANCEL_FALLBACK_MS)
   },
 
   setMode: (m) => set({ mode: m }),

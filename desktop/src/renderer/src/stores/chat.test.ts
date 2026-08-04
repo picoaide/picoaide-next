@@ -7,6 +7,7 @@ interface FakePicoaide {
   chatNew: ReturnType<typeof vi.fn>
   chatList: ReturnType<typeof vi.fn>
   chatAsk: ReturnType<typeof vi.fn>
+  chatQueue: ReturnType<typeof vi.fn>
   chatContinue: ReturnType<typeof vi.fn>
   approvePlan: ReturnType<typeof vi.fn>
   chatMessages: ReturnType<typeof vi.fn>
@@ -39,6 +40,7 @@ function makeFake() {
       messages.push({ id: nextId++, conversation_id: cid, role: 'assistant', content: 'answer', reasoning: '', tool_calls: '', tool_call_id: '', tool_name: '', is_error: 0, created_at: '' })
     }),
     chatContinue: vi.fn(async () => undefined),
+    chatQueue: vi.fn(async () => true),
     approvePlan: vi.fn(async () => undefined),
     chatMessages: vi.fn(async (cid: number) =>
       messages.filter((m) => m.conversation_id === cid).map((m) => ({ ...m }))
@@ -111,6 +113,35 @@ describe('chat store', () => {
     expect(useChatStore.getState().conversations[0].title).toBe('')
     useChatStore.getState().onChatTitle(id, '修复登录页样式')
     expect(useChatStore.getState().conversations[0].title).toBe('修复登录页样式')
+  })
+
+  it('sendMessage during streaming queues the message instead of asking', async () => {
+    useChatStore.setState({ streaming: true, activeId: 1, messages: [] })
+    await useChatStore.getState().sendMessage('新消息')
+    expect(fake.api.chatQueue).toHaveBeenCalledWith(1, '新消息')
+    expect(fake.api.chatAsk).not.toHaveBeenCalled()
+  })
+
+  it('sendMessage queue rejection surfaces a local error', async () => {
+    fake.api.chatQueue.mockResolvedValue(false)
+    useChatStore.setState({ streaming: true, activeId: 1 })
+    await useChatStore.getState().sendMessage('x')
+    expect(useChatStore.getState().localError).toContain('即将结束')
+    expect(fake.api.chatAsk).not.toHaveBeenCalled()
+  })
+
+  it('cancel falls back to resetting streaming when no event arrives within 3s', async () => {
+    vi.useFakeTimers()
+    try {
+      useChatStore.setState({ streaming: true, streamingText: '部分文本' })
+      await useChatStore.getState().cancel()
+      expect(useChatStore.getState().streaming).toBe(true)
+      vi.advanceTimersByTime(3000)
+      expect(useChatStore.getState().streaming).toBe(false)
+      expect(useChatStore.getState().streamingText).toBe('')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('applyPrompt queues a prompt consumed once by ChatInput', () => {

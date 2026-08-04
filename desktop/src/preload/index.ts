@@ -39,6 +39,8 @@ const api = {
   pickDirectory: (): Promise<string[]> => ipcRenderer.invoke('dialog:pickDirectory'),
   chatAsk: (conversationId: number, content: string, mode?: string): Promise<void> =>
     ipcRenderer.invoke('chat:ask', { conversationId, content, mode }),
+  chatQueue: (conversationId: number, content: string): Promise<boolean> =>
+    ipcRenderer.invoke('chat:queue', { conversationId, content }),
   chatContinue: (conversationId: number): Promise<void> =>
     ipcRenderer.invoke('chat:continue', { conversationId }),
   approvePlan: (conversationId: number, ok: boolean): Promise<void> =>
