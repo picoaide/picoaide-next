@@ -18,12 +18,14 @@ import {
 } from '../components/ui/dropdown-menu'
 import ArtifactsPanel from '../components/ArtifactsPanel'
 import ChatInput from '../components/ChatInput'
+import ConfirmDialog from '../components/ConfirmDialog'
 import ConfirmModal from '../components/ConfirmModal'
 import Messages from '../components/Messages'
 import SearchDialog from '../components/SearchDialog'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore, type ProjectView } from '../stores/chat'
 import { useConnectionStore } from '../stores/connection'
+import { useToastStore } from '../stores/toast'
 import { cn } from '../lib/utils'
 
 export default function Main({ onOpenSettings }: { onOpenSettings: () => void }) {
@@ -53,6 +55,7 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
   const [renameValue, setRenameValue] = useState('')
   const [showArchived, setShowArchived] = useState(false)
   const [showSearch, setShowSearch] = useState(false)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null)
   const { newConversation, loadConversations, selectConversation, deleteConversation, loadProjects, createProject, deleteProject, moveConversation, setActiveProject, toggleProjectCollapsed } = useChatStore.getState()
 
   useEffect(() => {
@@ -131,9 +134,9 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
       const md = await window.picoaide.chatExport(c.id)
       try {
         await navigator.clipboard.writeText(md)
-        window.alert('已复制到剪贴板')
+        useToastStore.getState().show('已复制到剪贴板')
       } catch {
-        window.alert('导出失败')
+        useToastStore.getState().show('导出失败')
       }
     }
     if (renamingId === c.id) {
@@ -195,7 +198,7 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
               </DropdownMenuItem>
               <DropdownMenuItem
                 onClick={() => {
-                  if (window.confirm('删除会话?')) void handleDelete(c.id)
+                  setConfirmDeleteId(c.id)
                 }}
                 className="text-destructive focus:text-destructive"
               >
@@ -225,7 +228,7 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
             title="删除会话"
             onClick={(e) => {
               e.stopPropagation()
-              if (window.confirm('删除会话?')) void handleDelete(c.id)
+              setConfirmDeleteId(c.id)
             }}
           >
             <Trash className="h-3.5 w-3.5" />
@@ -363,6 +366,15 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
         </main>
       </div>
       <ConfirmModal />
+      <ConfirmDialog
+        open={confirmDeleteId !== null}
+        title="删除会话"
+        description="会话及其消息将被永久删除,此操作不可恢复。"
+        onOpenChange={(open) => !open && setConfirmDeleteId(null)}
+        onConfirm={() => {
+          if (confirmDeleteId !== null) void handleDelete(confirmDeleteId)
+        }}
+      />
       {interrupted.length > 0 && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
           <Card className="w-full max-w-md">

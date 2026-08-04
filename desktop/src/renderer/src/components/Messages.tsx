@@ -5,6 +5,7 @@ import { cn } from '../lib/utils'
 import ToolCalls from './ToolCalls'
 import Markdown from './Markdown'
 import { useChatStore, type ChatMessage, type ToolCallView } from '../stores/chat'
+import ConfirmDialog from './ConfirmDialog'
 
 interface MessagesProps {
   messages: ChatMessage[]
@@ -25,6 +26,7 @@ export default function Messages({ messages, streaming, streamingText, streaming
   const deferredReasoning = useDeferredValue(streamingReasoning)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [editValue, setEditValue] = useState('')
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null)
 
   useEffect(() => {
     // 新消息/切会话后滚到底;rAF 延迟到 ScrollArea 布局完成,否则 scrollIntoView 会落到旧高度
@@ -96,7 +98,7 @@ export default function Messages({ messages, streaming, streamingText, streaming
                 onRegenerate={regenerate}
                 onQuote={() => useChatStore.getState().quoteMessage(m.content)}
                 onDelete={() => {
-                  if (window.confirm('删除这条消息?')) void useChatStore.getState().deleteMessage(m.id)
+                  setConfirmDeleteId(m.id)
                 }}
               />
             )
@@ -128,6 +130,15 @@ export default function Messages({ messages, streaming, streamingText, streaming
           <div ref={bottomRef} />
         </div>
       </ScrollArea>
+      <ConfirmDialog
+        open={confirmDeleteId !== null}
+        title="删除消息"
+        description="删除后消息将不可恢复。"
+        onOpenChange={(open) => !open && setConfirmDeleteId(null)}
+        onConfirm={() => {
+          if (confirmDeleteId !== null) void useChatStore.getState().deleteMessage(confirmDeleteId)
+        }}
+      />
     </div>
   )
 }

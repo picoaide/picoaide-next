@@ -5,6 +5,7 @@ import Settings from './pages/Settings'
 import { useAuthStore } from './stores/auth'
 import { useChatStore } from './stores/chat'
 import { useConnectionStore } from './stores/connection'
+import Toast from './components/Toast'
 
 export default function App() {
   const authStatus = useAuthStore((s) => s.status)
@@ -66,9 +67,15 @@ export default function App() {
     return <div className="flex h-screen items-center justify-center text-sm text-muted-foreground">正在连接…</div>
   }
   if (authStatus !== 'loggedIn') return <Login />
-  return view === 'settings' ? (
-    <Settings onBack={() => setView('main')} />
-  ) : (
-    <Main onOpenSettings={() => setView('settings')} />
+  return (
+    <>
+      {view === 'settings' ? (
+        <Settings onBack={() => setView('main')} />
+      ) : (
+        <Main onOpenSettings={() => setView('settings')} />
+      )}
+      <Toast />
+    </>
   )
 }
+
