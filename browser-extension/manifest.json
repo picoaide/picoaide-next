@@ -1,17 +1,29 @@
 {
   "manifest_version": 3,
   "name": "PicoAide 浏览器桥",
-  "version": "0.1.0",
-  "description": "PicoAide 客户端浏览器桥:零配置直连本机 127.0.0.1:54321,把 Agent 的浏览器操作转发到当前标签页",
-  "permissions": ["tabs", "activeTab", "scripting"],
-  "host_permissions": ["<all_urls>"],
+  "version": "0.2.0",
+  "description": "PicoAide 客户端浏览器桥:CDP 模式零配置直连本机 127.0.0.1:54321,自动重连",
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "scripting",
+    "debugger",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
