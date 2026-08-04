@@ -32,14 +32,14 @@ class MockProvider {
   specificationVersion = 'v4' as const
   provider = 'mock'
   modelId = 'mock-model'
-  script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang'
+  script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang' | 'approval-chain'
   toolName: string
   toolInput: unknown
   callCount = 0
   prompts: unknown[] = []
 
   constructor(
-    script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang' = 'text',
+    script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang' | 'approval-chain' = 'text',
     toolName = 'file_delete',
     toolInput: unknown = { path: '/home/u/x.doc' },
   ) {
@@ -81,6 +81,30 @@ class MockProvider {
   }
 
   private contentFor(prompt: unknown) {
+    if (this.script === 'approval-chain') {
+      // call1:需审批的工具;call2(审批执行轮,模型被再次调用):发免审批工具;call3:文本收尾
+      if (this.callCount === 1) {
+        return [
+          {
+            type: 'tool-call',
+            toolCallId: 'call_1',
+            toolName: this.toolName,
+            input: JSON.stringify(this.toolInput),
+          },
+        ]
+      }
+      if (this.callCount === 2) {
+        return [
+          {
+            type: 'tool-call',
+            toolCallId: 'call_2',
+            toolName: 'file_read',
+            input: JSON.stringify({ path: '/b' }),
+          },
+        ]
+      }
+      return [{ type: 'text', text: 'final answer' }]
+    }
     // 已有工具调用历史(已执行/已处理)或工具结果消息 → 模型收尾输出文本;否则首次输出工具调用
     if (this.script !== 'always-tool-call' && (this.hasToolResults(prompt) || this.hasPreviousToolCall(prompt)))
       return [{ type: 'text', text: 'final answer' }]
@@ -212,7 +236,7 @@ function makeStore() {
 }
 
 function makeEngine(
-  script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang',
+  script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang' | 'approval-chain',
   cfg: Partial<{ maxSteps: number; approvalTimeoutMs: number; retryCount: number; fetch: typeof fetch }> = {},
   store: ReturnType<typeof makeStore> = makeStore(),
   toolName = 'file_delete',
@@ -585,9 +609,22 @@ describe('AgentEngine craft (store-backed)', () => {
     await engine.craft({ conversationId: 1, content: 'delete it', tools, highRiskTools: new Set(['file_delete']) })
     expect(eventsOf(events, 'confirm_required')).toHaveLength(0)
     expect(deletedPaths).toEqual([])
-    // SDK 拒绝 = 工具不执行(无 tool_error);denial 回传模型收尾
-    expect(eventsOf(events, 'tool_error')).toHaveLength(0)
     expect(eventsOf(events, 'done')).toHaveLength(1)
+  })
+
+  it('approval execution round followed by a new tool call never throws MissingToolResultsError', async () => {
+    // 回归:审批批准后,执行轮模型继续调用免审批工具 → 结果跨轮回传。
+    // 历史曾在此抛 MissingToolResultsError(SDK convert 要求 tool-call 后紧跟配对结果)。
+    process.env['PICOAI_TEST_AUTO_APPROVE'] = '1'
+    const { events, engine, store, mock } = makeEngine('approval-chain')
+    await engine.craft({ conversationId: 1, content: 'delete then read', tools, highRiskTools: new Set(['file_delete']) })
+    expect(eventsOf(events, 'error')).toHaveLength(0)
+    expect(eventsOf(events, 'done')).toHaveLength(1)
+    expect(deletedPaths).toEqual(['/home/u/x.doc'])
+    expect(mock.callCount).toBe(3)
+    // DB 顺序:assistant(审批) → tool(结果跨轮先落) → assistant(新调用) → tool(结果) → assistant(收尾文本)
+    const rows = store.listMessages(1).filter((m) => m.role !== 'user')
+    expect(rows.map((r) => r.role)).toEqual(['assistant', 'tool', 'assistant', 'tool', 'assistant'])
   })
 
   it('gates tools via a per-tool requiresApproval predicate even without highRiskTools', async () => {
@@ -754,6 +791,69 @@ describe('AgentEngine continueConversation', () => {
     ]
     const out = historyMessages(rows)
     expect(JSON.stringify(out)).not.toContain('x1')
+  })
+
+  it('sanitizeMessages does not orphan a later assistant when a multi-result tool message is reordered', () => {
+    // 回归:一条 tool 消息含多个 assistant 的结果时,若被前面 assistant 的重排整条提前,
+    // 后面 assistant 的配对被抢走 → SDK 抛 MissingToolResultsError。
+    // 修复:重排前按 toolCallId 拆分多结果 tool 消息 + 位置镜像检查兜底。
+    const msgs: ModelMessage[] = [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'A', toolName: 'file_delete', input: '{}' }] },
+      { role: 'assistant', content: [{ type: 'text', text: '中间' }] },
+      {
+        role: 'tool',
+        content: [
+          { type: 'tool-result', toolCallId: 'A', toolName: 'file_delete', output: { type: 'text', value: 'ok' } },
+          { type: 'tool-result', toolCallId: 'B', toolName: 'file_read', output: { type: 'text', value: 'ok' } },
+        ],
+      },
+      { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'B', toolName: 'file_read', input: '{}' }] },
+    ]
+    const out = sanitizeMessages(msgs)
+    const kinds = out.map((m) => m.role)
+    expect(kinds).toEqual(['user', 'assistant', 'tool', 'assistant', 'tool', 'assistant'])
+    // B 的 tool-call 必须被剥离(其配对已在重排时随 A 提前),SDK 检查才会通过
+    const calls = out
+      .filter((m) => m.role === 'assistant')
+      .flatMap((m) => m.content as Array<{ type: string; toolCallId: string }>)
+      .filter((p) => p.type === 'tool-call')
+      .map((p) => p.toolCallId)
+    expect(calls).toEqual(['A'])
+  })
+
+  it('sanitizeMessages strips tool-calls whose result only appears after a user message (SDK position check)', () => {
+    // SDK convert 的检查语义:tool-call 到下一个 user 消息前必须有配对 result。
+    // 位置镜像检查必须与之一致:result 在 user 之后的不算配对。
+    const msgs: ModelMessage[] = [
+      { role: 'user', content: '第一轮' },
+      { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'A', toolName: 'file_delete', input: '{}' }] },
+      { role: 'user', content: '第二轮' },
+      { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'A', toolName: 'file_delete', output: { type: 'text', value: 'ok' } }] },
+    ]
+    const out = sanitizeMessages(msgs)
+    const calls = out
+      .filter((m) => m.role === 'assistant')
+      .flatMap((m) => m.content as Array<{ type: string; toolCallId: string }>)
+      .filter((p) => p.type === 'tool-call')
+      .map((p) => p.toolCallId)
+    expect(calls).toEqual([])
+  })
+
+  it('sanitizeMessages keeps pairs that straddle an assistant text message', () => {
+    const msgs: ModelMessage[] = [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'A', toolName: 'file_read', input: '{}' }] },
+      { role: 'assistant', content: [{ type: 'text', text: '中间' }] },
+      { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'A', toolName: 'file_read', output: { type: 'text', value: 'ok' } }] },
+    ]
+    const out = sanitizeMessages(msgs)
+    const calls = out
+      .filter((m) => m.role === 'assistant')
+      .flatMap((m) => m.content as Array<{ type: string; toolCallId: string }>)
+      .filter((p) => p.type === 'tool-call')
+      .map((p) => p.toolCallId)
+    expect(calls).toEqual(['A'])
   })
 
   it('strips orphan tool_calls from history so the SDK never sees unmatched tool calls', async () => {    // 场景:审批轮落库 assistant(tool_calls) 后会话终止(取消/步数超限),tool 行永不落库 → 历史孤儿

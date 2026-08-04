@@ -938,21 +938,37 @@ export function sanitizeMessages(messages: ModelMessage[]): ModelMessage[] {
     if (!parts.some((p) => p.type === 'tool-call' && !toolIds.has(p.toolCallId))) return m
     return { ...m, content: parts.filter((p) => p.type !== 'tool-call' || toolIds.has(p.toolCallId)) }
   })
+  // 拆分:一条 tool 消息含多个 tool-result part 时按 toolCallId 拆成多条,
+  // 否则下面的重排把整条提前会让后面的 assistant 丢失配对(重排抓取以 assistant 为单位)。
+  const exploded: ModelMessage[] = []
+  for (const m of cleaned) {
+    if (m.role !== 'tool' || !Array.isArray(m.content)) {
+      exploded.push(m)
+      continue
+    }
+    const parts = m.content as ToolResultPart[]
+    if (parts.length <= 1 || !parts.every((p) => p.type === 'tool-result')) {
+      exploded.push(m)
+      continue
+    }
+    for (const p of parts) exploded.push({ role: 'tool', content: [p] })
+  }
   // 重排:旧版本审批跨轮落库顺序错乱,产生 assistant(tool-call) → assistant(文本) → tool(结果) 的历史,
   // SDK 要求 tool-call 后紧跟 tool 消息。把错位的 tool 结果行提前到其 assistant 行之后(审批响应不重排)。
   const ordered: ModelMessage[] = []
-  for (let i = 0; i < cleaned.length; i++) {
-    const m = cleaned[i]
+  for (let i = 0; i < exploded.length; i++) {
+    const m = exploded[i]
     if (m === null) continue // 已被提前的错位 tool 行
     ordered.push(m)
     if (m.role !== 'assistant' || !Array.isArray(m.content)) continue
     const callIds = (m.content as ToolCallPart[]).filter((p) => p.type === 'tool-call').map((p) => p.toolCallId)
     if (callIds.length === 0) continue
-    const next = cleaned[i + 1]
+    const next = exploded[i + 1]
     if (next && next.role === 'tool') continue // 已紧邻,无需重排
     const grabbed: ModelMessage[] = []
-    for (let k = i + 1; k < cleaned.length; k++) {
-      const mm = cleaned[k]
+    for (let k = i + 1; k < exploded.length; k++) {
+      const mm = exploded[k]
+      if (mm.role === 'user') break // SDK 检查以 user 为边界,配对不得跨越 user 抓取
       if (
         mm.role === 'tool' &&
         Array.isArray(mm.content) &&
@@ -961,12 +977,41 @@ export function sanitizeMessages(messages: ModelMessage[]): ModelMessage[] {
         )
       ) {
         grabbed.push(mm)
-        cleaned[k] = null as unknown as ModelMessage
+        exploded[k] = null as unknown as ModelMessage
       }
     }
     ordered.push(...grabbed)
   }
-  return ordered.filter((m) => m !== null)
+  const reordered = ordered.filter((m) => m !== null)
+  // 位置镜像检查(SDK convert 语义):每条 assistant 的 tool-call 在其后到下一个 user 消息之前
+  // 必须有配对 tool-result,否则剥离。与 SDK 检查完全对齐,兜底重排/拆分的任何遗漏。
+  if (hasApproval) return reordered
+  const final: ModelMessage[] = []
+  for (let i = 0; i < reordered.length; i++) {
+    const m = reordered[i]
+    if (m.role !== 'assistant' || !Array.isArray(m.content)) {
+      final.push(m)
+      continue
+    }
+    const parts = m.content as (TextPart | ToolCallPart)[]
+    const calls = parts.filter((p) => p.type === 'tool-call')
+    if (calls.length === 0) {
+      final.push(m)
+      continue
+    }
+    const found = new Set<string>()
+    for (let k = i + 1; k < reordered.length; k++) {
+      const mm = reordered[k]
+      if (mm.role === 'user') break
+      if (mm.role === 'tool' && Array.isArray(mm.content)) {
+        for (const p of mm.content as ToolResultPart[]) {
+          if (p.type === 'tool-result') found.add(p.toolCallId)
+        }
+      }
+    }
+    final.push({ ...m, content: parts.filter((p) => p.type !== 'tool-call' || found.has(p.toolCallId)) })
+  }
+  return final
 }
 
 export function historyMessages(rows: DBMessage[]): ModelMessage[] {
