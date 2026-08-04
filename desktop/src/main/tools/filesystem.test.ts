@@ -35,8 +35,34 @@ function crc32(buf: Buffer): number {
   return (crc ^ 0xffffffff) >>> 0
 }
 
-function buildZip(entries: Record<string, string>): Buffer {
-  const parts: Buffer[] = []
+// 最小 PDF 构造器:单页,Content 为 FlateDecode 压缩的文本流(文本用 UTF-16BE 十六进制串,兼容中文)
+function buildPdf(text: string, empty = false): Buffer {
+  const content = empty ? 'BT /F1 12 Tf ET' : `BT /F1 12 Tf ${pdfHex(text)} Tj ET`
+  const stream = deflateRawSync(Buffer.from(content, 'utf8'))
+  const head = Buffer.from(
+    '%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n' +
+      '2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n' +
+      '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>\nendobj\n' +
+      `4 0 obj\n<< /Length ${stream.length} /Filter /FlateDecode >>\nstream\n`,
+    'utf8',
+  )
+  return Buffer.concat([head, stream, Buffer.from('\nendstream\nendobj\n%%EOF\n', 'utf8')])
+}
+
+function pdfHex(text: string): string {
+  let hex = 'FEFF' // UTF-16BE BOM
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)!
+    if (cp > 0xffff) {
+      for (const c of String.fromCodePoint(cp)) hex += c.charCodeAt(0).toString(16).padStart(4, '0')
+    } else {
+      hex += cp.toString(16).padStart(4, '0')
+    }
+  }
+  return `<${hex}>`
+}
+
+function buildZip(entries: Record<string, string>): Buffer {  const parts: Buffer[] = []
   const central: Buffer[] = []
   let offset = 0
   for (const [name, content] of Object.entries(entries)) {
@@ -137,6 +163,22 @@ describe('file_read', () => {
     const tools = createFileTools(ctx)
     const out = await exec(tools.file_read, { path: 'report.docx' })
     expect(String(out)).toContain('Hello 中文')
+  })
+
+  it('extracts text from a .pdf file (FlateDecode stream)', async () => {
+    const { ctx, dir } = makeCtx()
+    fs.writeFileSync(path.join(dir, 'doc.pdf'), buildPdf('Hello PDF 你好世界'))
+    const tools = createFileTools(ctx)
+    const out = await exec(tools.file_read, { path: 'doc.pdf' })
+    expect(String(out)).toContain('Hello PDF 你好世界')
+  })
+
+  it('reports scanned/unsupported PDFs instead of crashing', async () => {
+    const { ctx, dir } = makeCtx()
+    fs.writeFileSync(path.join(dir, 'scan.pdf'), buildPdf('', true))
+    const tools = createFileTools(ctx)
+    const out = await exec(tools.file_read, { path: 'scan.pdf' })
+    expect(String(out)).toContain('无法提取文本')
   })
 
   it('rejects other binary formats with a clear error', async () => {

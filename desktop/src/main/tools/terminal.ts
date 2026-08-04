@@ -93,9 +93,29 @@ const BARE_DOLLAR_RE = /\$/
 // shell 拼接/重定向/后台:; && || | 反引号 > <(计划列 &&,统一拒 & 连同裸 & 一并覆盖)
 const SHELL_CHAR_RE = /[;|&<>`]/
 
+// pip 包安装参数白名单:纯包名(可带 ==版本)、-U/--upgrade、--user、-q/--quiet、--no-deps
+// 其余参数(URL、--index-url、--extra-index-url、-e 等)一律拒绝,防止任意源安装
+const PACKAGE_INSTALL_FLAGS = new Set(['-U', '--upgrade', '--user', '-q', '--quiet', '--no-deps'])
+const PACKAGE_NAME_RE = /^[a-zA-Z0-9_.\-]+(==[a-zA-Z0-9_.\-]+)?$/
+
+function isPackageInstall(command: string): boolean {
+  const parts = command.trim().split(/\s+/)
+  const bin = parts[0]
+  const args = bin.startsWith('python') ? parts.slice(4) : parts.slice(2)
+  const head = bin.startsWith('python') ? parts.slice(1, 4) : parts.slice(1, 2)
+  const okHead =
+    (bin === 'pip' || bin === 'pip3' || bin === 'python' || bin === 'python3') &&
+    (bin.startsWith('python') ? head.join(' ') === '-m pip install' : head[0] === 'install')
+  if (!okHead) return false
+  return args.length > 0 && args.every((a) => PACKAGE_INSTALL_FLAGS.has(a) || PACKAGE_NAME_RE.test(a))
+}
+
 export function needsApprovalFor(command: string, allowedDirs: string[]): boolean {
   if (!command.trim()) return true
   if (CONTROL_RE.test(command) || BARE_DOLLAR_RE.test(command) || SHELL_CHAR_RE.test(command)) return true
+  // 工具自安装(pip install):Agent 缺库时可自行安装(如 pip install pypdf),免审批;
+  // 严格限定包名参数,URL/索引源/卸载/任意 python 执行照常审批
+  if (isPackageInstall(command)) return false
   const first = command.trimStart().split(/\s+/, 1)[0]
   if (!WHITELIST.has(first)) return true
   for (const raw of command.split(/\s+/)) {

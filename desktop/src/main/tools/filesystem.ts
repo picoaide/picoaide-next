@@ -4,6 +4,7 @@ import { tool } from 'ai'
 import { z } from 'zod'
 import type { Tool } from 'ai'
 import iconv from 'iconv-lite'
+import { inflateRawSync } from 'node:zlib'
 import { isAllowed, ToolError } from './paths'
 
 // 高危工具清单:引擎层审批门控识别(run({ tools, highRiskTools: new Set(HIGH_RISK_TOOLS) }))
@@ -25,7 +26,7 @@ const MAX_SEARCH_RESULTS = 200
 
 // 无法解析为文本的二进制扩展(其余未知扩展按文本探测处理)
 const BINARY_EXTS = new Set([
-  'xlsx', 'xls', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'ico',
+  'xlsx', 'xls', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'ico',
   'zip', 'rar', '7z', 'gz', 'tar', 'jar', 'exe', 'dll', 'so', 'dylib', 'bin',
   'mp3', 'mp4', 'avi', 'mkv', 'doc', 'ppt', 'pptx', 'ttf', 'otf', 'woff', 'woff2',
 ])
@@ -114,8 +115,69 @@ async function readTextFile(absPath: string, forced?: string): Promise<string> {
   const buf = fs.readFileSync(absPath)
   const ext = path.extname(absPath).toLowerCase()
   if (ext === '.docx') return extractDocxText(buf)
+  if (ext === '.pdf' || isPdfMagic(buf)) return extractPdfText(buf)
   if (BINARY_EXTS.has(ext.slice(1))) throw new ToolError(`不支持解析该格式: ${ext}`)
   return decodeBuffer(buf, forced)
+}
+
+
+function isPdfMagic(buf: Buffer): boolean {
+  return buf.length > 4 && buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46 // %PDF
+}
+
+// PDF 纯文本提取(零依赖):扫 stream..endstream,FlateDecode 解压,提取 BT..ET 内 Tj/TJ/十六进制串。
+// 扫描件(无文本层)/格式异常 → 返回明确提示而非崩溃;常规办公 PDF(Word/PPT 导出)可正常提取。
+function extractPdfText(buf: Buffer): string {
+  const raw = buf.toString('latin1')
+  const streams: Buffer[] = []
+  const streamRe = /stream\r?\n([\s\S]*?)\r?\nendstream/g
+  let m: RegExpExecArray | null
+  while ((m = streamRe.exec(raw)) !== null) {
+    streams.push(Buffer.from(m[1], 'latin1'))
+  }
+  if (streams.length === 0) return '无法提取文本: 未找到内容流(可能为扫描件或损坏文件)'
+  const pages: string[] = []
+  for (const s of streams) {
+    let data: Buffer
+    try {
+      data = inflateRawSync(s)
+    } catch {
+      data = s // 未压缩流
+    }
+    const text = extractTextOperators(data.toString('latin1'))
+    if (text) pages.push(text)
+  }
+  if (pages.length === 0) return '无法提取文本: 内容流中未找到可解码文本(可能为扫描件)'
+  return pages.join('\n\n')
+}
+
+function extractTextOperators(content: string): string {
+  const out: string[] = []
+  const opRe = /(?:\(((?:[^()\\]|\\.)*)\)|\[([^\]]*)\]|<([0-9a-fA-F\s]+)>)\s*(?:Tj|'|TJ)/g
+  let m: RegExpExecArray | null
+  while ((m = opRe.exec(content)) !== null) {
+    if (m[1] !== undefined) out.push(decodePdfString(m[1]))
+    else if (m[2] !== undefined) {
+      const inner = /\(((?:[^()\\]|\\.)*)\)/g
+      let im: RegExpExecArray | null
+      while ((im = inner.exec(m[2])) !== null) out.push(decodePdfString(im[1]))
+    } else if (m[3] !== undefined) out.push(decodePdfHex(m[3]))
+  }
+  return out.join('')
+}
+
+function decodePdfString(raw: string): string {
+  return raw.replace(/\\([nrtbf()\\])/g, (_s, c: string) => ({ n: '\n', r: '\r', t: '\t', b: '\b', f: '\f' })[c] ?? c)
+}
+
+function decodePdfHex(hex: string): string {
+  const clean = hex.replace(/\s+/g, '')
+  if (clean.length % 2 !== 0) return ''
+  const bytes = Buffer.from(clean, 'hex')
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    return bytes.subarray(2).swap16().toString('utf16le') // UTF-16BE → LE → string
+  }
+  return bytes.toString('utf8')
 }
 
 export function createFileTools(ctx: FileToolContext): Record<string, Tool> {

