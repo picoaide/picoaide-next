@@ -447,11 +447,27 @@ ${PLAN_SYSTEM_NOTICE}`
             },
       )
       const reasoning = stepReasoning
+      // 本轮 assistant 行里的 tool-call id(用于区分跨轮结果 vs 本轮结果)
+      const currentToolCallIds = new Set(stepToolCalls.map((tc) => tc.toolCallId))
       stepText = ''
       stepReasoning = ''
       stepToolCalls.length = 0
       stepToolResults.length = 0
       if (!store.getConversation(conversationId)) return // 会话中途被删:跳过落库,不崩溃
+      // 落库顺序:SDK 要求 assistant(tool_calls) 后紧跟 tool 消息。
+      // 审批跨轮时,工具结果在下一轮才回传 —— 其结果行必须先落(紧跟上一轮已落库的
+      // assistant tool-call 行),再落本轮 assistant,最后落本轮配对的 tool 行。
+      for (const row of toolRows) {
+        if (currentToolCallIds.has(row.tool_call_id ?? '')) continue
+        store.appendMessage({
+          conversationId,
+          role: 'tool',
+          content: row.content,
+          toolCallId: row.tool_call_id,
+          toolName: row.tool_name,
+          isError: row.is_error === 1,
+        })
+      }
       store.appendMessage({
         conversationId,
         role: 'assistant',
@@ -460,6 +476,7 @@ ${PLAN_SYSTEM_NOTICE}`
         toolCalls: assistant.tool_calls,
       })
       for (const row of toolRows) {
+        if (!currentToolCallIds.has(row.tool_call_id ?? '')) continue
         store.appendMessage({
           conversationId,
           role: 'tool',
@@ -915,13 +932,41 @@ export function sanitizeMessages(messages: ModelMessage[]): ModelMessage[] {
       if (p.type === 'tool-approval-response') hasApproval = true
     }
   }
-  return messages.map((m) => {
-    if (m.role !== 'assistant' || !Array.isArray(m.content)) return m
+  const cleaned = messages.map((m) => {
+    if (hasApproval || m.role !== 'assistant' || !Array.isArray(m.content)) return m
     const parts = m.content as (TextPart | ToolCallPart)[]
-    if (hasApproval) return m
     if (!parts.some((p) => p.type === 'tool-call' && !toolIds.has(p.toolCallId))) return m
     return { ...m, content: parts.filter((p) => p.type !== 'tool-call' || toolIds.has(p.toolCallId)) }
   })
+  // 重排:旧版本审批跨轮落库顺序错乱,产生 assistant(tool-call) → assistant(文本) → tool(结果) 的历史,
+  // SDK 要求 tool-call 后紧跟 tool 消息。把错位的 tool 结果行提前到其 assistant 行之后(审批响应不重排)。
+  const ordered: ModelMessage[] = []
+  for (let i = 0; i < cleaned.length; i++) {
+    const m = cleaned[i]
+    if (m === null) continue // 已被提前的错位 tool 行
+    ordered.push(m)
+    if (m.role !== 'assistant' || !Array.isArray(m.content)) continue
+    const callIds = (m.content as ToolCallPart[]).filter((p) => p.type === 'tool-call').map((p) => p.toolCallId)
+    if (callIds.length === 0) continue
+    const next = cleaned[i + 1]
+    if (next && next.role === 'tool') continue // 已紧邻,无需重排
+    const grabbed: ModelMessage[] = []
+    for (let k = i + 1; k < cleaned.length; k++) {
+      const mm = cleaned[k]
+      if (
+        mm.role === 'tool' &&
+        Array.isArray(mm.content) &&
+        (mm.content as ToolResultPart[]).some(
+          (p) => p.type === 'tool-result' && callIds.includes(p.toolCallId),
+        )
+      ) {
+        grabbed.push(mm)
+        cleaned[k] = null as unknown as ModelMessage
+      }
+    }
+    ordered.push(...grabbed)
+  }
+  return ordered.filter((m) => m !== null)
 }
 
 export function historyMessages(rows: DBMessage[]): ModelMessage[] {

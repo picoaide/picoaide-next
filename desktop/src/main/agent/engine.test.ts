@@ -726,6 +726,27 @@ describe('AgentEngine continueConversation', () => {
     expect(calls.map((p) => p.toolCallId)).toEqual(['call_1'])
   })
 
+  it('sanitizeMessages reorders stray tool results to sit right after their assistant tool-call', () => {
+    // 旧版本(审批跨轮落库顺序错乱)产生的历史:assistant(tool-call) → assistant(文本) → tool(结果)
+    const msgs: ModelMessage[] = [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'X', toolName: 'file_read', input: '{}' }] },
+      { role: 'assistant', content: [{ type: 'text', text: '中间文本' }] },
+      { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'X', toolName: 'file_read', output: { type: 'text', value: 'ok' } }] },
+    ]
+    const out = sanitizeMessages(msgs)
+    const kinds = out.map((m) => m.role)
+    expect(kinds).toEqual(['user', 'assistant', 'tool', 'assistant'])
+    // 审批响应不得被重排(续跑依赖)
+    const appr: ModelMessage[] = [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'Y', toolName: 'file_delete', input: '{}' }] },
+      { role: 'tool', content: [{ type: 'tool-approval-response', approvalId: 'aitxt-9', approved: true, reason: 'ok' }] },
+    ]
+    const out2 = sanitizeMessages(appr)
+    expect(out2.map((m) => m.role)).toEqual(['user', 'assistant', 'tool'])
+  })
+
   it('historyMessages strips orphans from DB rows', () => {
     const rows: DBMessage[] = [
       { role: 'user', content: 'hi' },
@@ -813,6 +834,22 @@ describe('approval gate', () => {
     await run
     expect(deletedPaths).toEqual(['/home/u/x.doc'])
     expect(eventsOf(events, 'tool_end')).toHaveLength(1)
+  })
+
+  it('stores the tool result row immediately after its assistant tool-call row (approval spans rounds)', async () => {
+    const { events, engine, store } = makeEngine('tool-call')
+    const run = engine.craft({ conversationId: 1, content: 'delete it', tools, highRiskTools: new Set(['file_delete']) })
+    await waitFor(() => eventsOf(events, 'confirm_required').length === 1)
+    const req = eventsOf(events, 'confirm_required')[0] as { data: { request_id: string } }
+    engine.confirm(req.data.request_id, true)
+    await run
+    const rows = store.listMessages(1)
+    const callIdx = rows.findIndex((m) => m.role === 'assistant' && (m.tool_calls ?? '').includes('file_delete'))
+    const toolIdx = rows.findIndex((m) => m.role === 'tool')
+    expect(callIdx).toBeGreaterThanOrEqual(0)
+    // SDK 要求 assistant(tool_calls) 后紧跟 tool 消息;审批跨轮时结果在下一轮回传,
+    // 落库必须仍保持紧邻,否则下次加载历史报 MissingToolResultsError
+    expect(toolIdx).toBe(callIdx + 1)
   })
 
   it('deny rejects the tool (SDK tool-output-denied) and feeds denial back to the model', async () => {
