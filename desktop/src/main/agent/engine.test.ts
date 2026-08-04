@@ -822,14 +822,50 @@ describe('AgentEngine continueConversation', () => {
   })
 
   it('sanitizeMessages keeps tool-calls when an approval response is present (SDK resume needs them)', () => {
+    // 审批轮:assistant 带 tool-call + approval-request,response 带 approval-response → 该 tool-call 豁免(SDK 续跑)
     const msgs: ModelMessage[] = [
       { role: 'user', content: 'hi' },
-      { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'call_1', toolName: 'file_delete', input: '{}' }] },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool-call', toolCallId: 'call_1', toolName: 'file_delete', input: '{}' },
+          { type: 'tool-approval-request', approvalId: 'aitxt-1', toolCallId: 'call_1' },
+        ],
+      },
       { role: 'tool', content: [{ type: 'tool-approval-response', approvalId: 'aitxt-1', approved: false, reason: 'denied' }] },
     ]
     const out = sanitizeMessages(msgs)
-    const calls = out.filter((m) => m.role === 'assistant').flatMap((m) => m.content as Array<{ type: string; toolCallId: string }>)
+    const calls = out
+      .filter((m) => m.role === 'assistant')
+      .flatMap((m) => m.content as Array<{ type: string; toolCallId: string }>)
+      .filter((p) => p.type === 'tool-call')
     expect(calls.map((p) => p.toolCallId)).toEqual(['call_1'])
+  })
+
+  it('sanitizeMessages strips orphans even when an approval response is present (approval does not shield them)', () => {
+    // 回归:审批场景 + 模型输出畸形/未执行工具调用(无配对结果)时,
+    // 旧实现 hasApproval 一刀切跳过清洗 → 孤儿穿透到 SDK → MissingToolResultsError。
+    // 豁免只应覆盖审批轮自己的 tool-call,其他孤儿照常剥离。
+    const msgs: ModelMessage[] = [
+      { role: 'user', content: 'hi' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool-call', toolCallId: 'call_1', toolName: 'file_delete', input: '{}' },
+          { type: 'tool-approval-request', approvalId: 'aitxt-1', toolCallId: 'call_1' },
+        ],
+      },
+      { role: 'tool', content: [{ type: 'tool-approval-response', approvalId: 'aitxt-1', approved: true, reason: 'ok' }] },
+      { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'orphan_call', toolName: 'file_read', input: '{}' }] },
+      { role: 'assistant', content: [{ type: 'text', text: '继续' }] },
+    ]
+    const out = sanitizeMessages(msgs)
+    const calls = out
+      .filter((m) => m.role === 'assistant')
+      .flatMap((m) => m.content as Array<{ type: string; toolCallId: string }>)
+      .filter((p) => p.type === 'tool-call')
+      .map((p) => p.toolCallId)
+    expect(calls).toEqual(['call_1'])
   })
 
   it('sanitizeMessages reorders stray tool results to sit right after their assistant tool-call', () => {

@@ -5,6 +5,7 @@ import {
   type LanguageModel,
   type ModelMessage,
   type Tool,
+  type ToolApprovalRequest,
   type ToolApprovalResponse,
   type ToolCallPart,
   type ToolExecutionOptions,
@@ -957,21 +958,39 @@ export function createKbTools(session: Session): { tools: Record<string, Tool>; 
 // 每次 streamText 前调用,SDK 永不看到 unmatched tool calls。
 export function sanitizeMessages(messages: ModelMessage[]): ModelMessage[] {
   const toolIds = new Set<string>()
-  let hasApproval = false
+  // 审批豁免映射(与 SDK convert 语义一致):assistant 消息里的 tool-approval-request
+  // part(approvalId → toolCallId)+ tool 消息里的 approval-response → 该 tool-call 无需
+  // 配对 result(SDK 会为其补执行/拒绝结果)。豁免逐条判定,不整体跳过清洗:
+  // 审批场景下的其他孤儿(畸形 tool-call 等)照常剥离,否则穿透到 SDK 抛 MissingToolResultsError。
+  const approvalIdToToolCall = new Map<string, string>()
+  const approvedToolCallIds = new Set<string>()
   for (const m of messages) {
+    if (m.role === 'assistant' && Array.isArray(m.content)) {
+      for (const p of m.content as (ToolCallPart | ToolApprovalRequest)[]) {
+        if (p.type === 'tool-approval-request' && 'approvalId' in p && 'toolCallId' in p) {
+          const req = p as unknown as { approvalId: string; toolCallId: string }
+          approvalIdToToolCall.set(req.approvalId, req.toolCallId)
+        }
+      }
+    }
     if (m.role !== 'tool' || !Array.isArray(m.content)) continue
     for (const p of m.content as (ToolResultPart | ToolApprovalResponse)[]) {
       if (p.type === 'tool-result' && p.toolCallId) toolIds.add(p.toolCallId)
-      // approval-response 的 approvalId 与 tool-call 的 toolCallId 由 SDK 内部映射,消息层无法推导;
-      // 存在任何审批响应时保守保留全部 tool-call(SDK 续跑依赖它们),孤儿清洗只对无审批消息生效
-      if (p.type === 'tool-approval-response') hasApproval = true
+      if (p.type === 'tool-approval-response') {
+        const tc = approvalIdToToolCall.get(p.approvalId)
+        if (tc) approvedToolCallIds.add(tc)
+      }
     }
   }
+  const shielded = (id: string) => approvedToolCallIds.has(id)
   const cleaned = messages.map((m) => {
-    if (hasApproval || m.role !== 'assistant' || !Array.isArray(m.content)) return m
+    if (m.role !== 'assistant' || !Array.isArray(m.content)) return m
     const parts = m.content as (TextPart | ToolCallPart)[]
-    if (!parts.some((p) => p.type === 'tool-call' && !toolIds.has(p.toolCallId))) return m
-    return { ...m, content: parts.filter((p) => p.type !== 'tool-call' || toolIds.has(p.toolCallId)) }
+    if (!parts.some((p) => p.type === 'tool-call' && !toolIds.has(p.toolCallId) && !shielded(p.toolCallId))) return m
+    return {
+      ...m,
+      content: parts.filter((p) => p.type !== 'tool-call' || toolIds.has(p.toolCallId) || shielded(p.toolCallId)),
+    }
   })
   // 拆分:一条 tool 消息含多个 tool-result part 时按 toolCallId 拆成多条,
   // 否则下面的重排把整条提前会让后面的 assistant 丢失配对(重排抓取以 assistant 为单位)。
@@ -1019,8 +1038,8 @@ export function sanitizeMessages(messages: ModelMessage[]): ModelMessage[] {
   }
   const reordered = ordered.filter((m) => m !== null)
   // 位置镜像检查(SDK convert 语义):每条 assistant 的 tool-call 在其后到下一个 user 消息之前
-  // 必须有配对 tool-result,否则剥离。与 SDK 检查完全对齐,兜底重排/拆分的任何遗漏。
-  if (hasApproval) return reordered
+  // 必须有配对 tool-result,否则剥离。与 SDK 检查完全对齐,兜底重排/拆分的任何遗漏;
+  // 审批豁免逐条判定(有审批回执的 tool-call 由 SDK 续跑补结果,不剥离)。
   const final: ModelMessage[] = []
   for (let i = 0; i < reordered.length; i++) {
     const m = reordered[i]
@@ -1044,7 +1063,10 @@ export function sanitizeMessages(messages: ModelMessage[]): ModelMessage[] {
         }
       }
     }
-    final.push({ ...m, content: parts.filter((p) => p.type !== 'tool-call' || found.has(p.toolCallId)) })
+    final.push({
+      ...m,
+      content: parts.filter((p) => p.type !== 'tool-call' || found.has(p.toolCallId) || shielded(p.toolCallId)),
+    })
   }
   return final
 }
