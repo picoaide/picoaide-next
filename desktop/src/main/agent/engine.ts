@@ -192,7 +192,7 @@ export class AgentEngine {
     this.assertConversation(conversationId)
     store.updateConversationStatus(conversationId, 'planning')
     // 上下文窗口:发送给 LLM 的历史最多最近 50 条(超出仅存 DB 供 UI 查看)
-    const history = store.listMessages(conversationId).map(toModelMessage)
+    const history = historyMessages(store.listMessages(conversationId))
     store.appendMessage({ conversationId, role: 'user', content })
     const messages: ModelMessage[] = [...lastN(history, DEFAULT_CONTEXT_WINDOW), { role: 'user', content }]
     const tools = readOnlyTools(input.tools ?? {}) as Record<string, GatedTool>
@@ -231,7 +231,7 @@ ${PLAN_SYSTEM_NOTICE}`
     const store = this.deps.store as StoreLike
     store.updateConversationStatus(conversationId, runStatus)
     // 上下文窗口:发送给 LLM 的历史最多最近 50 条(超出仅存 DB 供 UI 查看)
-    const history = store.listMessages(conversationId).map(toModelMessage)
+    const history = historyMessages(store.listMessages(conversationId))
     store.appendMessage({ conversationId, role: 'user', content })
     const messages: ModelMessage[] = [...lastN(history, DEFAULT_CONTEXT_WINDOW), { role: 'user', content }]
 
@@ -329,7 +329,7 @@ ${PLAN_SYSTEM_NOTICE}`
     this.assertConversation(conversationId)
     store.updateConversationStatus(conversationId, 'running')
     // 上下文窗口:发送给 LLM 的历史最多最近 50 条(超出仅存 DB 供 UI 查看)
-    const history = store.listMessages(conversationId).map(toModelMessage)
+    const history = historyMessages(store.listMessages(conversationId))
     store.appendMessage({ conversationId, role: 'user', content })
     const messages: ModelMessage[] = [...lastN(history, DEFAULT_CONTEXT_WINDOW), { role: 'user', content }]
     await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps)
@@ -358,7 +358,7 @@ ${PLAN_SYSTEM_NOTICE}`
       throw new Error(`conversation ${conversationId} has no user message`)
     }
     store.updateConversationStatus(conversationId, input.status ?? 'running')
-    const history = rows.slice(0, idx + 1).map(toModelMessage)
+    const history = historyMessages(rows.slice(0, idx + 1))
     const messages = lastN(history, DEFAULT_CONTEXT_WINDOW)
     const maxSteps = input.maxSteps ?? this.cfg.maxSteps ?? DEFAULT_MAX_STEPS
     await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps)
@@ -898,6 +898,27 @@ export function createKbTools(session: Session): { tools: Record<string, Tool>; 
 }
 
 // ---- 消息转换(DB 行 ↔ AI SDK 消息) ----
+
+// 历史清洗:丢弃无配对 tool 结果的 tool-call part。
+// 孤儿产生路径:审批轮 finish-step 落库 assistant(tool_calls) 后会话终止(取消/步数超限/进程中断),
+// 工具结果行永不落库 → 下次从 DB 加载历史时 SDK 抛 MissingToolResultsError。防御式过滤,配对的保留。
+export function historyMessages(rows: DBMessage[]): ModelMessage[] {
+  const messages = rows.map(toModelMessage)
+  const toolIds = new Set<string>()
+  for (const m of messages) {
+    if (m.role !== 'tool' || !Array.isArray(m.content)) continue
+    for (const p of m.content as ToolResultPart[]) {
+      if (p.type === 'tool-result' && p.toolCallId) toolIds.add(p.toolCallId)
+    }
+  }
+  return messages.map((m) => {
+    if (m.role !== 'assistant' || !Array.isArray(m.content)) return m
+    const parts = m.content as (TextPart | ToolCallPart)[]
+    const orphans = parts.some((p) => p.type === 'tool-call' && !toolIds.has(p.toolCallId))
+    if (!orphans) return m
+    return { ...m, content: parts.filter((p) => p.type !== 'tool-call' || toolIds.has(p.toolCallId)) }
+  })
+}
 
 export function toModelMessage(row: DBMessage): ModelMessage {
   if (row.role === 'user') return { role: 'user', content: row.content }

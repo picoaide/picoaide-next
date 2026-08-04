@@ -703,6 +703,34 @@ describe('AgentEngine continueConversation', () => {
     expect(JSON.stringify(prompt)).not.toContain('部分输出')
   })
 
+  it('strips orphan tool_calls from history so the SDK never sees unmatched tool calls', async () => {
+    // 场景:审批轮落库 assistant(tool_calls) 后会话终止(取消/步数超限),tool 行永不落库 → 历史孤儿
+    const store = makeStore()
+    store.appendMessage({ conversationId: 1, role: 'user', content: '删除文件' })
+    store.appendMessage({
+      conversationId: 1,
+      role: 'assistant',
+      content: '',
+      toolCalls: JSON.stringify([{ tool_call_id: 'orphan_1', tool_name: 'file_delete', args: { path: '/x' } }]),
+    })
+    const { events, engine } = makeEngine('text', {}, store)
+    await engine.craft({ conversationId: 1, content: '继续', tools, highRiskTools: new Set() })
+    expect(eventsOf(events, 'error')).toHaveLength(0)
+    expect(eventsOf(events, 'done')).toHaveLength(1)
+    // 配对的 tool_calls 必须保留
+    store.appendMessage({ conversationId: 1, role: 'user', content: '写文件' })
+    store.appendMessage({
+      conversationId: 1,
+      role: 'assistant',
+      content: '',
+      toolCalls: JSON.stringify([{ tool_call_id: 'paired_1', tool_name: 'file_write', args: { path: '/y' } }]),
+    })
+    store.appendMessage({ conversationId: 1, role: 'tool', content: 'done', toolCallId: 'paired_1', toolName: 'file_write' })
+    const { engine: engine2, events: events2 } = makeEngine('text', {}, store)
+    await engine2.craft({ conversationId: 1, content: '再来', tools, highRiskTools: new Set() })
+    expect(eventsOf(events2, 'done')).toHaveLength(1)
+  })
+
   it('emits an error when there is no user message to resume from', async () => {
     const store = makeStore()
     store.updateConversationStatus(1, 'running')
