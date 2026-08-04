@@ -16,6 +16,8 @@ const CANCEL_FALLBACK_MS = 3000
 // 运行代次:每次新任务递增;cancel 兜底定时器只复位"自己那代"的 streaming,
 // 防止取消后 3s 内用户重发时误复位新运行的 streaming/审批队列
 let runToken = 0
+// 新建会话防重入(双击快速点击创建两个空会话)
+let creatingConversation = false
 
 export interface ChatMessage {
   id: number
@@ -84,7 +86,7 @@ interface ChatState {
   loadConversations: () => Promise<void>
   selectConversation: (id: number) => Promise<void>
   deleteConversation: (id: number) => Promise<void>
-  sendMessage: (content: string) => Promise<void>
+  sendMessage: (content: string) => Promise<boolean>
   continueConversation: (id: number) => Promise<void>
   approvePlan: (id: number, ok: boolean) => Promise<void>
   cancel: () => Promise<void>
@@ -134,13 +136,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingPrompt: null,
 
   newConversation: async () => {
-    // 流式运行中新建:先停当前任务,否则旧 run 事件串到新会话且引擎单槽被占
-    if (get().streaming) await picoaide().chatCancel()
-    const id = await picoaide().chatNew({ mode: get().mode, projectId: get().activeProjectId })
-    const [conversations, projects] = await Promise.all([picoaide().chatList(), picoaide().projectList()])
-    pendingDelta = ''
-    set({ conversations, projects, activeId: id, messages: [], artifacts: [], streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], localError: null, hasMoreMessages: false, loadedTotal: 0 })
-    return id
+    if (creatingConversation) return null
+    creatingConversation = true
+    try {
+      // 流式运行中新建:先停当前任务,否则旧 run 事件串到新会话且引擎单槽被占
+      if (get().streaming) await picoaide().chatCancel()
+      const id = await picoaide().chatNew({ mode: get().mode, projectId: get().activeProjectId })
+      const [conversations, projects] = await Promise.all([picoaide().chatList(), picoaide().projectList()])
+      pendingDelta = ''
+      set({ conversations, projects, activeId: id, messages: [], artifacts: [], streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], localError: null, hasMoreMessages: false, loadedTotal: 0 })
+      return id
+    } finally {
+      creatingConversation = false
+    }
   },
 
   loadProjects: async () => {
@@ -233,26 +241,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  sendMessage: async (content) => {
+  sendMessage: async (content): Promise<boolean> => {
     const text = content.trim()
-    if (!text) return
+    if (!text) return false
     if (get().streaming) {
       // 回复中发新消息 → 排队到当前步骤后(引擎多步队列,不打断);消息立即落库并刷新列表
       const id = get().activeId
-      if (id === null) return
+      if (id === null) return false
       const ok = await picoaide().chatQueue(id, text)
       if (ok) {
         toast('已排队,当前步骤完成后自动处理')
         void reloadMessages()
-      } else {
-        set({ localError: '当前任务即将结束或会话已切换,请稍后再发' })
+        return true
       }
-      return
+      set({ localError: '当前任务即将结束或会话已切换,请稍后再发' })
+      return false
     }
     const conn = useConnectionStore.getState().status
     if (conn !== 'online') {
       set({ localError: '网络已断开,请恢复连接后再发送' })
-      return
+      return false
     }
     // 同步置 streaming:关闭 chatNew await 期间双击/并发发送的竞态窗口(第二个发送直接返回)
     pendingDelta = ''
@@ -272,12 +280,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }))
       await picoaide().chatAsk(id, text, get().mode)
       // 期间用户切走/新建会话:丢弃本次结果,不覆盖新会话视图
-      if (useChatStore.getState().activeId !== id) return
+      if (useChatStore.getState().activeId !== id) return false
       const messages = mapMessages(await picoaide().chatMessages(id))
       set({ messages, streaming: false, streamingText: '', streamingReasoning: '' })
       await get().loadConversations()
+      return true
     } catch {
       set((s) => ({ streaming: false, streamingText: '', streamingReasoning: '', localError: s.localError ?? '发送失败,请重试' }))
+      return false
     }
   },
 

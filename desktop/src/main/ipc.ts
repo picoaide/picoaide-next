@@ -299,15 +299,22 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
       if (deps.autoTitle) void deps.autoTitle({ conversationId })
     },
     'chat:deleteMessage': ({ messageId }) => deps.store.deleteMessage(messageId),
-    // 分页(4.4):offset 从最新消息往前数,offset=0 返回最新 limit 条
+    // 分页(4.4):offset 从最新消息往前数,offset=0 返回最新 limit 条;参数显式夹取防越界
     'chat:messagesPaged': ({ conversationId, offset, limit }) => {
+      const safeOffset = Math.max(0, Math.floor(offset))
+      const safeLimit = Math.min(500, Math.max(1, Math.floor(limit)))
       const all = deps.store.listMessages(conversationId)
-      const end = all.length - offset
-      const start = Math.max(0, end - limit)
-      return all.slice(start, end)
+      const end = all.length - safeOffset
+      const start = Math.max(0, end - safeLimit)
+      return all.slice(start, Math.max(start, end))
     },
     'chat:artifacts': ({ conversationId }) => deps.store.listArtifacts(conversationId),
-    'chat:delete': ({ conversationId }) => deps.store.deleteConversation(conversationId),
+    'chat:delete': async ({ conversationId }) => {
+      // 删除运行中会话:先中止引擎,避免运行中的写库/FK 报错把结果吞掉
+      const e = await getEngine()
+      if (e.runningConversation === conversationId) e.cancel()
+      deps.store.deleteConversation(conversationId)
+    },
     'chat:rename': ({ conversationId, title }) => deps.store.setConversationTitle(conversationId, title),
     'chat:setStarred': ({ conversationId, starred }) => deps.store.setConversationStarred(conversationId, starred),
     'chat:setArchived': ({ conversationId, archived }) => deps.store.setConversationArchived(conversationId, archived),
@@ -322,15 +329,18 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
         .map((c) => ({ conversationId: c.id, title: c.title || '新会话', snippet: '' }))
       const byMsg: { conversationId: number; title: string; snippet: string }[] = []
       const convs = deps.store.listConversations()
+      let scanned = 0
+      const MAX_SCAN = 20000 // 扫描上限:大库全表 LIKE 会卡主进程,达到即截断返回
       for (const c of convs) {
         const rows = deps.store.listMessages(c.id)
         for (const m of rows) {
+          if (++scanned > MAX_SCAN) return [...byTitle, ...byMsg]
           if (m.role !== 'user' && m.role !== 'assistant') continue
           const idx = m.content.toLowerCase().indexOf(q.toLowerCase())
           if (idx >= 0) {
             const start = Math.max(0, idx - 30)
             const snippet = (start > 0 ? '…' : '') + m.content.slice(start, idx + q.length + 30) + '…'
-            byMsg.push({ conversationId: c.id, title: c.title || '新会话', snippet })
+            byMsg.push({ conversationId: c.id, title: c.title || '未命名会话', snippet })
             if (byMsg.length >= 20) break
           }
         }

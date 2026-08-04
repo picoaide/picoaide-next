@@ -8,27 +8,26 @@ export interface RunConfig<T extends Record<string, unknown> = Record<string, un
 }
 
 // 只读工具白名单(计划模式):可读文件/搜索/浏览/查知识库,禁止一切写入、执行与浏览器操作。
-// 白名单按工具名前缀/精确名匹配,新增工具默认在计划模式下不可用(安全默认)。
-// 注意:screen_capture/clipboard_read 虽是"读",但属高危敏感操作(架构 §5 审批门控),
+// 全精确名匹配:前缀匹配会被 MCP 插件的同名工具误命中(如插件工具叫 web_xxx 在 plan 模式开放)。
+// 新增工具默认在计划模式下不可用(安全默认);screen_capture/clipboard_read 是"读"但属高危,
 // 不进只读名单 —— 它们在计划模式也要走审批(engine.plan 传 highRiskTools)。
-const READ_ONLY_MATCHERS: Array<{ prefix?: string; exact?: string }> = [
-  { exact: 'file_read' },
-  { exact: 'file_list' },
-  { exact: 'file_search' },
-  { prefix: 'web_' },
-  { exact: 'browser_tab_info' },
-  { exact: 'browser_get_content' },
-  { prefix: 'kb_' },
-]
-// kb_upload 走 kb_ 前缀但实际是数据外发,计划模式必须排除
-const READ_ONLY_EXCLUDE = new Set(['kb_upload'])
+const READ_ONLY_NAMES = new Set([
+  'file_read',
+  'file_list',
+  'file_search',
+  'web_fetch',
+  'web_search',
+  'browser_tab_info',
+  'browser_get_content',
+  'kb_search',
+  'kb_read',
+  'kb_list',
+])
 
 export function readOnlyTools<T extends Record<string, unknown>>(tools: T): T {
   const out: Record<string, unknown> = {}
   for (const [name, t] of Object.entries(tools)) {
-    if (READ_ONLY_EXCLUDE.has(name)) continue
-    const hit = READ_ONLY_MATCHERS.some((m) => (m.exact !== undefined ? name === m.exact : name.startsWith(m.prefix ?? '')))
-    if (hit) out[name] = t
+    if (READ_ONLY_NAMES.has(name)) out[name] = t
   }
   return out as T
 }

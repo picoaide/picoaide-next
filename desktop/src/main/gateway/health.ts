@@ -16,11 +16,12 @@ export async function ping(serverURL: string, token: string): Promise<HealthStat
 export function createHealthPoller(session: Session, opts: { intervalMs: number }) {
   let timer: ReturnType<typeof setInterval> | null = null
   let inFlight = false
+  let stopped = false
   return {
     start(cb: (status: HealthStatus) => void): void {
       if (timer) return
       const tick = async () => {
-        if (inFlight) return // 上一轮 ping 未返回:跳过,不堆叠请求、不覆盖新鲜结果
+        if (inFlight || stopped) return // 上一轮 ping 未返回:跳过;已停止:不再回调(登出后不闪现旧状态)
         inFlight = true
         try {
           cb(await ping(session.serverURL, session.token))
@@ -32,6 +33,7 @@ export function createHealthPoller(session: Session, opts: { intervalMs: number 
       void tick()
     },
     stop(): void {
+      stopped = true
       if (timer) {
         clearInterval(timer)
         timer = null

@@ -110,7 +110,7 @@ function isPackageInstall(command: string): boolean {
   return args.length > 0 && args.every((a) => PACKAGE_INSTALL_FLAGS.has(a) || PACKAGE_NAME_RE.test(a))
 }
 
-export function needsApprovalFor(command: string, allowedDirs: string[]): boolean {
+export function needsApprovalFor(command: string, allowedDirs: string[], cwd = process.cwd()): boolean {
   if (!command.trim()) return true
   if (CONTROL_RE.test(command) || BARE_DOLLAR_RE.test(command) || SHELL_CHAR_RE.test(command)) return true
   // 工具自安装(pip install):Agent 缺库时可自行安装(如 pip install pypdf),免审批;
@@ -119,7 +119,11 @@ export function needsApprovalFor(command: string, allowedDirs: string[]): boolea
   const first = command.trimStart().split(/\s+/, 1)[0]
   if (!WHITELIST.has(first)) return true
   for (const raw of command.split(/\s+/)) {
-    const arg = stripQuotes(raw.trim())
+    let arg = stripQuotes(raw.trim())
+    if (process.platform === 'win32') {
+      // cmd 的 %VAR% 环境变量展开 + 反斜杠路径按同一规则判定(否则 %USERPROFILE%\x 免审批越界)
+      arg = expandEnv(arg).replace(/\\/g, '/')
+    }
     if (!arg || arg === '-' || arg.startsWith('-')) continue
     // 赋值 token 不是路径(如 FOO=bar cmd),跳过路径判定
     if (arg.includes('=')) continue
@@ -127,8 +131,8 @@ export function needsApprovalFor(command: string, allowedDirs: string[]): boolea
     // 否则 cat ../se'c'ret.txt 等拼接可绕过路径校验免审批越界读写
     const dequoted = arg.replace(/['"]/g, '')
     if (dequoted !== arg) {
-      if (!isPathLike(dequoted)) continue
-      if (!isAllowed(expandHome(dequoted), allowedDirs)) return true
+      if (!isPathLike(dequoted, cwd)) continue
+      if (!isAllowed(resolve(cwd, expandHome(dequoted)), allowedDirs)) return true
       continue
     }
     // glob/brace 展开发生在 shell 侧,静态无法判定展开后的目标路径。
@@ -138,8 +142,8 @@ export function needsApprovalFor(command: string, allowedDirs: string[]): boolea
       if (/^([~.]|\.\.)/.test(arg) || arg.includes('/')) return true
       continue
     }
-    if (!isPathLike(arg)) continue
-    if (!isAllowed(expandHome(arg), allowedDirs)) return true
+    if (!isPathLike(arg, cwd)) continue
+    if (!isAllowed(resolve(cwd, expandHome(arg)), allowedDirs)) return true
   }
   return false
 }
@@ -152,14 +156,19 @@ function stripQuotes(s: string): string {
 }
 
 // 仅处理绝对 / ~ / . 开头、含 / 或相对 cwd 真实存在的 token(echo hi 之类普通词不误判)
-function isPathLike(arg: string): boolean {
+function isPathLike(arg: string, cwd: string): boolean {
   if (arg.startsWith('/') || arg.startsWith('~') || arg.startsWith('.')) return true
   if (arg.includes('/')) return true
   try {
-    return existsSync(resolve(process.cwd(), arg))
+    return existsSync(resolve(cwd, arg))
   } catch {
     return false
   }
+}
+
+// cmd 的 %VAR%(如 %USERPROFILE%\Desktop\x.txt):展开后按路径判定
+function expandEnv(s: string): string {
+  return s.replace(/%([^%]+)%/g, (_, k: string) => process.env[k] ?? '')
 }
 
 function expandHome(arg: string): string {

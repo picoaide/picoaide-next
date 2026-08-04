@@ -89,6 +89,8 @@ function buildMenu(): void {
 
 // 最近一次成功登录的服务器地址(设置表持久化),OIDC 深链回跳时用
 let lastServerURL: string | null = null
+// 自动标题 in-flight 锁(同会话并发去重,防止 ask+editAndRerun 双网关调用)
+const titleInflight = new Set<number>()
 // 启动扫描未完成任务用(架构设计 §3.3.1a):whenReady 内注入 store
 let appStore: StoreLike | null = null
 // 引擎重置钩子:登出/换账号时丢弃缓存的 AgentEngine(持有旧会话 model/token)
@@ -187,10 +189,11 @@ async function buildToolsRegistry(db: ReturnType<typeof openDb>, workspace?: str
         return { stdout: r.stdout, stderr: r.stderr, code: r.code, timedOut: r.timedOut ?? false }
       },
     }),
-    // 命令审批策略(架构设计 §3.4):白名单命令免审批,其余走引擎门控
+    // 命令审批策略(架构设计 §3.4):白名单命令免审批,其余走引擎门控;
+    // 相对路径判定以实际执行 cwd(会话 workspace)为基准,防止判定基准错位放行越界
     requiresApproval: (input: unknown) => {
       const command = (input as { command?: string } | null)?.command
-      return typeof command === 'string' && needsApprovalFor(command, allowedDirs)
+      return typeof command === 'string' && needsApprovalFor(command, allowedDirs, cwd)
     },
   }
   const tools: Record<string, GatedTool> = {
@@ -416,28 +419,36 @@ app.whenReady().then(async () => {
       autoTitle: async ({ conversationId }) => {
         const conv = store.getConversation(conversationId)
         if (!conv || conv.title !== '') return
-        const msgs = store.listMessages(conversationId)
-        const firstUser = msgs.find((m) => m.role === 'user')
-        if (!firstUser || !firstUser.content) return
-        const session = getCurrentSession()
-        if (!session) return
-        const bootstrap = getBootstrapCache()
-        const model = bootstrap.models.find((m) => m.id === bootstrap.default_model) ?? bootstrap.models[0]
-        if (!model) return
-        let title = ''
+        // 并发去重:ask + editAndRerun 双触发时只跑一次(同会话 in-flight 锁)
+        if (titleInflight.has(conversationId)) return
+        titleInflight.add(conversationId)
         try {
-          title = await generateTitle(
-            makeGatewayModel(session.serverURL, session.token, model.id),
-            firstUser.content,
-          )
-        } catch {
-          // 网关失败兜底:截取首条用户消息
-          title = fallbackTitle(firstUser.content)
-        }
-        if (title) {
-          store.setConversationTitle(conversationId, title)
-          // 实时通知 renderer 刷新侧边栏标题(不等下次 loadConversations)
-          mainWindow?.webContents.send('chat:title', { conversationId, title })
+          const msgs = store.listMessages(conversationId)
+          const firstUser = msgs.find((m) => m.role === 'user')
+          if (!firstUser || !firstUser.content) return
+          const session = getCurrentSession()
+          if (!session) return
+          const bootstrap = getBootstrapCache()
+          const model = bootstrap.models.find((m) => m.id === bootstrap.default_model) ?? bootstrap.models[0]
+          if (!model) return
+          let title = ''
+          try {
+            title = await generateTitle(
+              makeGatewayModel(session.serverURL, session.token, model.id),
+              firstUser.content,
+            )
+          } catch {
+            // 网关失败兜底:截取首条用户消息
+            title = fallbackTitle(firstUser.content)
+          }
+          // 生成期间用户可能已手动重命名:仅在仍为空时写入
+          if (title && store.getConversation(conversationId)?.title === '') {
+            store.setConversationTitle(conversationId, title)
+            // 实时通知 renderer 刷新侧边栏标题(不等下次 loadConversations)
+            mainWindow?.webContents.send('chat:title', { conversationId, title })
+          }
+        } finally {
+          titleInflight.delete(conversationId)
         }
       },
       registerEngineReset: (reset) => {

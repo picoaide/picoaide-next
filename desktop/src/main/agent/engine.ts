@@ -179,6 +179,11 @@ export class AgentEngine {
     return this.pendingApprovals.size
   }
 
+  // 当前运行任务所属会话(ipc 删除会话/登出时判断是否需先中止)
+  get runningConversation(): number | null {
+    return this.runningConversationId
+  }
+
   // 回复中用户发新消息:入队,当前步骤(轮)完成后自动处理,不打断运行。
   // 仅对正在运行的多步任务(craft/continue)开放;消息立即落库 user 行,
   // 中断/步数超限后 continue 截断重跑会自然从这条消息继续。

@@ -98,13 +98,19 @@ export default function ChatInput() {
     textareaRef.current?.focus()
   }
 
-  const send = () => {
+  const send = async () => {
     const text = value.trim()
     if (!text) return
+    const ok = await sendMessage(text)
+    // 发送/排队失败:回填输入框,不静默丢用户输入
+    if (!ok) {
+      setValue(text)
+      textareaRef.current?.focus()
+      return
+    }
     setHistory((h) => [...h, text].slice(-20))
     setHistoryIdx(-1)
     setValue('')
-    void sendMessage(text)
   }
 
   const onApprove = async (ok: boolean) => {
@@ -119,7 +125,7 @@ export default function ChatInput() {
     // Ctrl/Cmd+Enter 发送(chatbox 快捷键)
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault()
-      send()
+      void send()
       return
     }
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -129,7 +135,7 @@ export default function ChatInput() {
         applySuggestion(line, line.items[0])
         return
       }
-      send()
+      void send()
       return
     }
     // ↑ 空输入时找回历史

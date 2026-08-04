@@ -259,11 +259,11 @@ describe('chat:new / chat:delete', () => {
     expect(store.listConversations()[0]).toMatchObject({ id, title: 'first chat', mode: 'ask' })
   })
 
-  it('chat:delete removes the conversation', () => {
+  it('chat:delete removes the conversation', async () => {
     const { deps, store } = makeDeps()
     const handlers = buildAgentHandlers(deps)
     const id = handlers['chat:new']({})
-    handlers['chat:delete']({ conversationId: id })
+    await handlers['chat:delete']({ conversationId: id })
     expect(store.getConversation(id)).toBeNull()
   })
 
