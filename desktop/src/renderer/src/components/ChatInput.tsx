@@ -4,7 +4,7 @@ import { Button } from './ui/button'
 import { Textarea } from './ui/textarea'
 import { cn } from '../lib/utils'
 import { useChatStore, type Mode } from '../stores/chat'
-import { useAuthStore } from '../stores/auth'
+
 import { parseCommandLine, parseMentionLine, type ChatboxLine } from '../lib/chatbox'
 
 const MODES: { id: Mode; label: string; available: boolean }[] = [
@@ -34,7 +34,6 @@ export default function ChatInput() {
   const conversations = useChatStore((s) => s.conversations)
   const pendingQuote = useChatStore((s) => s.pendingQuote)
   const consumeQuote = useChatStore((s) => s.consumeQuote)
-  const bootstrap = useAuthStore((s) => s.bootstrap)
   const [files, setFiles] = useState<string[]>([])
   const [installedSkills, setInstalledSkills] = useState<string[]>([])
   const activeStatus = activeId === null ? null : (conversations.find((c) => c.id === activeId)?.status ?? null)
@@ -68,9 +67,12 @@ export default function ChatInput() {
     }
   }, [pendingQuote, consumeQuote])
 
-  const commandItems = (bootstrap?.skills ?? []).map((s) => s.name)
+  // / 命令候选 = 本地已装技能(服务端 bootstrap.skills 只是商店建议清单,未安装的不可用)
+  const commandItems = installedSkills
   const line: ChatboxLine =
     value.trim() === '' ? null : (parseCommandLine(value, commandItems) ?? parseMentionLine(value, files, installedSkills))
+  // /xxx 无匹配(parse 返回 null)时也要弹出菜单给出反馈,否则用户以为没有命令菜单
+  const slashNoMatch = !line && /^\/\S*$/.test(value.trim())
 
   const applySuggestion = (l: ChatboxLine, text: string) => {
     if (!l) return
@@ -152,6 +154,14 @@ export default function ChatInput() {
           ...line.skills.map((s) => ({ id: `s-${s}`, text: s, icon: <Sparkles className="h-3.5 w-3.5" /> })),
         ]
     : []
+  const showMenu = !!line || slashNoMatch
+  const emptyHint = slashNoMatch || (line && line.kind === 'command' && line.items.length === 0)
+    ? '无可用技能,请到 设置 → 技能 从服务端商城安装'
+    : line && line.kind === 'mention' && line.files.length === 0 && line.skills.length === 0
+      ? '无匹配的文件或技能'
+      : null
+
+  const basename = (p: string) => p.split(/[\\/]/).pop() || p
 
   return (
     <div className="border-t bg-background px-4 py-3">
@@ -183,19 +193,24 @@ export default function ChatInput() {
           </div>
         ) : (
           <div className="relative">
-            {line && suggestions.length > 0 && (
+            {showMenu && (
               <div className="absolute bottom-full left-0 z-10 mb-1 max-h-48 w-full overflow-y-auto rounded-md border bg-popover shadow-md">
-                {suggestions.map((s) => (
-                  <button
-                    key={s.id}
-                    type="button"
-                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-accent"
-                    onClick={() => applySuggestion(line, s.text)}
-                  >
-                    {s.icon}
-                    <span className="truncate">{s.text}</span>
-                  </button>
-                ))}
+                {suggestions.length > 0 ? (
+                  suggestions.map((s) => (
+                    <button
+                      key={s.id}
+                      type="button"
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-accent"
+                      title={s.text}
+                      onClick={() => applySuggestion(line!, s.text)}
+                    >
+                      {s.icon}
+                      <span className="truncate">{basename(s.text)}</span>
+                    </button>
+                  ))
+                ) : (
+                  <div className="px-3 py-2 text-sm text-muted-foreground">{emptyHint}</div>
+                )}
               </div>
             )}
             <div className="flex items-end gap-2">
