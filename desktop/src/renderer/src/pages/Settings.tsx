@@ -175,7 +175,7 @@ export default function Settings({ onBack }: { onBack: () => void }) {
         <CardContent>
           <div className="flex items-center gap-2">
             {ACCENTS.map((a) => {
-              const active = accent === a.value
+              const active = accent === '' ? a.name === '默认' : accent === a.value
               return (
                 <button
                   key={a.name}

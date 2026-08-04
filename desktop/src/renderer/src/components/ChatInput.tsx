@@ -182,16 +182,11 @@ export default function ChatInput() {
         <div className="flex items-center gap-1">
           <Tabs value={mode} onValueChange={(v) => setMode(v as Mode)}>
             <TabsList>
-              <TooltipProvider delayDuration={300}>
-                {MODES.map((m) => (
-                  <Tooltip key={m.id}>
-                    <TooltipTrigger asChild>
-                      <TabsTrigger value={m.id}>{m.label}</TabsTrigger>
-                    </TooltipTrigger>
-                    <TooltipContent>{m.hint}</TooltipContent>
-                  </Tooltip>
-                ))}
-              </TooltipProvider>
+              {MODES.map((m) => (
+                <TabsTrigger key={m.id} value={m.id} title={m.hint}>
+                  {m.label}
+                </TabsTrigger>
+              ))}
             </TabsList>
           </Tabs>
         </div>
