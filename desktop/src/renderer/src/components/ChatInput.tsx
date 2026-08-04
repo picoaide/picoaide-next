@@ -10,8 +10,7 @@ import { useChatStore, type Mode } from '../stores/chat'
 import { parseCommandLine, parseMentionLine, type ChatboxLine } from '../lib/chatbox'
 
 const MODES: { id: Mode; label: string; hint: string }[] = [
-  { id: 'ask', label: '问答', hint: '直接回答,不调用任何本地工具' },
-  { id: 'plan', label: '计划', hint: '先制定执行计划,你确认后再执行' },
+  { id: 'plan', label: '计划', hint: '只读调研后输出计划,你确认后再执行' },
   { id: 'craft', label: '执行', hint: '完整智能体:自主调用文件/终端/浏览器等工具完成任务' },
 ]
 

@@ -619,6 +619,24 @@ describe('AgentEngine plan mode', () => {
     expect(store.getConversation(1)?.status).toBe('planning')
   })
 
+  it('plan mode runs read-only tools (file_read) to investigate before planning', async () => {
+    const { events, engine, store } = makeEngine('tool-call', {}, makeStore(), 'file_read')
+    await engine.plan({ conversationId: 1, content: '分析一下', tools, highRiskTools: new Set(['file_delete']) })
+    expect(eventsOf(events, 'tool_end')).toHaveLength(1)
+    expect(eventsOf(events, 'confirm_required')).toHaveLength(0)
+    expect(store.getConversation(1)?.status).toBe('planning')
+  })
+
+  it('plan mode drops write tools: a write-tool call is rejected without executing', async () => {
+    const { events, engine, store } = makeEngine('tool-call', {}, makeStore(), 'file_delete')
+    await engine.plan({ conversationId: 1, content: '分析', tools, highRiskTools: new Set(['file_delete']) })
+    // 写工具被过滤:SDK 回传 tool-error,模型感知后收尾;工具本身绝不执行
+    expect(deletedPaths).toEqual([])
+    const errRows = store.listMessages(1).filter((m) => m.role === 'tool' && m.is_error === 1)
+    expect(errRows).toHaveLength(1)
+    expect(store.getConversation(1)?.status).toBe('planning')
+  })
+
   it('approvePlan(true) runs the second round with tools and finishes done', async () => {
     const { mock, events, engine, store } = makeEngine('text')
     await engine.plan({ conversationId: 1, content: '读取并总结' })

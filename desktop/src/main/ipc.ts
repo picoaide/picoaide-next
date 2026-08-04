@@ -235,14 +235,13 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
     'chat:ask': async ({ conversationId, content, mode: modeHint }) => {
       // 分派用"本次发送时按钮选择的模式"(modeHint);按钮只是 UI 状态,会话创建时定的 mode
       // 会误导用户(在 ask 会话点"执行"仍走 ask 无工具)。缺省回退会话 mode。
-      const mode = modeHint ?? deps.store.getConversation(conversationId)?.mode ?? 'ask'
-      if (mode === 'craft') {
-        const { tools, highRiskTools } = await deps.getTools(deps.store.getConversation(conversationId)?.workspace)
-        await (await getEngine()).craft({ conversationId, content, tools, highRiskTools })
-      } else if (mode === 'plan') {
-        await (await getEngine()).plan({ conversationId, content })
+      const mode = modeHint ?? deps.store.getConversation(conversationId)?.mode ?? 'craft'
+      const { tools, highRiskTools } = await deps.getTools(deps.store.getConversation(conversationId)?.workspace)
+      if (mode === 'plan') {
+        // 计划(只读):引擎内部过滤为只读工具集,多步调研出计划
+        await (await getEngine()).plan({ conversationId, content, tools, highRiskTools })
       } else {
-        await (await getEngine()).ask({ conversationId, content })
+        await (await getEngine()).craft({ conversationId, content, tools, highRiskTools })
       }
       // 自动标题:后台生成,不阻塞对话完成;内部处理兜底与去重
       if (deps.autoTitle) void deps.autoTitle({ conversationId })

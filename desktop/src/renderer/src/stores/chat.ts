@@ -5,7 +5,7 @@ import type { ArtifactRow, ConversationRow, MessageRow } from '../../../main/ipc
 import { useApprovalsStore } from './approvals'
 import { useConnectionStore } from './connection'
 
-export type Mode = 'ask' | 'plan' | 'craft'
+export type Mode = 'plan' | 'craft'
 
 let pendingDelta = ''
 let rafScheduled = false
@@ -119,7 +119,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   streamingText: '',
   streamingReasoning: '',
   toolCalls: [],
-  mode: 'ask',
+  mode: 'craft',
   localError: null,
   hasMoreMessages: false,
   loadedTotal: 0,

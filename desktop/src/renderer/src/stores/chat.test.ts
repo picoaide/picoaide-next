@@ -29,7 +29,7 @@ function makeFake() {
   const api: FakePicoaide = {
     chatNew: vi.fn(async (input?: { mode?: string; projectId?: number | null }) => {
       const id = nextId++
-      conversations.push({ id, title: '', mode: input?.mode ?? 'ask', status: 'done', model: '', workspace: '', project_id: input?.projectId ?? null, created_at: '', updated_at: '' })
+      conversations.push({ id, title: '', mode: input?.mode ?? 'craft', status: 'done', model: '', workspace: '', project_id: input?.projectId ?? null, created_at: '', updated_at: '' })
       return id
     }),
     chatList: vi.fn(async () => conversations.map((c) => ({ ...c }))),
@@ -66,7 +66,7 @@ let fake: ReturnType<typeof makeFake>
 beforeEach(() => {
   fake = makeFake()
   ;(globalThis as any).window = { picoaide: fake.api }
-  useChatStore.setState({ conversations: [], activeId: null, messages: [], artifacts: [], interrupted: [], streaming: false, streamingText: '', mode: 'ask', localError: null })
+  useChatStore.setState({ conversations: [], activeId: null, messages: [], artifacts: [], interrupted: [], streaming: false, streamingText: '', mode: 'craft', localError: null })
   useConnectionStore.setState({ status: 'online' })
 })
 
@@ -74,7 +74,7 @@ describe('chat store', () => {
   it('newConversation creates a conversation and selects it', async () => {
     const id = (await useChatStore.getState().newConversation())!
     expect(id).toBe(1)
-    expect(fake.api.chatNew).toHaveBeenCalledWith({ mode: 'ask', projectId: null })
+    expect(fake.api.chatNew).toHaveBeenCalledWith({ mode: 'craft', projectId: null })
     expect(useChatStore.getState().activeId).toBe(1)
     expect(useChatStore.getState().conversations).toHaveLength(1)
   })
@@ -82,7 +82,7 @@ describe('chat store', () => {
   it('newConversation passes activeProjectId to chatNew', async () => {
     useChatStore.setState({ projects: [{ id: 2, name: 'P2', path: '/p2', created_at: '' }], activeProjectId: 2 })
     await useChatStore.getState().newConversation()
-    expect(fake.api.chatNew).toHaveBeenCalledWith({ mode: 'ask', projectId: 2 })
+    expect(fake.api.chatNew).toHaveBeenCalledWith({ mode: 'craft', projectId: 2 })
   })
 
   it('createProject adds to the list and returns the id', async () => {
@@ -123,7 +123,7 @@ describe('chat store', () => {
   it('sendMessage creates a conversation when none is active and calls chatAsk', async () => {
     await useChatStore.getState().sendMessage('你好')
     expect(fake.api.chatNew).toHaveBeenCalled()
-    expect(fake.api.chatAsk).toHaveBeenCalledWith(1, '你好', 'ask')
+    expect(fake.api.chatAsk).toHaveBeenCalledWith(1, '你好', 'craft')
     const s = useChatStore.getState()
     expect(s.streaming).toBe(false)
     expect(s.messages.some((m) => m.role === 'user' && m.content === '你好')).toBe(true)

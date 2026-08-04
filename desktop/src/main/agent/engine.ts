@@ -16,6 +16,12 @@ import { z } from 'zod'
 import { isAbsolute } from 'node:path'
 import type { AgentEvent } from './events'
 import { buildRunConfig, type Mode } from './modes'
+import { readOnlyTools, PLAN_MAX_STEPS } from './modes'
+
+// 计划(只读)模式系统提示:与工具白名单共同构成只读边界(对齐 opencode plan agent 的 edit/bash deny)
+const PLAN_SYSTEM_NOTICE =
+  '当前处于计划(只读)模式:只可读取文件/搜索/浏览页面/查询知识库,禁止任何写入、修改、删除、执行命令或浏览器操作;' +
+  '请调研后输出清晰的执行计划(步骤、涉及文件、预期结果),不要执行任何操作。'
 import { artifactType } from './artifacts'
 import { lastUserMessageIndex } from './continue'
 import { kbRead, kbSearch, kbList, kbUpload } from '../gateway/remote_mcp'
@@ -100,6 +106,9 @@ export interface ContinueInput {
 export interface PlanInput {
   conversationId: number
   content: string
+  tools?: Record<string, GatedTool>
+  highRiskTools?: Set<string>
+  maxSteps?: number
 }
 
 export interface ApprovePlanInput {
@@ -173,13 +182,24 @@ export class AgentEngine {
     await this.runAskLoop(conversationId, content, 'running', 'done')
   }
 
-  // Plan 首轮:无工具、单步出计划(架构设计 §3.3.4);状态保持 planning 等用户确认,approvePlan 发起第二轮
+  // Plan 模式(对齐 opencode plan agent):只读工具多步调研出计划,不做任何修改;
+  // 状态保持 planning 等用户确认,approvePlan 发起第二轮带全量工具执行
   async plan(input: PlanInput): Promise<void> {
     const store = this.deps.store
     if (!store) throw new Error('plan requires a store (EngineDeps.store)')
     const { conversationId, content } = input
+    const maxSteps = input.maxSteps ?? this.cfg.maxSteps ?? DEFAULT_MAX_STEPS
     this.assertConversation(conversationId)
-    await this.runAskLoop(conversationId, content, 'planning', 'planning')
+    store.updateConversationStatus(conversationId, 'planning')
+    // 上下文窗口:发送给 LLM 的历史最多最近 50 条(超出仅存 DB 供 UI 查看)
+    const history = store.listMessages(conversationId).map(toModelMessage)
+    store.appendMessage({ conversationId, role: 'user', content })
+    const messages: ModelMessage[] = [...lastN(history, DEFAULT_CONTEXT_WINDOW), { role: 'user', content }]
+    const tools = readOnlyTools(input.tools ?? {}) as Record<string, GatedTool>
+    const system = `${this.cfg.sysPrompt}
+
+${PLAN_SYSTEM_NOTICE}`
+    await this.runCraftLoop(conversationId, messages, tools, new Set(), Math.min(maxSteps, PLAN_MAX_STEPS), 'planning', system)
   }
 
   private assertConversation(conversationId: number): void {
@@ -368,13 +388,15 @@ export class AgentEngine {
     })
   }
 
-  // 多步循环主体(craft 与重跑/Plan 执行共用):每步落库,步数超限报错,完成置 done
+// 多步循环主体(craft 与重跑/Plan 执行共用):每步落库,步数超限报错,完成置 finalStatus
   private async runCraftLoop(
     conversationId: number,
     messages: ModelMessage[],
     tools: Record<string, GatedTool>,
     highRisk: Set<string>,
     maxSteps: number,
+    finalStatus: ConversationStatus = 'done',
+    system = this.cfg.sysPrompt,
   ): Promise<void> {
     const store = this.deps.store as StoreLike
     const abort = this.beginRun()
@@ -457,7 +479,7 @@ export class AgentEngine {
         try {
           const result = streamText({
             model: this.cfg.model,
-            system: this.cfg.sysPrompt,
+            system,
             messages,
             tools: wrapped,
             toolApproval: this.buildToolApproval(tools, highRisk),
@@ -542,7 +564,7 @@ export class AgentEngine {
         this.deps.emit({ type: 'error', data: '达到最大步骤数' })
         return
       }
-      if (store.getConversation(conversationId)) store.updateConversationStatus(conversationId, 'done')
+      if (store.getConversation(conversationId)) store.updateConversationStatus(conversationId, finalStatus)
       this.deps.emit({ type: 'done', data: { usage } })
     } finally {
       this.currentAbort = null
@@ -563,7 +585,7 @@ export class AgentEngine {
   }
 
   async run(opts: RunOptions): Promise<void> {
-    const mode = opts.mode ?? 'ask'
+    const mode = opts.mode ?? 'craft'
     const maxSteps = this.cfg.maxSteps ?? DEFAULT_MAX_STEPS
     const { tools } = buildRunConfig(mode, opts.tools ?? {}, maxSteps)
     const messages: ModelMessage[] = [...(opts.history ?? [])]
