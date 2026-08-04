@@ -23,6 +23,21 @@ it('递归枚举文件,跳过 node_modules/.git,限深度', () => {
   }
 })
 
+it('目录同样返回(@ 提及可匹配文件夹)', () => {
+  const root = join(tmpdir(), 'files-dir-test-' + Date.now())
+  mkdirSync(join(root, 'a', 'b'), { recursive: true })
+  mkdirSync(join(root, 'node_modules'), { recursive: true })
+  writeFileSync(join(root, 'a', 'y.md'), 'y')
+  try {
+    const files = listFilesRecursive([root])
+    expect(files).toContain(join(root, 'a'))
+    expect(files).toContain(join(root, 'a', 'b'))
+    expect(files.some((f) => f.includes('node_modules'))).toBe(false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 it('不存在的目录返回空', () => {
   expect(listFilesRecursive([join(tmpdir(), 'nope-' + Date.now())])).toEqual([])
 })

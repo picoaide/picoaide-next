@@ -20,8 +20,11 @@ export function listFilesRecursive(roots: string[]): string[] {
       const full = join(dir, name)
       try {
         const st = statSync(full)
-        if (st.isDirectory()) walk(full, depth + 1)
-        else out.push(full)
+        if (st.isDirectory()) {
+          // 目录也返回:输入框 @ 提及需要匹配文件夹(agent 可列出/读取目录)
+          out.push(full)
+          walk(full, depth + 1)
+        } else out.push(full)
       } catch {
         // ignore unreadable
       }
