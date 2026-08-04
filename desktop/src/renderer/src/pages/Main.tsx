@@ -18,6 +18,7 @@ import {
 } from '../components/ui/dropdown-menu'
 import ArtifactsPanel from '../components/ArtifactsPanel'
 import ChatInput from '../components/ChatInput'
+import ConfirmModal from '../components/ConfirmModal'
 import Messages from '../components/Messages'
 import SearchDialog from '../components/SearchDialog'
 import { useAuthStore } from '../stores/auth'
@@ -359,6 +360,7 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
           </div>
         </main>
       </div>
+      <ConfirmModal />
       {interrupted.length > 0 && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
           <Card className="w-full max-w-md">
