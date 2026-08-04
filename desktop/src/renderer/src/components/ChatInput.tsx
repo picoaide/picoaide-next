@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { FileText, Square, Send, Sparkles } from 'lucide-react'
+import { Clock, FileText, Send, Square, Sparkles } from 'lucide-react'
 import { Button } from './ui/button'
 import { Textarea } from './ui/textarea'
 import { Tabs, TabsList, TabsTrigger } from './ui/tabs'
@@ -235,9 +235,20 @@ export default function ChatInput() {
                 onKeyDown={onKeyDown}
               />
               {streaming ? (
-                <Button type="button" variant="outline" size="icon" title="停止" onClick={() => void cancel()}>
-                  <Square className="h-4 w-4" />
-                </Button>
+                <>
+                  <Button
+                    type="button"
+                    size="icon"
+                    disabled={!value.trim()}
+                    title="正在回复中,发送将排队,当前步骤完成后自动处理"
+                    onClick={send}
+                  >
+                    <Clock className="h-4 w-4" />
+                  </Button>
+                  <Button type="button" variant="outline" size="icon" title="停止" onClick={() => void cancel()}>
+                    <Square className="h-4 w-4" />
+                  </Button>
+                </>
               ) : (
                 <Button type="button" size="icon" disabled={!value.trim()} onClick={send} title="发送">
                   <Send className={cn('h-4 w-4')} />

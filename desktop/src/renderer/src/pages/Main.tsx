@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
   Archive, Check, ChevronDown, ChevronRight, Copy, Download, FolderPlus, Globe, LogOut, MoreHorizontal, Pencil, Pin,
-  Plus, Settings as SettingsIcon, Trash2, Trash,
+  Plus, Search, Settings as SettingsIcon, Trash2, Trash,
 } from 'lucide-react'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
@@ -30,8 +30,16 @@ import { toast } from 'sonner'
 import { formatRelativeTime } from '../lib/time'
 import { cn } from '../lib/utils'
 
+// 项目标识色板(按项目 id 循环取色,柔和系,深浅主题均可用)
+const PROJECT_COLORS = [
+  '#6366f1', '#8b5cf6', '#ec4899', '#f43f5e', '#f59e0b',
+  '#10b981', '#14b8a6', '#0ea5e9', '#3b82f6', '#84cc16',
+]
+const projectColor = (id: number) => PROJECT_COLORS[id % PROJECT_COLORS.length]
+
 export default function Main({ onOpenSettings }: { onOpenSettings: () => void }) {
   const bootstrap = useAuthStore((s) => s.bootstrap)
+  const session = useAuthStore((s) => s.session)
   const logout = useAuthStore((s) => s.logout)
   const conversations = useChatStore((s) => s.conversations)
   const projects = useChatStore((s) => s.projects)
@@ -166,17 +174,18 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
       <div
         key={c.id}
         className={cn(
-          'group relative ml-4 mb-1 flex cursor-pointer flex-col rounded-md px-3 py-1.5 text-sm hover:bg-accent',
-          c.id === activeId && 'bg-accent'
+          'group relative mb-1 ml-2 mr-1 cursor-pointer rounded-lg px-3 py-2 transition-colors hover:bg-accent/60',
+          c.id === activeId && 'bg-accent shadow-sm'
         )}
         onClick={() => void selectConversation(c.id)}
       >
-        <div className="flex min-w-0 items-center justify-between gap-1">
-          <span className="flex min-w-0 items-center gap-1">
+        {c.id === activeId && <div className="absolute bottom-2 left-0 top-2 w-0.5 rounded-full bg-primary" />}
+        <div className="flex min-w-0 items-center justify-between gap-2">
+          <span className="flex min-w-0 items-center gap-1.5">
             {c.starred === 1 && <Pin className="h-3 w-3 shrink-0 text-amber-500" />}
-            <span className="truncate">{c.title || '新会话'}</span>
+            <span className={cn('truncate', c.id === activeId && 'font-medium')}>{c.title || '新会话'}</span>
           </span>
-          <span className="shrink-0 text-[10px] text-muted-foreground">{formatRelativeTime(c.updated_at)}</span>
+          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">{formatRelativeTime(c.updated_at)}</span>
         </div>
         {c.preview && <div className="mt-0.5 truncate text-xs text-muted-foreground">{c.preview}</div>}
         <div className="absolute right-1.5 top-1.5 flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
@@ -249,23 +258,33 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
   const renderProjectGroup = (p: ProjectView) => {
     const collapsed = collapsedProjects.includes(p.id)
     const items = conversationsOf(p.id)
+    const active = activeProjectId === p.id
     return (
       <div key={p.id} className="mb-1">
         <div
           className={cn(
-            'group flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-sm font-medium hover:bg-accent',
-            activeProjectId === p.id && 'bg-accent'
+            'group flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-accent/60',
+            active && 'bg-accent/70'
           )}
           onClick={() => {
             setActiveProject(p.id)
             toggleProjectCollapsed(p.id)
           }}
         >
-          <span className="flex min-w-0 items-center gap-1">
-            {collapsed ? <ChevronRight className="h-3.5 w-3.5 shrink-0" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
-            <span className="truncate">{p.name}</span>
-          </span>
-          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
+          <div
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-xs font-bold text-white"
+            style={{ backgroundColor: projectColor(p.id) }}
+          >
+            {(p.name.trim()[0] ?? '?').toUpperCase()}
+          </div>
+          <span className="min-w-0 flex-1 truncate text-sm font-medium">{p.name}</span>
+          <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{items.length}</span>
+          {collapsed ? (
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          )}
+          <div className="flex items-center opacity-0 transition-opacity group-hover:opacity-100">
             <Button
               variant="ghost"
               size="icon"
@@ -280,7 +299,7 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
             </Button>
           </div>
         </div>
-        {!collapsed && items.map(renderConversationRow)}
+        {!collapsed && <div className="mt-0.5">{items.map(renderConversationRow)}</div>}
       </div>
     )
   }
@@ -293,33 +312,51 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
         </div>
       )}
       <div className="flex min-h-0 flex-1">
-        <aside className="flex w-60 flex-col border-r bg-muted/20">
-          <div className="flex gap-2 p-3">
-            <Button className="flex-1" onClick={() => void newConversation()}>
+        <aside className="flex w-64 flex-col border-r bg-muted/20">
+          {/* 品牌区 */}
+          <div className="flex items-center gap-2 px-3 pb-1 pt-3">
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary text-xs font-bold text-primary-foreground">
+              P
+            </div>
+            <span className="text-sm font-semibold tracking-tight">PicoAide</span>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="ml-auto h-7 w-7 text-muted-foreground"
+              title="搜索 (Cmd/Ctrl+P)"
+              onClick={() => setShowSearch(true)}
+            >
+              <Search className="h-4 w-4" />
+            </Button>
+          </div>
+          {/* 主操作 */}
+          <div className="flex gap-2 px-3 py-2">
+            <Button className="h-8 flex-1" onClick={() => void newConversation()}>
               <Plus className="h-4 w-4" /> 新建会话
             </Button>
-            <Button variant="outline" className="flex-1" onClick={() => setShowNewProject(true)}>
+            <Button variant="outline" className="h-8 flex-1" onClick={() => setShowNewProject(true)}>
               <FolderPlus className="h-4 w-4" /> 新建项目
             </Button>
           </div>
+          {/* 项目分组列表 */}
           <div className="flex-1 overflow-y-auto px-2 pb-2">
             {projects.map(renderProjectGroup)}
             {conversationsOf(null).length > 0 && (
               <>
                 <div
-                  className="mb-1 mt-2 flex cursor-pointer items-center gap-1 px-3 py-1 text-xs text-muted-foreground hover:text-foreground"
+                  className="mb-1 mt-2 flex cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-accent/50 hover:text-foreground"
                   onClick={() => setShowUncategorized((v) => !v)}
                 >
                   {showUncategorized ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
                   未分类 ({conversationsOf(null).length})
                 </div>
-                {showUncategorized && conversationsOf(null).map(renderConversationRow)}
+                {showUncategorized && <div className="mt-0.5">{conversationsOf(null).map(renderConversationRow)}</div>}
               </>
             )}
             {conversations.some((c) => c.archived === 1) && (
               <>
                 <div
-                  className="mb-1 mt-2 flex cursor-pointer items-center gap-1 px-3 py-1 text-xs text-muted-foreground hover:text-foreground"
+                  className="mb-1 mt-2 flex cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-accent/50 hover:text-foreground"
                   onClick={() => setShowArchived((v) => !v)}
                 >
                   {showArchived ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
@@ -332,13 +369,20 @@ export default function Main({ onOpenSettings }: { onOpenSettings: () => void })
               </>
             )}
           </div>
-          <div className="border-t p-3">
-            <Button variant="ghost" className="w-full justify-start text-muted-foreground" onClick={onOpenSettings}>
-              <SettingsIcon className="h-4 w-4" /> 设置
-            </Button>
-            <Button variant="ghost" className="mt-1 w-full justify-start text-muted-foreground" onClick={() => void logout()}>
-              <LogOut className="h-4 w-4" /> 退出登录
-            </Button>
+          {/* 用户卡 */}
+          <div className="border-t p-2">
+            <div className="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-accent/50">
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/10 text-sm font-semibold text-primary">
+                {((session?.username ?? 'U')[0] ?? 'U').toUpperCase()}
+              </div>
+              <span className="min-w-0 flex-1 truncate text-sm">{session?.username ?? '用户'}</span>
+              <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground" title="设置" onClick={onOpenSettings}>
+                <SettingsIcon className="h-4 w-4" />
+              </Button>
+              <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground" title="退出登录" onClick={() => void logout()}>
+                <LogOut className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
         </aside>
         <main className="flex min-w-0 flex-1 flex-col">
