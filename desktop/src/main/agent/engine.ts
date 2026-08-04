@@ -522,7 +522,7 @@ export class AgentEngine {
         // 审批回执 → tool-approval-response 消息续跑(SDK 原生机制)。审批轮照常计入
         // 步数预算:模型反复请求审批也会耗尽 maxSteps,不会无限弹确认框。
         if (approvalParts.length > 0) {
-          await this.handleApprovalParts(approvalParts, messages)
+          await this.handleApprovalParts(conversationId, approvalParts, messages)
           approvalParts.length = 0
           continue
         }
@@ -621,7 +621,7 @@ export class AgentEngine {
         // 推进上下文(审批 response 匹配 tool-call 依赖完整消息历史)
         messages.push(...(await result.response).messages)
         if (approvalParts.length > 0) {
-          await this.handleApprovalParts(approvalParts, messages)
+          await this.handleApprovalParts(undefined, approvalParts, messages)
           approvalParts.length = 0
           continue
         }
@@ -745,7 +745,7 @@ export class AgentEngine {
   }
 
   // SDK 原生审批续跑:逐个发 confirm_required → 等回执 → 收集 response,合并为一条 tool 消息续跑(docs 语义)
-  private async handleApprovalParts(parts: Array<{ approvalId: string; toolCall: { toolCallId: string; toolName: string; input: unknown }; isAutomatic?: boolean }>, messages: ModelMessage[]): Promise<void> {
+  private async handleApprovalParts(conversationId: number | undefined, parts: Array<{ approvalId: string; toolCall: { toolCallId: string; toolName: string; input: unknown }; isAutomatic?: boolean }>, messages: ModelMessage[]): Promise<void> {
     const responses: ToolApprovalResponse[] = []
     for (const part of parts) {
       // 测试钩子(PICOAI_TEST_AUTO_APPROVE)直接结清,不发 confirm_required(与旧门控语义一致)
@@ -768,6 +768,18 @@ export class AgentEngine {
         approved: ok,
         reason: ok ? '用户已批准' : '用户拒绝或超时',
       })
+      if (!ok && this.deps.store?.getConversation(conversationId)) {
+        // 拒绝必须落一条 is_error tool 行:否则 DB 里 assistant(tool_call) 无配对结果,
+        // 下次发消息/重跑从历史加载时 SDK 抛 MissingToolResultsError → 会话 failed
+        this.deps.store.appendMessage({
+          conversationId,
+          role: 'tool',
+          content: '用户拒绝或超时',
+          toolCallId: part.toolCall.toolCallId,
+          toolName: part.toolCall.toolName,
+          isError: true,
+        })
+      }
     }
     messages.push({ role: 'tool', content: responses })
   }

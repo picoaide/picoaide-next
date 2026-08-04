@@ -460,12 +460,32 @@ describe('AgentEngine craft (store-backed)', () => {
     await run
     expect(deletedPaths).toEqual([])
     expect(mock.callCount).toBe(2)
-    // SDK 原生审批:拒绝 = 工具不执行(无 tool 行/无 tool_error),denial 回传模型后模型收尾
-    expect(store.listMessages(1).find((m) => m.role === 'tool')).toBeUndefined()
+    // SDK 原生审批:拒绝 = 工具不执行(无 tool-error),denial 回传模型后模型收尾;
+    // 但必须落一条 is_error tool 行,保证 DB 历史 tool_call 有配对结果(重跑不 MissingToolResultsError)
+    const denied = store.listMessages(1).filter((m) => m.role === 'tool')
+    expect(denied).toHaveLength(1)
+    expect(denied[0].isError).toBe(true)
+    expect(denied[0].toolName).toBe("file_delete")
     expect(eventsOf(events, 'tool_start')).toHaveLength(0)
     expect(eventsOf(events, 'tool_error')).toHaveLength(0)
     expect(eventsOf(events, 'done')).toHaveLength(1)
     expect(store.getConversation(1)?.status).toBe('done')
+  })
+
+  it('deny persists a tool row so later messages do not fail with MissingToolResultsError', async () => {
+    const { events, engine, store } = makeEngine('tool-call')
+    const run = engine.craft({ conversationId: 1, content: 'delete it', tools, highRiskTools: new Set(['file_delete']) })
+    await waitFor(() => eventsOf(events, 'confirm_required').length === 1)
+    const req0 = eventsOf(events, 'confirm_required')[0] as { data: { request_id: string } }
+    engine.confirm(req0.data.request_id, false)
+    await run
+    expect(eventsOf(events, 'done')).toHaveLength(1)
+    expect(store.listMessages(1).filter((m) => m.role === 'tool')).toHaveLength(1)
+    // 拒绝后再次 craft,模型继续调用工具:历史必须完整,否则 SDK 抛 MissingToolResultsError
+    const second = makeEngine('tool-call', {}, store, 'file_read')
+    await second.engine.craft({ conversationId: 1, content: 'read it', tools, highRiskTools: new Set() })
+    expect(eventsOf(second.events, 'error')).toHaveLength(0)
+    expect(eventsOf(second.events, 'done')).toHaveLength(1)
   })
 
   it('cancel mid-craft emits canceled and marks the conversation failed', async () => {
