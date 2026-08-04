@@ -803,14 +803,23 @@ export class AgentEngine {
   }
 
   // 产物提取:工具结果含绝对路径 {path, size?} → artifact 事件 + artifacts 表落库;缺 path/相对路径 → 静默跳过
+  // 字符串结果(file_write 风格 "已写入 <abs>")也提取首个绝对路径,否则产物面板永远为空
   private maybeEmitArtifact(conversationId: number | undefined, output: unknown): void {
-    if (typeof output !== 'object' || output === null) return
-    const rec = output as Record<string, unknown>
-    const path = rec.path
+    let path: string | undefined
+    let size = 0
+    if (typeof output === 'object' && output !== null) {
+      const rec = output as Record<string, unknown>
+      if (typeof rec.path === 'string') {
+        path = rec.path
+        size = typeof rec.size === 'number' ? rec.size : 0
+      }
+    } else if (typeof output === 'string') {
+      const m = output.match(/(^|\s)(\/[^\s]+)/)
+      if (m) path = m[2]
+    }
     if (typeof path !== 'string' || path === '') return
     if (!isAbsolute(path)) return
     const type = artifactType(path)
-    const size = typeof rec.size === 'number' ? rec.size : 0
     this.deps.emit({ type: 'artifact', data: { path, type, size } })
     if (conversationId !== undefined) this.deps.store?.addArtifact?.({ conversationId, path, type, size })
   }

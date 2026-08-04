@@ -409,6 +409,12 @@ const noPathTool = tool({
   execute: async () => ({ size: 5 }),
 })
 
+const stringPathTool = tool({
+  description: 'returns a message containing an absolute path (file_write style)',
+  inputSchema: z.object({}),
+  execute: async () => '已写入 /workspace/notes.md',
+})
+
 describe('AgentEngine craft (store-backed)', () => {
   it('runs tool calls across steps, persists assistant+tool rows, and finishes', async () => {
     const { mock, events, engine, store } = makeEngine('tool-call', {}, makeStore(), 'file_read')
@@ -527,6 +533,20 @@ describe('AgentEngine craft (store-backed)', () => {
     const { events, engine } = makeEngine('tool-call', {}, makeStore(), 'no_path')
     await engine.craft({ conversationId: 1, content: 'go', tools: { no_path: noPathTool }, highRiskTools: new Set() })
     expect(eventsOf(events, 'artifact')).toHaveLength(0)
+  })
+
+  it('registers artifacts from string results containing an absolute path (file_write style)', async () => {
+    const { events, engine, store } = makeEngine('tool-call', {}, makeStore(), 'write_note')
+    await engine.craft({
+      conversationId: 1,
+      content: 'write it',
+      tools: { write_note: stringPathTool },
+      highRiskTools: new Set(),
+    })
+    expect(eventsOf(events, 'artifact')).toEqual([
+      { type: 'artifact', data: { path: '/workspace/notes.md', type: 'report', size: 0 } },
+    ])
+    expect(store.artifacts).toEqual([{ conversationId: 1, path: '/workspace/notes.md', type: 'report', size: 0 }])
   })
 
   it('does not register relative paths as artifacts', async () => {
