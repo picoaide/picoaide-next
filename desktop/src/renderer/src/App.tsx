@@ -10,6 +10,8 @@ import { Toaster } from './components/ui/sonner'
 export default function App() {
   const authStatus = useAuthStore((s) => s.status)
   const [view, setView] = useState<'main' | 'settings'>('main')
+  // 底部菜单入口可指定设置页定位段(技能/MCP 商店)
+  const [settingsSection, setSettingsSection] = useState<'mcp' | 'skills' | null>(null)
 
   useEffect(() => {
     const offAgent = window.picoaide.onAgentEvent((ev) => useChatStore.getState().onAgentEvent(ev))
@@ -70,9 +72,14 @@ export default function App() {
   return (
     <>
       {view === 'settings' ? (
-        <Settings onBack={() => setView('main')} />
+        <Settings onBack={() => setView('main')} initialSection={settingsSection} />
       ) : (
-        <Main onOpenSettings={() => setView('settings')} />
+        <Main
+          onOpenSettings={(section) => {
+            setSettingsSection(section ?? null)
+            setView('settings')
+          }}
+        />
       )}
       <Toaster />
     </>

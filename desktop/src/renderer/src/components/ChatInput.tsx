@@ -180,9 +180,9 @@ export default function ChatInput() {
       <div className="mx-auto flex max-w-3xl flex-col gap-2">
         <div className="flex items-center gap-1">
           <Tabs value={mode} onValueChange={(v) => setMode(v as Mode)}>
-            <TabsList>
+            <TabsList className="h-7 rounded-full">
               {MODES.map((m) => (
-                <TabsTrigger key={m.id} value={m.id} title={m.hint}>
+                <TabsTrigger key={m.id} value={m.id} title={m.hint} className="rounded-full px-3 text-xs">
                   {m.label}
                 </TabsTrigger>
               ))}
@@ -240,18 +240,19 @@ export default function ChatInput() {
                     type="button"
                     size="icon"
                     disabled={!value.trim()}
+                    className="h-8 w-8 rounded-full"
                     title="正在回复中,发送将排队,当前步骤完成后自动处理"
                     onClick={send}
                   >
-                    <Clock className="h-4 w-4" />
+                    <Clock className="h-3.5 w-3.5" />
                   </Button>
-                  <Button type="button" variant="outline" size="icon" title="停止" onClick={() => void cancel()}>
-                    <Square className="h-4 w-4" />
+                  <Button type="button" variant="outline" size="icon" className="h-8 w-8 rounded-full" title="停止" onClick={() => void cancel()}>
+                    <Square className="h-3.5 w-3.5" />
                   </Button>
                 </>
               ) : (
-                <Button type="button" size="icon" disabled={!value.trim()} onClick={send} title="发送">
-                  <Send className={cn('h-4 w-4')} />
+                <Button type="button" size="icon" className="h-8 w-8 rounded-full" disabled={!value.trim()} onClick={send} title="发送">
+                  <Send className={cn('h-3.5 w-3.5')} />
                 </Button>
               )}
             </div>

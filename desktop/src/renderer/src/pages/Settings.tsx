@@ -31,7 +31,13 @@ const ACCENTS: { name: string; value: string }[] = [
 
 type RiskState = { kind: 'skill'; data: SkillRiskInfo } | { kind: 'mcp'; data: McpRiskInfo } | null
 
-export default function Settings({ onBack }: { onBack: () => void }) {
+export default function Settings({
+  onBack,
+  initialSection,
+}: {
+  onBack: () => void
+  initialSection?: 'mcp' | 'skills' | null
+}) {
   const logout = useAuthStore((s) => s.logout)
   const [info, setInfo] = useState<SettingsInfo | null>(null)
   const [skills, setSkills] = useState<SkillsListResult>({ suggestions: [], installed: {} })
@@ -43,6 +49,14 @@ export default function Settings({ onBack }: { onBack: () => void }) {
   const [newDir, setNewDir] = useState('')
   const [cdp, setCdp] = useState<{ running: boolean; port: number } | null>(null)
   const [accent, setAccent] = useState('')
+
+  // 底部商店入口 → 设置页定位滚动到对应卡片
+  useEffect(() => {
+    if (!initialSection) return
+    const id = initialSection === 'mcp' ? 'mcp-store' : 'skills-store'
+    const timer = setTimeout(() => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100)
+    return () => clearTimeout(timer)
+  }, [initialSection])
 
   // 应用强调色:覆盖 --primary(+dark 变体),浅色 foreground 恒白
   const applyAccent = (color: string) => {
@@ -239,7 +253,7 @@ export default function Settings({ onBack }: { onBack: () => void }) {
       </Card>
 
       {/* 技能建议安装(建议清单来自服务端 bootstrap) */}
-      <Card className="mb-4">
+      <Card id="skills-store" className="mb-4">
         <CardHeader>
           <CardTitle>技能</CardTitle>
           <CardDescription>服务端建议清单,员工自行安装/卸载</CardDescription>
@@ -282,7 +296,7 @@ export default function Settings({ onBack }: { onBack: () => void }) {
       </Card>
 
       {/* MCP 插件建议安装 */}
-      <Card className="mb-4">
+      <Card id="mcp-store" className="mb-4">
         <CardHeader>
           <CardTitle>MCP 插件</CardTitle>
           <CardDescription>第三方插件安装前会展示风险信息,员工知情后决定</CardDescription>

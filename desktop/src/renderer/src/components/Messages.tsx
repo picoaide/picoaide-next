@@ -47,17 +47,17 @@ export default function Messages({ messages, streaming, streamingText, streaming
     return (
       <div className="flex h-full flex-col items-center justify-center gap-6 p-6">
         <div className="text-center">
-          <h2 className="text-lg font-semibold">开始与 PicoAide 对话吧</h2>
+          <h2 className="text-base font-medium">开始与 PicoAide 对话吧</h2>
           <p className="mt-1 text-sm text-muted-foreground">
             Agent 运行在本机,可安全操作你的文件、终端与浏览器
           </p>
         </div>
-        <div className="grid w-full max-w-xl grid-cols-2 gap-3">
+        <div className="grid w-full max-w-2xl grid-cols-4 gap-3">
           {EXAMPLES.map((e) => (
             <button
               key={e.title}
               type="button"
-              className="group rounded-md border bg-card p-3 text-left text-sm transition-colors hover:border-ring hover:bg-accent"
+              className="group rounded-lg border bg-card p-3 text-left text-sm transition-all hover:border-ring hover:bg-accent hover:shadow-md"
               onClick={() => useChatStore.getState().applyPrompt(e.prompt)}
             >
               <div className="flex items-center gap-2 font-medium">
