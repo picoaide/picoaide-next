@@ -933,7 +933,10 @@ ${PLAN_SYSTEM_NOTICE}`
     if (!isAbsolute(path)) return
     const type = artifactType(path)
     this.emitEvent({ type: 'artifact', data: { path, type, size } })
-    if (conversationId !== undefined) this.deps.store?.addArtifact?.({ conversationId, path, type, size })
+    // 会话可能已删除(运行中删除):FK 约束会抛错并把真实工具结果吞成 tool-error,先校验
+    if (conversationId !== undefined && this.deps.store?.getConversation(conversationId)) {
+      this.deps.store.addArtifact?.({ conversationId, path, type, size })
+    }
   }
 }
 

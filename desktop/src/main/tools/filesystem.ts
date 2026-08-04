@@ -112,6 +112,12 @@ async function extractDocxText(buf: Buffer): Promise<string> {
 }
 
 async function readTextFile(absPath: string, forced?: string): Promise<string> {
+  // 大文件上限:整文件读入 + 编码探测,数 GB 日志会 OOM 主进程(分页承诺仅针对文本流)
+  const MAX_READ_BYTES = 20 * 1024 * 1024
+  const st = fs.statSync(absPath)
+  if (st.size > MAX_READ_BYTES) {
+    throw new ToolError(`文件过大(${(st.size / 1024 / 1024).toFixed(1)}MB),超过 ${MAX_READ_BYTES / 1024 / 1024}MB 读取上限`)
+  }
   const buf = fs.readFileSync(absPath)
   const ext = path.extname(absPath).toLowerCase()
   if (ext === '.docx') return extractDocxText(buf)
@@ -138,9 +144,11 @@ function extractPdfText(buf: Buffer): string {
   if (streams.length === 0) return '无法提取文本: 未找到内容流(可能为扫描件或损坏文件)'
   const pages: string[] = []
   for (const s of streams) {
+    // zip-bomb 防护:压缩流体积/解压后体积超限即跳过该流(恶意 PDF 可把 GB 数据压进小流)
+    if (s.length > 5 * 1024 * 1024) continue
     let data: Buffer
     try {
-      data = inflateRawSync(s)
+      data = inflateRawSync(s, { maxOutputLength: 20 * 1024 * 1024 })
     } catch {
       data = s // 未压缩流
     }
@@ -305,7 +313,10 @@ export function createFileTools(ctx: FileToolContext): Record<string, Tool> {
         const q = (query ?? '').toLowerCase()
         let contentRe: RegExp | null = null
         if (content) {
+          if (content.length > 200) throw new ToolError('content 正则过长(>200 字符),请缩短')
           try {
+            // ReDoS 防护:LLM 提供的正则可能灾难性回溯((a+)+$),同步主进程会冻结 UI;
+            // Node 20+ 的 RegExp 默认受限?不,显式限长 + 线性字符串上限兜底
             contentRe = new RegExp(content, 'i')
           } catch {
             throw new ToolError(`非法正则: ${content.slice(0, 50)}`)
