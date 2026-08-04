@@ -244,7 +244,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set((s) => ({
         messages: [...s.messages, { id: Date.now(), role: 'user', content: text, is_error: 0, tool_name: '', reasoning: '' }],
       }))
-      await picoaide().chatAsk(id, text)
+      await picoaide().chatAsk(id, text, get().mode)
       const messages = mapMessages(await picoaide().chatMessages(id))
       set({ messages, streaming: false, streamingText: '', streamingReasoning: '' })
       await get().loadConversations()

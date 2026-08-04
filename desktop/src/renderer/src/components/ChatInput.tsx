@@ -10,9 +10,9 @@ import { useChatStore, type Mode } from '../stores/chat'
 import { parseCommandLine, parseMentionLine, type ChatboxLine } from '../lib/chatbox'
 
 const MODES: { id: Mode; label: string; hint: string }[] = [
-  { id: 'ask', label: 'Ask', hint: '直接回答,不调用任何本地工具' },
-  { id: 'plan', label: 'Plan', hint: '先制定执行计划,你确认后再执行' },
-  { id: 'craft', label: 'Craft', hint: '完整智能体:自主调用文件/终端/浏览器等工具完成任务' },
+  { id: 'ask', label: '问答', hint: '直接回答,不调用任何本地工具' },
+  { id: 'plan', label: '计划', hint: '先制定执行计划,你确认后再执行' },
+  { id: 'craft', label: '执行', hint: '完整智能体:自主调用文件/终端/浏览器等工具完成任务' },
 ]
 
 const MAX_ROWS = 8

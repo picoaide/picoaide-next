@@ -123,11 +123,17 @@ describe('chat store', () => {
   it('sendMessage creates a conversation when none is active and calls chatAsk', async () => {
     await useChatStore.getState().sendMessage('你好')
     expect(fake.api.chatNew).toHaveBeenCalled()
-    expect(fake.api.chatAsk).toHaveBeenCalledWith(1, '你好')
+    expect(fake.api.chatAsk).toHaveBeenCalledWith(1, '你好', 'ask')
     const s = useChatStore.getState()
     expect(s.streaming).toBe(false)
     expect(s.messages.some((m) => m.role === 'user' && m.content === '你好')).toBe(true)
     expect(s.messages.some((m) => m.role === 'assistant' && m.content === 'answer')).toBe(true)
+  })
+
+  it('sendMessage passes the current mode so craft runs with tools on any conversation', async () => {
+    useChatStore.setState({ mode: 'craft' })
+    await useChatStore.getState().sendMessage('帮我打开网页')
+    expect(fake.api.chatAsk).toHaveBeenCalledWith(1, '帮我打开网页', 'craft')
   })
 
   it('sendMessage 首条消息后 activeId 保持,后续消息不新建会话', async () => {

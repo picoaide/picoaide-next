@@ -361,6 +361,23 @@ describe('chat:ask', () => {  it('persists user+assistant messages and streams e
     expect(readBack.map((m) => m.role)).toEqual(['user', 'assistant'])
   })
 
+  it('chat:ask 用传入的 mode 分派(按钮选择优先于会话创建时模式)', async () => {
+    const { deps, store } = makeDeps('text')
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({ mode: 'ask' })
+    await handlers['chat:ask']({ conversationId: id, content: 'hi', mode: 'plan' })
+    // plan 分派 → 状态 planning(而非 ask 的 done)
+    expect(store.getConversation(id)?.status).toBe('planning')
+  })
+
+  it('chat:ask 缺省 mode 时回退会话创建时模式', async () => {
+    const { deps, store } = makeDeps('text')
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({ mode: 'ask' })
+    await handlers['chat:ask']({ conversationId: id, content: 'hi' })
+    expect(store.getConversation(id)?.status).toBe('done')
+  })
+
   it('emits error and marks the conversation failed when the model fails', async () => {
     const { deps, store, sent } = makeDeps('throw')
     const handlers = buildAgentHandlers(deps)

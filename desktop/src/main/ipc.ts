@@ -115,7 +115,7 @@ export interface IpcHandlers {
   'picoaide:rendererReady': () => void
   'theme:get': () => 'dark' | 'light'
   'chat:new': (input?: { title?: string; mode?: string; projectId?: number | null }) => number
-  'chat:ask': (input: { conversationId: number; content: string }) => Promise<void>
+  'chat:ask': (input: { conversationId: number; content: string; mode?: string }) => Promise<void>
   'chat:continue': (input: { conversationId: number }) => Promise<void>
   'chat:approvePlan': (input: { conversationId: number; ok: boolean }) => Promise<void>
   'chat:cancel': () => void
@@ -232,8 +232,10 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
       const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
       return result.canceled ? [] : result.filePaths
     },
-    'chat:ask': async ({ conversationId, content }) => {
-      const mode = deps.store.getConversation(conversationId)?.mode ?? 'ask'
+    'chat:ask': async ({ conversationId, content, mode: modeHint }) => {
+      // 分派用"本次发送时按钮选择的模式"(modeHint);按钮只是 UI 状态,会话创建时定的 mode
+      // 会误导用户(在 ask 会话点"执行"仍走 ask 无工具)。缺省回退会话 mode。
+      const mode = modeHint ?? deps.store.getConversation(conversationId)?.mode ?? 'ask'
       if (mode === 'craft') {
         const { tools, highRiskTools } = await deps.getTools(deps.store.getConversation(conversationId)?.workspace)
         await (await getEngine()).craft({ conversationId, content, tools, highRiskTools })
