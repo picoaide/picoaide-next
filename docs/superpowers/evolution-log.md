@@ -51,13 +51,28 @@
 
 **验证**:make check EXIT 0;485 passed | 2 skipped;build 成功;已 push
 
-## Round 3 计划(待执行)
+## Round 3(2026-08-06):浏览器语义定位 + 任务可视化
 
-调研建议剩余项:
-- 高:文档表格技能包(pdfplumber/openpyxl,需技能运行时 python 环境)
-- 高:浏览器桥语义定位(fill/waitFor/dialog + 结构化快照,多端)
-- 中:任务步骤卡片 UI + artifact 预览/回灌
-- 中:跨会话记忆/上下文健康显示(低优先级)
+**实施**:
+1. `96f9070` feat: semantic browser fill/select/waitFor/dialog
+   - 插件端 background.js:locate() 语义定位(label[for]/placeholder/aria-label 优先,CSS 回退);fill(原生 setter+input/change React 兼容)/select(option 匹配)/waitFor(200ms 轮询≤60s)/dialog(Page.javascriptDialogOpening,action 武装,10s 超时)
+   - 工具层:fill/select/dialog 入 HIGH_RISK_TOOLS,wait_for 只读;桥零改动(通配转发)
+   - browser.test.ts 6 用例;496 passed
+2. `8ddadb2` feat: run steps trajectory UI
+   - chat.ts 新增 runSteps 状态机(tool_start/tool_end/tool_error 配对,done 折叠汇总,新运行/切会话重置,零新协议)
+   - RunSteps.tsx 组件(会话头部,shadcn Badge+Loader2,水平胶囊,运行中 pulse/失败 destructive,结束 ✓ 完成(N 步));无步骤零侵入
+   - 10 个 store 用例;498 passed;无 renderer 组件测试基建(跳过组件测试,store 兜底)
+
+**验证**:make check EXIT 0;496 passed | 2 skipped;build 成功;已 push
+
+## Round 4 计划(待执行)
+
+剩余项(按价值):
+- 高:artifact 预览/回灌(HTML/图片 iframe sandbox 预览 + 继续修改回灌上下文)——易用性大项
+- 中高:文档技能包(pdf 表格/xlsx;需评估沙盒 python 依赖,风险后置)
+- 中:浏览器结构化快照(getContent 输出 accessibility 式语义树,省 token)
+- 中:跨会话记忆(AGENTS.md 已有;自动记忆提取性价比低,暂缓)
+- 低:上下文健康显示(上下文占用进度条)
 
 ## 验证基线(每轮后更新)
 
