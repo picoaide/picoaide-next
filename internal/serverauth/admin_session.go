@@ -2,7 +2,6 @@ package serverauth
 
 import (
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -26,21 +25,13 @@ type AdminSession struct {
 	ExpiresAt time.Time
 }
 
-func newSessionID() (string, error) {
-	buf := make([]byte, 24)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(buf), nil
-}
-
 // CreateAdminSession stores a session and returns its id and a CSRF token.
 func CreateAdminSession(db *sql.DB, userID int64) (*AdminSession, string, error) {
-	id, err := newSessionID()
+	id, err := randomHex(24)
 	if err != nil {
 		return nil, "", err
 	}
-	csrfKey, err := newSessionID()
+	csrfKey, err := randomHex(24)
 	if err != nil {
 		return nil, "", err
 	}

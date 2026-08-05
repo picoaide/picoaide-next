@@ -3,7 +3,6 @@ package marketplace
 import (
 	"archive/tar"
 	"compress/gzip"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -156,7 +155,7 @@ func buildArchive(repoPath, name, version, dst string) error {
 			return fmt.Errorf("symlink not allowed in package: %s", rel)
 		}
 		// ponytail: git clones cannot contain hardlinks (git stores blobs
-		// separately), so only ValidatePackage needs that check.
+		// separately), so no link check is needed here.
 		info, err := d.Info()
 		if err != nil {
 			return err
@@ -190,50 +189,6 @@ func buildArchive(repoPath, name, version, dst string) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), dst)
-}
-
-// ValidatePackage rejects archives with absolute paths, ".." components,
-// symlink/hardlink (or other special) entries, or a declared size over
-// maxPackageSize. Sizes are summed from headers, so a huge declared size is
-// rejected without reading the payload.
-func ValidatePackage(r io.Reader) error {
-	gr, err := gzip.NewReader(r)
-	if err != nil {
-		return fmt.Errorf("gzip: %w", err)
-	}
-	tr := tar.NewReader(gr)
-	var total int64
-	for {
-		hdr, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		if hdr.Name == "" || filepath.IsAbs(hdr.Name) || hasDotDot(hdr.Name) {
-			return fmt.Errorf("unsafe path in package: %q", hdr.Name)
-		}
-		switch hdr.Typeflag {
-		case tar.TypeReg, tar.TypeRegA, tar.TypeDir:
-		default:
-			return fmt.Errorf("unsupported entry type %d in %q", hdr.Typeflag, hdr.Name)
-		}
-		total += hdr.Size
-		if total > maxPackageSize {
-			return fmt.Errorf("package exceeds %d bytes", maxPackageSize)
-		}
-	}
-	return nil
-}
-
-func hasDotDot(name string) bool {
-	for _, part := range strings.Split(name, "/") {
-		if part == ".." {
-			return true
-		}
-	}
-	return false
 }
 
 func readMetadata(path string) (*skillMetadata, error) {

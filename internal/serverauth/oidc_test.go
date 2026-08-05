@@ -175,27 +175,27 @@ const testRedirectURI = "http://localhost/api/auth/oidc/callback"
 
 func newOIDCProvider(t *testing.T, idp *fakeIDP) *OIDCProvider {
 	t.Helper()
-	p, err := NewOIDCProvider(map[string]string{
+	p := &OIDCProvider{}
+	if err := p.Configure(map[string]string{
 		"issuer":        idp.srv.URL,
 		"client_id":     "test-client",
 		"client_secret": "secret",
 		"redirect_url":  testRedirectURI,
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
 	return p
 }
 
 func TestOIDCConfigure(t *testing.T) {
-	if _, err := NewOIDCProvider(map[string]string{}); err == nil {
+	if err := (&OIDCProvider{}).Configure(map[string]string{}); err == nil {
 		t.Fatal("expected error with missing config")
 	}
 	idp := newFakeIDP(t)
-	p, err := NewOIDCProvider(map[string]string{
+	p := &OIDCProvider{}
+	if err := p.Configure(map[string]string{
 		"issuer": idp.srv.URL, "client_id": "c", "redirect_url": "http://x/cb",
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
 	if p.Name() != "oidc" {
