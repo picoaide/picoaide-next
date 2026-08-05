@@ -97,18 +97,34 @@ func mergeModelNames(a, b []string) []string {
 	return out
 }
 
-// MatchModel finds the enabled upstream serving modelName, or ErrNotFound.
-func MatchModel(db *sql.DB, modelName string) (*Upstream, error) {
+// MatchModels returns every enabled upstream serving modelName, in DB order.
+// Multiple candidates enable failover: when the first provider fails before
+// the first byte, the next one is tried.
+func MatchModels(db *sql.DB, modelName string) ([]Upstream, error) {
 	ups, err := LoadUpstreams(db)
 	if err != nil {
 		return nil, err
 	}
+	var out []Upstream
 	for i := range ups {
 		for _, m := range ups[i].Models {
 			if m == modelName {
-				return &ups[i], nil
+				out = append(out, ups[i])
+				break
 			}
 		}
 	}
-	return nil, serverstore.ErrNotFound
+	return out, nil
+}
+
+// MatchModel finds the first enabled upstream serving modelName, or ErrNotFound.
+func MatchModel(db *sql.DB, modelName string) (*Upstream, error) {
+	ups, err := MatchModels(db, modelName)
+	if err != nil {
+		return nil, err
+	}
+	if len(ups) == 0 {
+		return nil, serverstore.ErrNotFound
+	}
+	return &ups[0], nil
 }
