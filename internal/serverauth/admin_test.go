@@ -171,6 +171,104 @@ func TestAdminUsage(t *testing.T) {
 	}
 }
 
+func TestAdminTokens(t *testing.T) {
+	r, db := adminRouter(t)
+	defer db.Close()
+	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", w.Code, w.Body.String())
+	}
+	csrf := out["csrf_token"].(string)
+	sess := ""
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == sessionCookieName {
+			sess = ck.Value
+		}
+	}
+	hdr := map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
+
+	uid, err := createUserDB(db, "tokadmin", "pw123456", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := IssueToken(db, uid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := IssueToken(db, uid); err != nil {
+		t.Fatal(err)
+	}
+
+	// requires session
+	if w, _ := doJSON(t, r, "GET", fmt.Sprintf("/api/admin/users/%d/tokens", uid), "", nil); w.Code != http.StatusUnauthorized {
+		t.Fatalf("tokens without session: %d", w.Code)
+	}
+	// list
+	w, out = doJSON(t, r, "GET", fmt.Sprintf("/api/admin/users/%d/tokens", uid), "", map[string]string{"Cookie": "picoaide_session=" + sess})
+	if w.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", w.Code, w.Body.String())
+	}
+	toks := out["tokens"].([]any)
+	if len(toks) != 2 {
+		t.Fatalf("want 2 tokens, got %d", len(toks))
+	}
+	for _, tk := range toks {
+		row := tk.(map[string]any)
+		if _, leaked := row["token_hash"]; leaked {
+			t.Fatal("token_hash leaked to admin listing")
+		}
+		if row["name"] != "desktop" {
+			t.Fatalf("name = %v", row["name"])
+		}
+	}
+	tid := int64(toks[0].(map[string]any)["id"].(float64))
+
+	// unknown user -> 404
+	if w, _ := doJSON(t, r, "GET", "/api/admin/users/999999/tokens", "", map[string]string{"Cookie": "picoaide_session=" + sess}); w.Code != http.StatusNotFound {
+		t.Fatalf("unknown user list: %d", w.Code)
+	}
+	// revoke requires CSRF
+	if w, _ := doJSON(t, r, "POST", fmt.Sprintf("/api/admin/tokens/%d/revoke", tid), "", map[string]string{"Cookie": "picoaide_session=" + sess}); w.Code != http.StatusForbidden {
+		t.Fatalf("revoke without csrf: %d", w.Code)
+	}
+	// revoke
+	w, _ = doJSON(t, r, "POST", fmt.Sprintf("/api/admin/tokens/%d/revoke", tid), "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("revoke: %d %s", w.Code, w.Body.String())
+	}
+	w, out = doJSON(t, r, "GET", fmt.Sprintf("/api/admin/users/%d/tokens", uid), "", map[string]string{"Cookie": "picoaide_session=" + sess})
+	toks = out["tokens"].([]any)
+	if toks[0].(map[string]any)["revoked"].(float64) != 1 {
+		t.Fatal("token not revoked in listing")
+	}
+	// unknown token -> 404
+	if w, _ := doJSON(t, r, "POST", "/api/admin/tokens/999999/revoke", "", hdr); w.Code != http.StatusNotFound {
+		t.Fatalf("unknown token revoke: %d", w.Code)
+	}
+}
+
+func TestVerifyTokenTouchesLastUsed(t *testing.T) {
+	db := mustDB(t)
+	defer db.Close()
+	uid, err := createUserDB(db, "lastused", "pw123456", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := IssueToken(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyToken(db, raw); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := serverstore.GetTokenByHash(db, serverstore.TokenHash(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.LastUsedAt.IsZero() {
+		t.Fatal("verify did not touch last_used_at")
+	}
+}
+
 // --- helpers ---
 
 func mustDB(t *testing.T) *sql.DB {

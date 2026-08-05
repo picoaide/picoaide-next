@@ -57,6 +57,53 @@ func RevokeToken(db *sql.DB, hash string) error {
 	return nil
 }
 
+// RevokeTokenByID revokes a token by id. Idempotent: revoking an
+// already-revoked token succeeds.
+func RevokeTokenByID(db *sql.DB, tokenID int64) error {
+	res, err := db.Exec("UPDATE api_tokens SET revoked = 1 WHERE id = ?", tokenID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// TouchTokenLastUsed records the last successful verification time.
+func TouchTokenLastUsed(db *sql.DB, tokenID int64) error {
+	_, err := db.Exec("UPDATE api_tokens SET last_used_at = ? WHERE id = ?",
+		time.Now().UTC().Format(time.RFC3339), tokenID)
+	return err
+}
+
+// ListTokensByUser returns the non-sensitive view of a user's tokens
+// (id/name/created/expiry/last used/revoked; never the hash).
+func ListTokensByUser(db *sql.DB, userID int64) ([]Token, error) {
+	rows, err := db.Query(`SELECT id, user_id, token_hash, name, created_at, expires_at, last_used_at, revoked
+		FROM api_tokens WHERE user_id = ? ORDER BY id DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Token
+	for rows.Next() {
+		var t Token
+		var expiresAt, lastUsed sql.NullString
+		if err := rows.Scan(&t.ID, &t.UserID, &t.TokenHash, &t.Name, &t.CreatedAt, &expiresAt, &lastUsed, &t.Revoked); err != nil {
+			return nil, err
+		}
+		t.ExpiresAt, _ = time.Parse(time.RFC3339, expiresAt.String)
+		if lastUsed.Valid {
+			t.LastUsedAt, _ = time.Parse(time.RFC3339, lastUsed.String)
+		}
+		t.TokenHash = "" // never expose the hash in listings
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 type Token struct {
 	ID         int64
 	UserID     int64

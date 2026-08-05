@@ -56,6 +56,7 @@ func VerifyToken(db *sql.DB, raw string) (*serverstore.User, error) {
 	if u.Status != 1 {
 		return nil, errors.New("user disabled")
 	}
+	_ = serverstore.TouchTokenLastUsed(db, tok.ID)
 	return u, nil
 }
 
