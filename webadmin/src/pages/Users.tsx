@@ -15,6 +15,19 @@ interface User {
   status: number
 }
 
+interface ApiToken {
+  id: number
+  name: string
+  created_at: string
+  expires_at: string
+  last_used_at: string
+  revoked: number
+}
+
+function fmtTime(s: string): string {
+  return s ? s.slice(0, 16).replace('T', ' ') : '—'
+}
+
 export default function Users() {
   const [users, setUsers] = useState<User[]>([])
   const [total, setTotal] = useState(0)
@@ -24,6 +37,8 @@ export default function Users() {
   const [password, setPassword] = useState('')
   const [isAdmin, setIsAdmin] = useState(false)
   const [error, setError] = useState('')
+  const [tokensUser, setTokensUser] = useState<User | null>(null)
+  const [tokens, setTokens] = useState<ApiToken[]>([])
 
   const load = useCallback(async (p: number) => {
     try {
@@ -76,6 +91,26 @@ export default function Users() {
     }
   }
 
+  async function openTokens(u: User) {
+    setTokensUser(u)
+    try {
+      const data = await request(`/api/admin/users/${u.id}/tokens`)
+      setTokens(data.tokens)
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
+  async function revoke(t: ApiToken) {
+    if (!window.confirm(`确定撤销令牌 #${t.id}(${t.name})?撤销后客户端需重新登录。`)) return
+    try {
+      await request(`/api/admin/tokens/${t.id}/revoke`, { method: 'POST' })
+      if (tokensUser) openTokens(tokensUser)
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
   const pages = Math.max(1, Math.ceil(total / 20))
 
   return (
@@ -103,6 +138,7 @@ export default function Users() {
               <TableCell>{u.is_admin ? <Badge>管理员</Badge> : <Badge variant="secondary">员工</Badge>}</TableCell>
               <TableCell>{u.status === 1 ? <Badge variant="success">启用</Badge> : <Badge variant="destructive">禁用</Badge>}</TableCell>
               <TableCell className="text-right space-x-2">
+                <Button size="sm" variant="outline" onClick={() => openTokens(u)}>令牌</Button>
                 <Button size="sm" variant="outline" onClick={() => toggleUser(u)}>
                   {u.status === 1 ? '禁用' : '启用'}
                 </Button>
@@ -139,6 +175,45 @@ export default function Users() {
             </div>
             <Button onClick={create} className="w-full">创建</Button>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!tokensUser} onOpenChange={(open) => { if (!open) setTokensUser(null) }}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>令牌管理 · {tokensUser?.username}</DialogTitle>
+            <DialogDescription>客户端登录凭证,90 天过期;撤销后客户端需重新登录</DialogDescription>
+          </DialogHeader>
+          {tokens.length === 0 ? (
+            <div className="text-sm text-muted-foreground">该用户暂无令牌</div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>名称</TableHead>
+                  <TableHead>创建时间</TableHead>
+                  <TableHead>过期时间</TableHead>
+                  <TableHead>最后使用</TableHead>
+                  <TableHead>状态</TableHead>
+                  <TableHead className="text-right">操作</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {tokens.map((t) => (
+                  <TableRow key={t.id}>
+                    <TableCell>{t.name}</TableCell>
+                    <TableCell>{fmtTime(t.created_at)}</TableCell>
+                    <TableCell>{fmtTime(t.expires_at)}</TableCell>
+                    <TableCell>{fmtTime(t.last_used_at)}</TableCell>
+                    <TableCell>{t.revoked ? <Badge variant="destructive">已撤销</Badge> : <Badge variant="success">正常</Badge>}</TableCell>
+                    <TableCell className="text-right">
+                      <Button size="sm" variant="destructive" disabled={!!t.revoked} onClick={() => revoke(t)}>撤销</Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
         </DialogContent>
       </Dialog>
     </div>

@@ -35,6 +35,8 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	g.POST("/users", AdminAuth(db), a.createUser)
 	g.PUT("/users/:id", AdminAuth(db), a.updateUser)
 	g.DELETE("/users/:id", AdminAuth(db), a.deleteUser)
+	g.GET("/users/:id/tokens", AdminAuth(db), a.listUserTokens)
+	g.POST("/tokens/:id/revoke", AdminAuth(db), a.revokeToken)
 	g.GET("/usage", AdminAuth(db), a.usage)
 }
 
@@ -301,6 +303,64 @@ func (a *AdminAPI) deleteUser(c *gin.Context) {
 	}
 	if err := serverstore.DeleteUser(a.DB, id); err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// tokenJSON is the non-sensitive admin view of an API token.
+type tokenJSON struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	CreatedAt  string `json:"created_at"`
+	ExpiresAt  string `json:"expires_at"`
+	LastUsedAt string `json:"last_used_at"`
+	Revoked    int    `json:"revoked"`
+}
+
+func (a *AdminAPI) listUserTokens(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "非法用户 ID")
+		return
+	}
+	if _, err := serverstore.GetUserByID(a.DB, id); errors.Is(err, serverstore.ErrNotFound) {
+		writeError(c, http.StatusNotFound, "NOT_FOUND", "用户不存在")
+		return
+	} else if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	tokens, err := serverstore.ListTokensByUser(a.DB, id)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	out := make([]tokenJSON, 0, len(tokens))
+	for _, tk := range tokens {
+		lastUsed := ""
+		if !tk.LastUsedAt.IsZero() {
+			lastUsed = tk.LastUsedAt.Format(time.RFC3339)
+		}
+		out = append(out, tokenJSON{
+			ID: tk.ID, Name: tk.Name, CreatedAt: tk.CreatedAt,
+			ExpiresAt: tk.ExpiresAt.Format(time.RFC3339), LastUsedAt: lastUsed, Revoked: tk.Revoked,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"tokens": out})
+}
+
+func (a *AdminAPI) revokeToken(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "非法令牌 ID")
+		return
+	}
+	if err := serverstore.RevokeTokenByID(a.DB, id); errors.Is(err, serverstore.ErrNotFound) {
+		writeError(c, http.StatusNotFound, "NOT_FOUND", "令牌不存在")
+		return
+	} else if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "撤销失败")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
