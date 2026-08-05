@@ -15,8 +15,8 @@ import {
 } from '../components/ui/dialog'
 import { useAuthStore } from '../stores/auth'
 import { toast } from 'sonner'
-import { pluginApi } from '../plugin-api'
-import { errCode } from '../api/picoaide'
+import { errCode, picoaide } from '../api/picoaide'
+import { applyAccent } from '../lib/theme'
 import type { McpListResult, McpRiskInfo, SettingsInfo, SkillRiskInfo, SkillsListResult } from '../../../main/plugin_ipc'
 
 // 强调色预设(chatbox accent color):hsl 值覆盖 --primary
@@ -59,23 +59,14 @@ export default function Settings({
   }, [initialSection])
 
   // 应用强调色:覆盖 --primary(+dark 变体),浅色 foreground 恒白
-  const applyAccent = (color: string) => {
-    const root = document.documentElement
-    root.style.setProperty('--primary', color)
-    root.style.setProperty('--primary-foreground', '210 40% 98%')
-    const isDark = root.classList.contains('dark')
-    root.style.setProperty('--ring', color)
-    void isDark
-  }
-
   const pickAccent = async (color: string) => {
     setAccent(color)
     applyAccent(color)
-    await pluginApi().accent(color)
+    await picoaide().accent(color)
   }
 
   const load = useCallback(async () => {
-    const api = pluginApi()
+    const api = picoaide()
     try {
       const [i, s, m, dirs, c] = await Promise.all([
         api.settingsInfo(), api.pluginSkillsList(), api.pluginMcpList(), api.allowedDirs(), api.cdpStatus(),
@@ -111,35 +102,35 @@ export default function Settings({
 
   const installSkill = (name: string) =>
     run('skill', async () => {
-      const r = await pluginApi().pluginSkillsInstall({ name })
+      const r = await picoaide().pluginSkillsInstall({ name })
       if ('risk' in r) setRisk({ kind: 'skill', data: r.risk })
     })
 
   const confirmSkill = () =>
     risk && risk.kind === 'skill'
       ? run('skill', async () => {
-          await pluginApi().pluginSkillsInstall({ name: risk.data.name, confirmed: true })
+          await picoaide().pluginSkillsInstall({ name: risk.data.name, confirmed: true })
           setRisk(null)
         })
       : Promise.resolve()
 
   const installMcp = (id: number) =>
     run('mcp', async () => {
-      const r = await pluginApi().pluginMcpInstall({ id })
+      const r = await picoaide().pluginMcpInstall({ id })
       if ('risk' in r) setRisk({ kind: 'mcp', data: r.risk })
     })
 
   const confirmMcp = () =>
     risk && risk.kind === 'mcp'
       ? run('mcp', async () => {
-          await pluginApi().pluginMcpInstall({ id: risk.data.id, confirmed: true })
+          await picoaide().pluginMcpInstall({ id: risk.data.id, confirmed: true })
           setRisk(null)
         })
       : Promise.resolve()
 
   const refreshConfig = () =>
     run('refresh', async () => {
-      const cfg = await pluginApi().refreshBootstrap()
+      const cfg = await picoaide().refreshBootstrap()
       useAuthStore.setState({ bootstrap: cfg })
     })
 
@@ -147,7 +138,7 @@ export default function Settings({
     const dir = newDir.trim()
     if (!dir) return
     try {
-      const next = await pluginApi().allowedDirs([...allowedDirs, dir])
+      const next = await picoaide().allowedDirs([...allowedDirs, dir])
       setAllowedDirs(next)
       setNewDir('')
     } catch (e) {
@@ -157,7 +148,7 @@ export default function Settings({
 
   async function removeDir(dir: string) {
     try {
-      const next = await pluginApi().allowedDirs(allowedDirs.filter((d) => d !== dir))
+      const next = await picoaide().allowedDirs(allowedDirs.filter((d) => d !== dir))
       setAllowedDirs(next)
     } catch {
       setError('保存失败')
@@ -287,7 +278,7 @@ export default function Settings({
                 <span className="text-sm font-medium">{name}</span>
                 <span className="ml-2 text-xs text-muted-foreground">v{rec.version}</span>
               </div>
-              <Button variant="ghost" size="sm" onClick={() => void run('skill', () => pluginApi().pluginSkillsRemove({ name }))} disabled={busy !== ''}>
+              <Button variant="ghost" size="sm" onClick={() => void run('skill', () => picoaide().pluginSkillsRemove({ name }))} disabled={busy !== ''}>
                 <Trash2 className="h-4 w-4" /> 卸载
               </Button>
             </div>
@@ -335,10 +326,10 @@ export default function Settings({
                   <div className="flex items-center gap-2">
                     <Switch
                       checked={r.enabled}
-                      onCheckedChange={(v) => void run('mcp', () => pluginApi().pluginMcpToggle({ id: r.id, enabled: v }))}
+                      onCheckedChange={(v) => void run('mcp', () => picoaide().pluginMcpToggle({ id: r.id, enabled: v }))}
                       disabled={busy !== ''}
                     />
-                    <Button variant="ghost" size="sm" onClick={() => void run('mcp', () => pluginApi().pluginMcpRemove({ id: r.id }))} disabled={busy !== ''}>
+                    <Button variant="ghost" size="sm" onClick={() => void run('mcp', () => picoaide().pluginMcpRemove({ id: r.id }))} disabled={busy !== ''}>
                       <Trash2 className="h-4 w-4" /> 卸载
                     </Button>
                   </div>

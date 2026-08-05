@@ -6,11 +6,12 @@ import ToolCalls from './ToolCalls'
 import Markdown from './Markdown'
 import { Button } from './ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip'
-import { useChatStore, type ChatMessage, type ToolCallView } from '../stores/chat'
+import { useChatStore, type ToolCallView } from '../stores/chat'
+import type { MessageRow } from '../../../main/ipc'
 import ConfirmDialog from './ConfirmDialog'
 
 interface MessagesProps {
-  messages: ChatMessage[]
+  messages: MessageRow[]
   streaming: boolean
   streamingText: string
   streamingReasoning: string
@@ -72,13 +73,13 @@ export default function Messages({ messages, streaming, streamingText, streaming
     )
   }
 
-  const startEdit = (m: ChatMessage) => {
+  const startEdit = (m: MessageRow) => {
     setEditingId(m.id)
     setEditValue(m.content)
   }
 
 
-  const saveEdit = (m: ChatMessage) => {
+  const saveEdit = (m: MessageRow) => {
     setEditingId(null)
     void useChatStore.getState().editMessage(m.id, editValue)
   }
@@ -188,7 +189,7 @@ function Bubble({
   onQuote,
   onDelete,
 }: {
-  message: ChatMessage
+  message: MessageRow
   onEdit: () => void
   onRegenerate: () => void
   onQuote: () => void

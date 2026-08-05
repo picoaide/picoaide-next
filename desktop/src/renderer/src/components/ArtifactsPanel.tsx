@@ -4,10 +4,7 @@ import type { ArtifactRow } from '../../../main/ipc'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { ScrollArea } from './ui/scroll-area'
-
-function basename(path: string): string {
-  return path.split(/[\\/]/).pop() || path
-}
+import { basename } from '../lib/utils'
 
 // 右侧产物面板(架构设计 §3.5):当前会话产物列表 + "在文件夹中显示"
 export default function ArtifactsPanel({ artifacts }: { artifacts: ArtifactRow[] }) {

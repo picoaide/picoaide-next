@@ -6,6 +6,7 @@ import { useAuthStore } from './stores/auth'
 import { useChatStore } from './stores/chat'
 import { useConnectionStore } from './stores/connection'
 import { Toaster } from './components/ui/sonner'
+import { applyAccent } from './lib/theme'
 
 export default function App() {
   const authStatus = useAuthStore((s) => s.status)
@@ -47,12 +48,7 @@ export default function App() {
     const offTheme = window.picoaide.onThemeChanged(applyTheme)
     // 启动恢复强调色(settings 表持久化)
     void window.picoaide.accent().then((c) => {
-      if (c) {
-        const root = document.documentElement
-        root.style.setProperty('--primary', c)
-        root.style.setProperty('--primary-foreground', '210 40% 98%')
-        root.style.setProperty('--ring', c)
-      }
+      if (c) applyAccent(c)
     })
     // macOS 菜单命令:Cmd+, 设置 / Cmd+N 新建会话
     const offMenu = window.picoaide.onMenuCommand((cmd) => {

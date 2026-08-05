@@ -4,7 +4,7 @@ import { Button } from './ui/button'
 import { Textarea } from './ui/textarea'
 import { Tabs, TabsList, TabsTrigger } from './ui/tabs'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip'
-import { cn } from '../lib/utils'
+import { cn, basename } from '../lib/utils'
 import { useChatStore, type Mode } from '../stores/chat'
 
 import { parseCommandLine, parseMentionLine, type ChatboxLine } from '../lib/chatbox'
@@ -56,7 +56,9 @@ export default function ChatInput() {
       .catch(() => setInstalledSkills([]))
   }, [])
 
-  // 引用消息(chatbox 语义):以 blockquote 前缀插入输入框
+  // 外部注入的输入(均一次消费):引用消息(chatbox 语义,blockquote 前缀)与空状态示例提示词
+  const pendingPrompt = useChatStore((s) => s.pendingPrompt)
+  const consumePrompt = useChatStore((s) => s.consumePrompt)
   useEffect(() => {
     if (pendingQuote) {
       setValue((v) => {
@@ -66,18 +68,12 @@ export default function ChatInput() {
       consumeQuote()
       textareaRef.current?.focus()
     }
-  }, [pendingQuote, consumeQuote])
-
-  // 空状态示例提示词:点击后填入输入框
-  const pendingPrompt = useChatStore((s) => s.pendingPrompt)
-  const consumePrompt = useChatStore((s) => s.consumePrompt)
-  useEffect(() => {
     if (pendingPrompt) {
       setValue((v) => (v.length === 0 ? pendingPrompt : v))
       consumePrompt()
       textareaRef.current?.focus()
     }
-  }, [pendingPrompt, consumePrompt])
+  }, [pendingQuote, pendingPrompt, consumeQuote, consumePrompt])
 
   // / 命令候选 = 本地已装技能(服务端 bootstrap.skills 只是商店建议清单,未安装的不可用)
   const commandItems = installedSkills
@@ -178,8 +174,6 @@ export default function ChatInput() {
     : line && line.kind === 'mention' && line.files.length === 0 && line.skills.length === 0
       ? '无匹配的文件或技能'
       : null
-
-  const basename = (p: string) => p.split(/[\\/]/).pop() || p
 
   return (
     <div className="border-t bg-background px-4 py-3">

@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { toast } from 'sonner'
 import { picoaide } from '../api/picoaide'
 import type { AgentEvent } from '../../../main/agent/events'
-import type { ArtifactRow, ConversationRow, MessageRow } from '../../../main/ipc'
+import type { ArtifactRow, ConversationRow, MessageRow, ProjectRow } from '../../../main/ipc'
 import { useApprovalsStore } from './approvals'
 import { useConnectionStore } from './connection'
 
@@ -19,22 +19,6 @@ let runToken = 0
 // 新建会话防重入(双击快速点击创建两个空会话)
 let creatingConversation = false
 
-export interface ChatMessage {
-  id: number
-  role: string
-  content: string
-  is_error: number
-  tool_name: string
-  reasoning: string
-}
-
-export interface ProjectView {
-  id: number
-  name: string
-  path: string
-  created_at: string
-}
-
 // 工具卡片视图(流式期间由 tool_start/tool_end/tool_error 事件驱动)
 export interface ToolCallView {
   id: string
@@ -50,24 +34,13 @@ export interface ToolCallView {
   reason?: string
 }
 
-function mapMessages(rows: MessageRow[]): ChatMessage[] {
-  return rows.map((m) => ({
-    id: m.id,
-    role: m.role,
-    content: m.content,
-    is_error: m.is_error,
-    tool_name: m.tool_name ?? '',
-    reasoning: m.reasoning ?? '',
-  }))
-}
-
 interface ChatState {
   conversations: ConversationRow[]
   activeId: number | null
-  messages: ChatMessage[]
+  messages: MessageRow[]
   artifacts: ArtifactRow[]
   // 项目(侧边栏分组;workspace 由主进程按项目路径/会话 id 落库)
-  projects: ProjectView[]
+  projects: ProjectRow[]
   activeProjectId: number | null
   collapsedProjects: number[]
   // 启动扫描/推送的中断会话(架构设计 §3.3.1a 重跑恢复),非空时 UI 提示"是否继续"
@@ -114,7 +87,36 @@ interface ChatState {
   onChatTitle: (conversationId: number, title: string) => void
 }
 
-export const useChatStore = create<ChatState>((set, get) => ({
+export const useChatStore = create<ChatState>((set, get) => {
+  // 任务运行统一骨架(sendMessage/continueConversation/approvePlan/editMessage 共用):
+  // 递增代次防 cancel 兜底误伤、置 streaming、成功后刷会话列表、失败兜底复位。
+  // 各任务在 fn 内自行守卫(切走/新建会话时返回 false 丢弃结果,不覆盖新会话视图)
+  async function runTask(label: string, fn: () => Promise<boolean>): Promise<boolean> {
+    pendingDelta = ''
+    runToken++
+    set({ streaming: true, streamingText: '', streamingReasoning: '', localError: null })
+    try {
+      const ok = await fn()
+      if (!ok) return false
+      await get().loadConversations()
+      return true
+    } catch (e) {
+      set((s) => ({
+        streaming: false,
+        streamingText: '',
+        streamingReasoning: '',
+        localError: s.localError ?? (e instanceof Error && e.message ? e.message : `${label}失败,请重试`),
+      }))
+      return false
+    }
+  }
+
+  // 中断会话合并守卫(去重:已有提示则不覆盖;启动拉取与主进程推送可能重复触发)
+  function mergeInterrupted(list: ConversationRow[]): void {
+    set((s) => ({ interrupted: s.interrupted.length > 0 ? s.interrupted : list }))
+  }
+
+  return {
   conversations: [],
   activeId: null,
   messages: [],
@@ -197,7 +199,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await get().cancel()
     }
     const [all, artifacts] = await Promise.all([picoaide().chatMessages(id), picoaide().chatArtifacts(id)])
-    const page = mapMessages(all.slice(-PAGE_SIZE))
+    const page = all.slice(-PAGE_SIZE)
     pendingDelta = ''
     set({
       activeId: id,
@@ -225,7 +227,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return
       }
       set((s) => ({
-        messages: [...mapMessages(rows), ...s.messages],
+        messages: [...rows, ...s.messages],
         loadedTotal: s.loadedTotal + rows.length,
         hasMoreMessages: rows.length === PAGE_SIZE,
       }))
@@ -263,65 +265,51 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return false
     }
     // 同步置 streaming:关闭 chatNew await 期间双击/并发发送的竞态窗口(第二个发送直接返回)
-    pendingDelta = ''
-    runToken++
-    set((s) => ({ streaming: true, streamingText: '', streamingReasoning: '', localError: null }))
-    try {
+    return runTask('发送', async () => {
       let activeId = get().activeId
       if (activeId === null) {
         activeId = await picoaide().chatNew({ mode: get().mode })
         // 首条消息创建会话后必须选中,否则后续消息每次都新建会话
         set({ activeId })
       }
-      const id = activeId
       // 乐观追加用户消息;assistant 内容以流式增量呈现,结束后从 DB 重载
       set((s) => ({
-        messages: [...s.messages, { id: Date.now(), role: 'user', content: text, is_error: 0, tool_name: '', reasoning: '' }],
+        messages: [
+          ...s.messages,
+          { id: Date.now(), conversation_id: activeId, role: 'user', content: text, is_error: 0, tool_name: '', reasoning: '', tool_calls: '', tool_call_id: '', created_at: '' },
+        ],
       }))
-      await picoaide().chatAsk(id, text, get().mode)
+      await picoaide().chatAsk(activeId, text, get().mode)
       // 期间用户切走/新建会话:丢弃本次结果,不覆盖新会话视图
-      if (useChatStore.getState().activeId !== id) return false
-      const messages = mapMessages(await picoaide().chatMessages(id))
+      if (useChatStore.getState().activeId !== activeId) return false
+      const messages = await picoaide().chatMessages(activeId)
       set({ messages, streaming: false, streamingText: '', streamingReasoning: '' })
-      await get().loadConversations()
       return true
-    } catch (e) {
-      set((s) => ({ streaming: false, streamingText: '', streamingReasoning: '', localError: s.localError ?? (e instanceof Error && e.message ? e.message : '发送失败,请重试') }))
-      return false
-    }
+    })
   },
 
   // 重跑恢复(架构设计 §3.3.1a):选中会话 → 截断到最后一条 user 消息重跑;UI 保留历史显示
   continueConversation: async (id) => {
     if (get().streaming) await get().cancel()
-    const messages = mapMessages(await picoaide().chatMessages(id))
+    const messages = await picoaide().chatMessages(id)
     const artifacts = await picoaide().chatArtifacts(id)
-    pendingDelta = ''
-    runToken++
-    set({ activeId: id, messages, artifacts, streaming: true, streamingText: '', streamingReasoning: '', toolCalls: [], interrupted: [], localError: null })
-    try {
+    await runTask('继续', async () => {
+      set({ activeId: id, messages, artifacts, toolCalls: [], interrupted: [] })
       await picoaide().chatContinue(id)
-      if (useChatStore.getState().activeId !== id) return
-      await get().loadConversations()
-    } catch (e) {
-      set((s) => ({ streaming: false, localError: s.localError ?? (e instanceof Error && e.message ? e.message : '继续失败,请重试') }))
-    }
+      if (useChatStore.getState().activeId !== id) return false
+      return true
+    })
   },
 
   // Plan 确认(架构设计 §3.3.4):ok → 第二轮带 tools 执行;!ok → rejected
   approvePlan: async (id, ok) => {
     if (get().streaming) await get().cancel()
-    pendingDelta = ''
-    runToken++
-    set({ streaming: true, localError: null })
-    try {
+    await runTask('操作', async () => {
       await picoaide().approvePlan(id, ok)
-      if (useChatStore.getState().activeId !== id) return
+      if (useChatStore.getState().activeId !== id) return false
       set({ streaming: false })
-      await get().loadConversations()
-    } catch (e) {
-      set((s) => ({ streaming: false, localError: s.localError ?? (e instanceof Error && e.message ? e.message : '操作失败,请重试') }))
-    }
+      return true
+    })
   },
 
   cancel: async () => {
@@ -347,19 +335,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (activeId === null) return
     // 流式中编辑:先停当前任务,避免与引擎单运行守卫冲突(否则报"已有任务在运行"且旧 run 继续跑)
     if (get().streaming) await get().cancel()
-    pendingDelta = ''
-    runToken++
-    set({ streaming: true, streamingText: '', streamingReasoning: '', localError: null })
-    try {
+    await runTask('编辑', async () => {
       await picoaide().chatEditAndRerun({ conversationId: activeId, messageId, content })
       // 期间切走:丢弃结果
-      if (useChatStore.getState().activeId !== activeId) return
-      const messages = mapMessages(await picoaide().chatMessages(activeId))
+      if (useChatStore.getState().activeId !== activeId) return false
+      const messages = await picoaide().chatMessages(activeId)
       set({ messages, streaming: false, streamingText: '' })
-      await get().loadConversations()
-    } catch (e) {
-      set((s) => ({ streaming: false, streamingText: '', localError: s.localError ?? (e instanceof Error && e.message ? e.message : '编辑失败,请重试') }))
-    }
+      return true
+    })
   },
 
   quoteMessage: (content) => set({ pendingQuote: content }),
@@ -381,17 +364,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { activeId } = get()
     if (activeId === null) return
     await picoaide().chatDeleteMessage(messageId)
-    const messages = mapMessages(await picoaide().chatMessages(activeId))
+    const messages = await picoaide().chatMessages(activeId)
     set({ messages })
   },
 
   // 启动时拉取中断会话;与主进程推送合并(去重:已有提示则不覆盖)
   checkInterrupted: async () => {
     const list = await picoaide().listRunningConversations()
-    if (list.length > 0) set((s) => ({ interrupted: s.interrupted.length > 0 ? s.interrupted : list }))
+    if (list.length > 0) mergeInterrupted(list)
   },
 
-  onInterrupted: (list) => set((s) => ({ interrupted: s.interrupted.length > 0 ? s.interrupted : list })),
+  onInterrupted: (list) => mergeInterrupted(list),
 
   clearInterrupted: () => set({ interrupted: [] }),
 
@@ -503,12 +486,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   clearLocalError: () => set({ localError: null }),
-}))
+}})
 
 async function reloadMessages(): Promise<void> {
   const { activeId } = useChatStore.getState()
   if (activeId === null) return
-  const messages = mapMessages(await picoaide().chatMessages(activeId))
+  const messages = await picoaide().chatMessages(activeId)
   // 期间用户切走/新建会话:丢弃旧会话重载结果,不覆盖新会话视图
   if (useChatStore.getState().activeId !== activeId) return
   // 全量重载:同步分页账本,避免 loadedTotal 过期导致上滚重复加载

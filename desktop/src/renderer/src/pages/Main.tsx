@@ -25,8 +25,8 @@ import Messages from '../components/Messages'
 import { picoaide } from '../api/picoaide'
 import SearchDialog from '../components/SearchDialog'
 import { useAuthStore } from '../stores/auth'
-import { useChatStore, type ProjectView } from '../stores/chat'
-import type { ConversationRow } from '../../../main/ipc'
+import { useChatStore } from '../stores/chat'
+import type { ConversationRow, ProjectRow } from '../../../main/ipc'
 import { useConnectionStore } from '../stores/connection'
 import { toast } from 'sonner'
 import { formatRelativeTime } from '../lib/time'
@@ -140,7 +140,6 @@ export default function Main({ onOpenSettings }: { onOpenSettings: (section?: 'm
 
   const handleDeleteProject = async (id: number) => {
     await deleteProject(id)
-    await loadProjects()
   }
 
   const conversationsOf = (projectId: number | null) =>
@@ -269,7 +268,7 @@ export default function Main({ onOpenSettings }: { onOpenSettings: (section?: 'm
     )
   }
 
-  const renderProjectGroup = (p: ProjectView) => {
+  const renderProjectGroup = (p: ProjectRow) => {
     const collapsed = collapsedProjects.includes(p.id)
     const items = conversationsOf(p.id)
     const active = activeProjectId === p.id
