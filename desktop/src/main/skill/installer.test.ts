@@ -179,6 +179,14 @@ describe('installFromMarketplace', () => {
     const err = await installFromMarketplace(installOpts(deps, dir)).catch((e: unknown) => e)
     expect((err as { kind?: string }).kind).toBe('rate_limited')
   })
+
+  it('rejects install when the downloaded archive fails checksum verification', async () => {
+    const dir = fixtureDir()
+    const deps = makeDeps(Buffer.alloc(0), '1.0.0')
+    deps.downloadArchive.mockRejectedValue({ kind: 'checksum_mismatch', message: 'mismatch' })
+
+    await expect(installFromMarketplace(installOpts(deps, dir))).rejects.toThrow(/校验/)
+  })
 })
 
 describe('previewSkillMeta', () => {

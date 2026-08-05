@@ -103,6 +103,7 @@ const MCP_ERROR_CODES: Record<string, string> = {
   auth_expired: 'AUTH_REQUIRED',
   network: 'NETWORK',
   server_error: 'SERVER_ERROR',
+  checksum_mismatch: 'CHECKSUM_MISMATCH',
 }
 
 const SKILL_ERROR_CODES: Record<string, string> = {

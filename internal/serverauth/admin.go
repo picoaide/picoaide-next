@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -14,6 +15,10 @@ import (
 )
 
 const sessionCookieName = "picoaide_session"
+
+// minPasswordLength is the minimum password length for admin-created users.
+// Password expiry is deliberately out of scope for now.
+const minPasswordLength = 10
 
 // adminLoginLimiter bounds admin login attempts (ip+username) so the
 // password is not brute-forceable without rate limiting.
@@ -170,6 +175,10 @@ func (a *AdminAPI) createUser(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "用户名和密码必填")
 		return
 	}
+	if utf8.RuneCountInString(req.Password) < minPasswordLength {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "密码至少 10 位")
+		return
+	}
 	status := req.Status
 	if status == 0 {
 		status = 1
@@ -242,6 +251,10 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 		u.Email = *req.Email
 	}
 	if req.Password != nil && *req.Password != "" {
+		if utf8.RuneCountInString(*req.Password) < minPasswordLength {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "密码至少 10 位")
+			return
+		}
 		hash, err := util.HashPassword(*req.Password)
 		if err != nil {
 			writeError(c, http.StatusInternalServerError, "INTERNAL", "密码处理失败")

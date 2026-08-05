@@ -51,6 +51,7 @@ function wrapMarketplaceError(e: unknown): SkillInstallError {
   if (kind === 'auth_expired') return new SkillInstallError('auth_expired', '登录已过期')
   if (kind === 'not_found') return new SkillInstallError('not_found', '技能不存在或已下架')
   if (kind === 'rate_limited') return new SkillInstallError('rate_limited', '下载过于频繁,请稍后再试')
+  if (kind === 'checksum_mismatch') return new SkillInstallError('server_error', '技能包校验失败(checksum 不匹配),已拒绝安装')
   return new SkillInstallError('server_error', e instanceof Error ? e.message : '下载失败')
 }
 

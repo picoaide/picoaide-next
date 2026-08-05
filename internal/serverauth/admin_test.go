@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,7 +103,7 @@ func TestAdminAPIs(t *testing.T) {
 		t.Fatalf("users without session: %d", w.Code)
 	}
 	// create user
-	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw","is_admin":false}`, hdr())
+	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
 	if w.Code != http.StatusOK {
 		t.Fatalf("create user: %d %s", w.Code, w.Body.String())
 	}
@@ -133,6 +134,49 @@ func TestAdminAPIs(t *testing.T) {
 	}
 	if w, _ := doJSON(t, r, "GET", "/api/admin/users", "", hdr()); w.Code != http.StatusUnauthorized {
 		t.Fatalf("users after logout: %d", w.Code)
+	}
+}
+
+func TestAdminPasswordPolicy(t *testing.T) {
+	r, db := adminRouter(t)
+	defer db.Close()
+
+	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", w.Code, w.Body.String())
+	}
+	csrf := out["csrf_token"].(string)
+	sess := ""
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == sessionCookieName {
+			sess = ck.Value
+		}
+	}
+	hdr := map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
+
+	// short password -> VALIDATION
+	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"shorty","password":"tooshort"}`, hdr)
+	if w.Code != http.StatusBadRequest || out["error"].(map[string]any)["code"] != "VALIDATION" {
+		t.Fatalf("short password: %d %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "10") {
+		t.Fatalf("short password message should mention min length: %s", w.Body.String())
+	}
+	// 10-char password -> ok
+	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"okuser","password":"tenchars12"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("10-char password: %d %s", w.Code, w.Body.String())
+	}
+	id := int64(out["user"].(map[string]any)["id"].(float64))
+	// update password to short -> VALIDATION
+	w, out = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", id), `{"password":"short"}`, hdr)
+	if w.Code != http.StatusBadRequest || out["error"].(map[string]any)["code"] != "VALIDATION" {
+		t.Fatalf("short password update: %d %s", w.Code, w.Body.String())
+	}
+	// update password to 10 chars -> ok
+	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", id), `{"password":"newpassword123"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("long password update: %d %s", w.Code, w.Body.String())
 	}
 }
 

@@ -1,9 +1,10 @@
+import { createHash } from 'node:crypto'
 import { ApiError, AuthError, fetchJSON, gatewayFetch } from './auth'
 import type { Session } from './config'
 
 export class MarketplaceError extends Error {
   constructor(
-    public kind: 'not_found' | 'rate_limited' | 'auth_expired' | 'network' | 'server_error',
+    public kind: 'not_found' | 'rate_limited' | 'auth_expired' | 'network' | 'server_error' | 'checksum_mismatch',
     message?: string,
   ) {
     super(message ?? kind)
@@ -77,6 +78,8 @@ export async function downloadArchive(session: Session, name: string): Promise<{
   }
   const version = res.headers.get('x-skill-version')
   if (!version) throw new MarketplaceError('server_error', 'missing X-Skill-Version header')
+  const checksum = res.headers.get('x-skill-checksum')
+  if (!checksum) throw new MarketplaceError('server_error', 'missing X-Skill-Checksum header')
   // 大小上限:恶意/异常大包直接吃满内存;Content-Length 缺省(分块传输)时靠读流累计
   const MAX_ARCHIVE_BYTES = 50 * 1024 * 1024
   const declared = Number(res.headers.get('content-length'))
@@ -85,6 +88,10 @@ export async function downloadArchive(session: Session, name: string): Promise<{
   }
   const buf = Buffer.from(await res.arrayBuffer())
   if (buf.length > MAX_ARCHIVE_BYTES) throw new MarketplaceError('server_error', 'archive too large')
+  // 验签:包体与声明 checksum 不一致即拒绝(篡改/损坏包)
+  if (createHash('sha256').update(buf).digest('hex') !== checksum) {
+    throw new MarketplaceError('checksum_mismatch', '技能包校验失败,已拒绝下载')
+  }
   return { buffer: buf, version }
 }
 

@@ -1,8 +1,11 @@
+import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 afterEach(() => {
   vi.unstubAllGlobals()
 })
+
+const sha256hex = (buf: Uint8Array) => createHash('sha256').update(buf).digest('hex')
 
 async function loadMarketplace() {
   return import('./marketplace')
@@ -26,12 +29,16 @@ describe('listSkills', () => {
 })
 
 describe('downloadArchive', () => {
-  it('returns gzip buffer and X-Skill-Version', async () => {
+  it('returns gzip buffer, version and verifies checksum', async () => {
     const gz = Buffer.from('gzipped-data')
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      headers: new Headers({ 'Content-Type': 'application/gzip', 'X-Skill-Version': '2.1.0' }),
+      headers: new Headers({
+        'Content-Type': 'application/gzip',
+        'X-Skill-Version': '2.1.0',
+        'X-Skill-Checksum': sha256hex(gz),
+      }),
       arrayBuffer: async () => gz.buffer.slice(gz.byteOffset, gz.byteOffset + gz.length),
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -44,6 +51,46 @@ describe('downloadArchive', () => {
     const [url, init] = fetchMock.mock.calls[0]
     expect(url).toBe('https://gw.example.com/api/marketplace/skills/docx/archive')
     expect(init.headers.Authorization).toBe('Bearer tok')
+  })
+
+  it('rejects a tampered archive whose bytes do not match the checksum', async () => {
+    const gz = Buffer.from('gzipped-data')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers({
+          'Content-Type': 'application/gzip',
+          'X-Skill-Version': '2.1.0',
+          'X-Skill-Checksum': sha256hex(Buffer.from('different-bytes')),
+        }),
+        arrayBuffer: async () => gz.buffer.slice(gz.byteOffset, gz.byteOffset + gz.length),
+      }),
+    )
+    const { downloadArchive, MarketplaceError } = await loadMarketplace()
+
+    const err = await downloadArchive(session, 'docx').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(MarketplaceError)
+    expect((err as { kind?: string }).kind).toBe('checksum_mismatch')
+  })
+
+  it('rejects a download missing the checksum header', async () => {
+    const gz = Buffer.from('gzipped-data')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'Content-Type': 'application/gzip', 'X-Skill-Version': '2.1.0' }),
+        arrayBuffer: async () => gz.buffer.slice(gz.byteOffset, gz.byteOffset + gz.length),
+      }),
+    )
+    const { downloadArchive, MarketplaceError } = await loadMarketplace()
+
+    const err = await downloadArchive(session, 'docx').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(MarketplaceError)
+    expect((err as { kind?: string }).kind).toBe('server_error')
   })
 
   it('rejects archives larger than 50MB', async () => {
