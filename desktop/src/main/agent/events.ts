@@ -12,17 +12,3 @@ export type AgentEvent =
   | { type: 'done'; conversationId: number; data: { usage?: { prompt_tokens: number; completion_tokens: number } } }
   | { type: 'canceled'; conversationId: number; data: { reason: string } }
   | { type: 'error'; conversationId: number; data: string }
-
-// 类型化事件发射器:引擎使用、测试可订阅、后续 ipc 桥接直接复用
-export class AgentEventEmitter {
-  private listeners = new Set<(ev: AgentEvent) => void>()
-
-  on(cb: (ev: AgentEvent) => void): () => void {
-    this.listeners.add(cb)
-    return () => this.listeners.delete(cb)
-  }
-
-  emit(ev: AgentEvent): void {
-    for (const cb of this.listeners) cb(ev)
-  }
-}

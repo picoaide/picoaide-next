@@ -8,12 +8,6 @@ export class KbError extends Error {
   }
 }
 
-export interface KbTool {
-  name: string
-  description: string
-  inputSchema: unknown
-}
-
 const KB_PATH = '/api/mcp/knowledge/message'
 
 let nextId = 1
@@ -57,17 +51,4 @@ export function kbList(session: Session, folderId: number | string | null = null
 
 export function kbUpload(session: Session, title: string, content: string, folderId: number | string | null = null): Promise<string> {
   return callTool(session, 'kb_upload', { title, content, folder_id: folderId })
-}
-
-export async function toolsList(session: Session): Promise<KbTool[]> {
-  const result = await rpc(session, 'tools/list', {})
-  const text = textOf(result)
-  try {
-    const parsed = JSON.parse(text)
-    if (Array.isArray(parsed)) return parsed as KbTool[]
-    if (Array.isArray(parsed?.tools)) return parsed.tools as KbTool[]
-    return []
-  } catch {
-    return []
-  }
 }

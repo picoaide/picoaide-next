@@ -79,22 +79,3 @@ describe('kb tools', () => {
     await expect(kbSearch(session, 'q', 1, 10)).rejects.toMatchObject({ message: /缺少 result/ })
   })
 })
-
-describe('toolsList', () => {
-  it('parses tools array from content[0].text JSON', async () => {
-    const tools = [
-      { name: 'kb_search', description: 'search', inputSchema: { type: 'object', properties: { query: { type: 'string' } } } },
-    ]
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(ok({ content: [{ type: 'text', text: JSON.stringify(tools) }], isError: false })))
-    const { toolsList } = await loadRemoteMcp()
-
-    expect(await toolsList(session)).toEqual(tools)
-  })
-
-  it('returns raw text when content is not JSON', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(ok({ content: [{ type: 'text', text: 'no tools here' }], isError: false })))
-    const { toolsList } = await loadRemoteMcp()
-
-    expect(await toolsList(session)).toEqual([])
-  })
-})
