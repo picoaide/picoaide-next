@@ -32,6 +32,7 @@ export default function Users() {
   const [users, setUsers] = useState<User[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
+  const [q, setQ] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -40,9 +41,11 @@ export default function Users() {
   const [tokensUser, setTokensUser] = useState<User | null>(null)
   const [tokens, setTokens] = useState<ApiToken[]>([])
 
-  const load = useCallback(async (p: number) => {
+  const load = useCallback(async (p: number, search: string) => {
     try {
-      const data = await request(`/api/admin/users?page=${p}&size=20`)
+      const params = new URLSearchParams({ page: String(p), size: '20' })
+      if (search) params.set('q', search)
+      const data = await request(`/api/admin/users?${params}`)
       setUsers(data.users)
       setTotal(data.total)
       setPage(p)
@@ -51,7 +54,7 @@ export default function Users() {
     }
   }, [])
 
-  useEffect(() => { load(1) }, [load])
+  useEffect(() => { load(1, '') }, [load])
 
   async function create() {
     try {
@@ -63,7 +66,7 @@ export default function Users() {
       setUsername('')
       setPassword('')
       setIsAdmin(false)
-      load(1)
+      load(1, "")
     } catch (err: any) {
       setError(err.message)
     }
@@ -75,7 +78,7 @@ export default function Users() {
         method: 'PUT',
         body: JSON.stringify({ status: u.status === 1 ? 0 : 1 }),
       })
-      load(page)
+      load(page, q)
     } catch (err: any) {
       setError(err.message)
     }
@@ -85,7 +88,7 @@ export default function Users() {
     if (!window.confirm(`确定删除用户 ${u.username}?`)) return
     try {
       await request(`/api/admin/users/${u.id}`, { method: 'DELETE' })
-      load(page)
+      load(page, q)
     } catch (err: any) {
       setError(err.message)
     }
@@ -117,7 +120,17 @@ export default function Users() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold">用户管理</h1>
-        <Button onClick={() => setCreateOpen(true)}>新建用户</Button>
+        <div className="flex items-center gap-2">
+          <Input
+            className="w-56"
+            placeholder="按用户名搜索…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && load(1, q)}
+          />
+          <Button variant="outline" onClick={() => load(1, q)}>搜索</Button>
+          <Button onClick={() => setCreateOpen(true)}>新建用户</Button>
+        </div>
       </div>
       {error && <div className="text-sm text-destructive">{error}</div>}
       <Table>
@@ -149,9 +162,9 @@ export default function Users() {
         </TableBody>
       </Table>
       <div className="flex items-center gap-2">
-        <Button size="sm" variant="outline" disabled={page <= 1} onClick={() => load(page - 1)}>上一页</Button>
+        <Button size="sm" variant="outline" disabled={page <= 1} onClick={() => load(page - 1, q)}>上一页</Button>
         <span className="text-sm text-muted-foreground">第 {page}/{pages} 页 · 共 {total} 人</span>
-        <Button size="sm" variant="outline" disabled={page >= pages} onClick={() => load(page + 1)}>下一页</Button>
+        <Button size="sm" variant="outline" disabled={page >= pages} onClick={() => load(page + 1, q)}>下一页</Button>
       </div>
 
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>

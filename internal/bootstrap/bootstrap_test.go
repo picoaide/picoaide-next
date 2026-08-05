@@ -146,7 +146,7 @@ func TestBootstrapWebSettings(t *testing.T) {
 }
 
 func TestHealthzNoAuth(t *testing.T) {
-	r, _ := setup(t)
+	r, db := setup(t)
 	// 无需 token,返回 200 + ok
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/healthz", nil)
@@ -158,5 +158,13 @@ func TestHealthzNoAuth(t *testing.T) {
 	_ = json.Unmarshal(w.Body.Bytes(), &out)
 	if out["ok"] != true {
 		t.Fatalf("healthz body = %s", w.Body.String())
+	}
+
+	// DB 不可用 → 503
+	db.Close()
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/healthz", nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("healthz with closed db = %d, body=%s", w.Code, w.Body.String())
 	}
 }

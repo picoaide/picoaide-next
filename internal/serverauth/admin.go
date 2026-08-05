@@ -147,7 +147,7 @@ func (a *AdminAPI) listUsers(c *gin.Context) {
 	if size < 1 || size > 200 {
 		size = 20
 	}
-	users, total, err := serverstore.ListUsers(a.DB, (page-1)*size, size)
+	users, total, err := serverstore.ListUsers(a.DB, (page-1)*size, size, c.Query("q"))
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
@@ -285,7 +285,7 @@ func (a *AdminAPI) deleteUser(c *gin.Context) {
 	}
 	// block deleting the last admin (fail closed: DB error also refuses)
 	if u.IsAdmin {
-		admins, _, err := serverstore.ListUsers(a.DB, 0, 100000)
+		admins, _, err := serverstore.ListUsers(a.DB, 0, 100000, "")
 		if err != nil {
 			writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return

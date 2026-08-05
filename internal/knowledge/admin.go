@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -28,6 +29,7 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	g.DELETE("/folders/:id/grant", func(c *gin.Context) { revokeGrant(c, db) })
 	g.GET("/folders/:id/grants", func(c *gin.Context) { listGrants(c, db) })
 	g.GET("/search", func(c *gin.Context) { search(c, db) })
+	g.GET("/audit", func(c *gin.Context) { listAudit(c, db) })
 }
 
 func adminUsername(c *gin.Context) string {
@@ -123,7 +125,15 @@ func listFolders(c *gin.Context, db *sql.DB) {
 
 func listDocuments(c *gin.Context, db *sql.DB) {
 	folderID, _ := strconv.ParseInt(c.DefaultQuery("folder_id", "0"), 10, 64)
-	docs, err := serverstore.ListKBDocuments(db, folderID)
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	size, _ := strconv.Atoi(c.DefaultQuery("size", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 || size > 200 {
+		size = 20
+	}
+	docs, total, err := serverstore.ListKBDocumentsPaged(db, folderID, (page-1)*size, size)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
@@ -133,7 +143,29 @@ func listDocuments(c *gin.Context, db *sql.DB) {
 		out = append(out, gin.H{"id": d.ID, "folder_id": d.FolderID, "title": d.Title,
 			"content_type": d.ContentType, "size": d.Size, "created_by": d.CreatedBy})
 	}
-	c.JSON(http.StatusOK, gin.H{"documents": out})
+	c.JSON(http.StatusOK, gin.H{"documents": out, "total": total})
+}
+
+func listAudit(c *gin.Context, db *sql.DB) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	size, _ := strconv.Atoi(c.DefaultQuery("size", "50"))
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 || size > 200 {
+		size = 50
+	}
+	logs, total, err := serverstore.ListAuditLogsPaged(db, (page-1)*size, size)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	out := make([]gin.H, 0, len(logs))
+	for _, l := range logs {
+		out = append(out, gin.H{"id": l.ID, "username": l.Username, "action": l.Action,
+			"detail": l.Detail, "created_at": l.CreatedAt.Format(time.RFC3339)})
+	}
+	c.JSON(http.StatusOK, gin.H{"logs": out, "total": total})
 }
 
 func deleteDoc(c *gin.Context, db *sql.DB) {

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, NavLink } from 'react-router-dom'
-import { Users, Settings2, BarChart3, Store, FolderOpen, LogOut, Globe } from 'lucide-react'
+import { Users, Settings2, BarChart3, Store, FolderOpen, LogOut, Globe, ScrollText } from 'lucide-react'
 import { me, logout, request } from './api'
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
@@ -10,6 +10,7 @@ import Gateway from './pages/Gateway'
 import Usage from './pages/Usage'
 import Marketplace from './pages/Marketplace'
 import Knowledge from './pages/Knowledge'
+import Audit from './pages/Audit'
 
 const nav = [
   { to: '/users', label: '用户', icon: Users },
@@ -17,6 +18,7 @@ const nav = [
   { to: '/usage', label: '用量', icon: BarChart3 },
   { to: '/knowledge', label: '知识库', icon: FolderOpen },
   { to: '/marketplace', label: '商城', icon: Store },
+  { to: '/audit', label: '审计', icon: ScrollText },
 ]
 
 export default function App() {
@@ -93,6 +95,7 @@ export default function App() {
             <Route path="/usage" element={<Usage />} />
             <Route path="/knowledge" element={<Knowledge />} />
             <Route path="/marketplace" element={<Marketplace />} />
+            <Route path="/audit" element={<Audit />} />
             <Route path="*" element={<Navigate to="/users" />} />
           </Routes>
         </main>

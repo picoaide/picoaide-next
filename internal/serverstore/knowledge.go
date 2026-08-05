@@ -232,9 +232,20 @@ func ListAuditLogs(db *sql.DB, limit int) ([]KBAuditLog, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := db.Query("SELECT id, username, action, detail, created_at FROM kb_audit_logs ORDER BY id DESC LIMIT ?", limit)
+	logs, _, err := ListAuditLogsPaged(db, 0, limit)
+	return logs, err
+}
+
+// ListAuditLogsPaged returns one page of audit entries (newest first) and the
+// total count.
+func ListAuditLogsPaged(db *sql.DB, offset, limit int) ([]KBAuditLog, int64, error) {
+	var total int64
+	if err := db.QueryRow("SELECT COUNT(*) FROM kb_audit_logs").Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := db.Query("SELECT id, username, action, detail, created_at FROM kb_audit_logs ORDER BY id DESC LIMIT ? OFFSET ?", limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	var out []KBAuditLog
@@ -242,20 +253,31 @@ func ListAuditLogs(db *sql.DB, limit int) ([]KBAuditLog, error) {
 		var l KBAuditLog
 		var created string
 		if err := rows.Scan(&l.ID, &l.Username, &l.Action, &l.Detail, &created); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		l.CreatedAt = parseSQLTime(created)
 		out = append(out, l)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 // ListKBDocuments returns documents in a folder ordered by id desc.
 func ListKBDocuments(db *sql.DB, folderID int64) ([]KBDocument, error) {
+	docs, _, err := ListKBDocumentsPaged(db, folderID, 0, 100000)
+	return docs, err
+}
+
+// ListKBDocumentsPaged returns one page of documents (newest first) and the
+// total count for the folder.
+func ListKBDocumentsPaged(db *sql.DB, folderID int64, offset, limit int) ([]KBDocument, int64, error) {
+	var total int64
+	if err := db.QueryRow("SELECT COUNT(*) FROM kb_documents WHERE folder_id = ?", folderID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
 	rows, err := db.Query(`SELECT id, folder_id, title, content, content_type, size, source, created_by, created_at
-		FROM kb_documents WHERE folder_id = ? ORDER BY id DESC`, folderID)
+		FROM kb_documents WHERE folder_id = ? ORDER BY id DESC LIMIT ? OFFSET ?`, folderID, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	var out []KBDocument
@@ -263,10 +285,10 @@ func ListKBDocuments(db *sql.DB, folderID int64) ([]KBDocument, error) {
 		var d KBDocument
 		var createdAt string
 		if err := rows.Scan(&d.ID, &d.FolderID, &d.Title, &d.Content, &d.ContentType, &d.Size, &d.Source, &d.CreatedBy, &createdAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		d.CreatedAt = parseSQLTime(createdAt)
 		out = append(out, d)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }

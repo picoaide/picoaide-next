@@ -1,12 +1,17 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -21,11 +26,20 @@ import (
 	"github.com/picoaide/picoaide/webadmin"
 )
 
+// version is injectable at build time: go build -ldflags "-X main.version=x.y.z"
+var version = "dev"
+
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	dataDir := flag.String("data", "./data", "data directory")
 	bootstrapAdmin := flag.String("bootstrap-admin", "", "username of the initial admin (password from PICOAI_ADMIN_PASSWORD)")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	if err := os.MkdirAll(*dataDir, 0700); err != nil {
 		log.Fatalf("create data dir: %v", err)
@@ -110,8 +124,20 @@ func main() {
 		c.String(http.StatusNotFound, "not found")
 	})
 
-	log.Printf("picoaide-server listening on %s (data=%s)", *addr, *dataDir)
-	if err := http.ListenAndServe(*addr, r); err != nil {
-		log.Fatal(err)
+	log.Printf("picoaide-server v%s listening on %s (data=%s)", version, *addr, *dataDir)
+	srv := &http.Server{Addr: *addr, Handler: r}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("listen: %v", err)
+		}
+	}()
+	<-ctx.Done()
+	log.Println("shutting down…")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("shutdown: %v", err)
 	}
 }

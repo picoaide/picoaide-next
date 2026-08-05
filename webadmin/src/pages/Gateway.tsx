@@ -131,6 +131,7 @@ export default function Gateway() {
   }
 
   async function deleteModel(id: number) {
+    if (!window.confirm('删除该模型?客户端建议清单将移除。')) return
     try {
       await request(`/api/admin/models/${id}`, { method: 'DELETE' })
       load()

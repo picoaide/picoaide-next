@@ -13,7 +13,7 @@ import (
 // PICOAI_ADMIN_PASSWORD when no admin exists yet. It fails when the env
 // password is missing (never prints or randomizes the password).
 func EnsureBootstrapAdmin(db *sql.DB, username string) error {
-	users, _, err := serverstore.ListUsers(db, 0, 100000)
+	users, _, err := serverstore.ListUsers(db, 0, 100000, "")
 	if err != nil {
 		return err
 	}

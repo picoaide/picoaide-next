@@ -78,6 +78,7 @@ export default function Marketplace() {
   }
 
   async function disableSkill(name: string) {
+    if (!window.confirm(`下架技能 ${name}?员工建议清单将不再展示。`)) return
     try {
       await request(`/api/admin/skills/${encodeURIComponent(name)}`, { method: 'DELETE' })
       load()
@@ -121,6 +122,7 @@ export default function Marketplace() {
   }
 
   async function disableMcp(id: number) {
+    if (!window.confirm(`下架 MCP 插件 #${id}?已安装客户端不再获得新凭证。`)) return
     try {
       await request(`/api/admin/mcp/${id}`, { method: 'DELETE' })
       load()

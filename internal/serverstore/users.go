@@ -129,14 +129,27 @@ func UpdateUser(db *sql.DB, u *User) error {
 	return nil
 }
 
-// ListUsers returns a page of users and the total count.
-func ListUsers(db *sql.DB, offset, limit int) ([]User, int64, error) {
+// ListUsers returns a page of users and the total count. q filters by
+// username substring (empty q = all users).
+func ListUsers(db *sql.DB, offset, limit int, q string) ([]User, int64, error) {
+	q = strings.TrimSpace(q)
 	var total int64
-	if err := db.QueryRow("SELECT COUNT(*) FROM users").Scan(&total); err != nil {
-		return nil, 0, err
+	var rows *sql.Rows
+	var err error
+	if q == "" {
+		if err = db.QueryRow("SELECT COUNT(*) FROM users").Scan(&total); err != nil {
+			return nil, 0, err
+		}
+		rows, err = db.Query(`SELECT id, username, display_name, email, password_hash, source, is_admin, status, created_at, updated_at
+			FROM users ORDER BY id LIMIT ? OFFSET ?`, limit, offset)
+	} else {
+		like := "%" + q + "%"
+		if err = db.QueryRow("SELECT COUNT(*) FROM users WHERE username LIKE ?", like).Scan(&total); err != nil {
+			return nil, 0, err
+		}
+		rows, err = db.Query(`SELECT id, username, display_name, email, password_hash, source, is_admin, status, created_at, updated_at
+			FROM users WHERE username LIKE ? ORDER BY id LIMIT ? OFFSET ?`, like, limit, offset)
 	}
-	rows, err := db.Query(`SELECT id, username, display_name, email, password_hash, source, is_admin, status, created_at, updated_at
-		FROM users ORDER BY id LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
