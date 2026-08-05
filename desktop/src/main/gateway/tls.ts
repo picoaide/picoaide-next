@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { loadElectronModule } from '../util/electron'
 
 export function sha256Fingerprint(cert: Buffer | string): string {
   const der = typeof cert === 'string' ? pemToDer(cert) : cert
@@ -56,13 +57,9 @@ export async function installCertificateVerification(storePath: string, opts: In
   try {
     if (opts.getSession) {
       session = opts.getSession()
-    } else if (typeof require === 'function') {
-      const mod = require('electron') as any
+    } else {
+      const mod = await loadElectronModule()
       session = mod?.session?.defaultSession
-    }
-    if (!session) {
-      const mod: any = await import('electron')
-      session = mod?.session?.defaultSession ?? mod?.default?.session?.defaultSession
     }
   } catch {
     return

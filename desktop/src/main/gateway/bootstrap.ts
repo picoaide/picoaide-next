@@ -1,7 +1,7 @@
 import { fetchJSON } from './auth'
 import type { BootstrapConfig, Session } from './config'
 
-const EMPTY: BootstrapConfig = { default_model: '', models: [], skills: [], mcp: [], web: { allow_private: false, search_endpoint: '' } }
+export const EMPTY: BootstrapConfig = { default_model: '', models: [], skills: [], mcp: [], web: { allow_private: false, search_endpoint: '' } }
 
 export function validateBootstrap(cfg: BootstrapConfig | null | undefined): { config: BootstrapConfig; fellBack: boolean } {
   // 垃圾兜底:null / {} / models 缺失或空 → 统一回退空结构。此前 {} 这类 truthy 垃圾会

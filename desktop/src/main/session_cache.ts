@@ -1,17 +1,10 @@
+import { EMPTY } from './gateway/bootstrap'
 import type { Session, BootstrapConfig } from './gateway/config'
 
 // 会话 + bootstrap 内存缓存(登录/深链/重启加载共用一处;index.ts 与 ipc.ts 都从这里读写,
 // 避免 index↔ipc 循环依赖)。token 只存内存 + 磁盘 config.json,renderer 永不持有。
 let currentSession: Session | null = null
 let bootstrapCache: BootstrapConfig | null = null
-
-export const EMPTY_BOOTSTRAP: BootstrapConfig = {
-  default_model: '',
-  models: [],
-  skills: [],
-  mcp: [],
-  web: { allow_private: false, search_endpoint: '' },
-}
 
 export function setCurrentSession(s: Session | null): void {
   currentSession = s
@@ -26,7 +19,7 @@ export function setBootstrapCache(cfg: BootstrapConfig | null): void {
 }
 
 export function getBootstrapCache(): BootstrapConfig {
-  return bootstrapCache ?? EMPTY_BOOTSTRAP
+  return bootstrapCache ?? EMPTY
 }
 
 export function clearCaches(): void {
@@ -74,7 +67,7 @@ export async function establishSession(
 ): Promise<{ session: Session & { persisted: boolean }; bootstrap: BootstrapConfig }> {
   const { persisted } = await deps.flow.saveSession(session)
   setCurrentSession(session)
-  let bootstrap = EMPTY_BOOTSTRAP
+  let bootstrap = EMPTY
   try {
     bootstrap = (await deps.getBootstrap(session)).config
   } catch {

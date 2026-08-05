@@ -11,8 +11,6 @@ import { workspaceFor } from './store/projects'
 import { listFilesRecursive } from './store/files'
 import { updateMessageContent, deleteMessagesAfter } from './store/messages'
 
-export const VERSION = '0.2.0'
-
 // 与 src/main/store/conversations.ts ConversationRow 结构一致(自包含,不 import store)
 export interface ConversationRow {
   id: number
@@ -61,7 +59,6 @@ export interface StoreLike extends EngineStore {
   setConversationStarred(id: number, starred: boolean): void
   setConversationArchived(id: number, archived: boolean): void
   setConversationWorkspace(id: number, workspace: string): void
-  touchConversation(id: number): void
   // 覆写为完整行:chat:messages 需要读回全字段(MessageRow 是 DBMessage 的超集,兼容引擎)
   listMessages(conversationId: number): MessageRow[]
   updateMessageContent(id: number, content: string): void
@@ -71,7 +68,6 @@ export interface StoreLike extends EngineStore {
   listArtifacts(conversationId: number): ArtifactRow[]
   getSetting(key: string): string | null
   setSetting(key: string, value: string): void
-  getAllSettings(): Record<string, string>
   // 项目(迁移 0010)
   createProject(input: { name: string; path: string }): number
   listProjects(): ProjectRow[]
@@ -111,7 +107,6 @@ export interface AgentIpcDeps {
 }
 
 export interface IpcHandlers {
-  'picoaide:version': () => string
   'picoaide:rendererReady': () => void
   'theme:get': () => 'dark' | 'light'
   'chat:new': (input?: { title?: string; mode?: string; projectId?: number | null }) => number
@@ -151,14 +146,13 @@ export interface IpcHandlers {
   'auth:oidcLogin': (input: { serverURL: string }) => Promise<void>
 }
 
-export function buildHandlers(): Pick<IpcHandlers, 'picoaide:version' | 'theme:get'> {
+export function buildHandlers(): Pick<IpcHandlers, 'theme:get'> {
   return {
-    'picoaide:version': () => VERSION,
     'theme:get': () => (nativeTheme.shouldUseDarkColors ? 'dark' : 'light'),
   }
 }
 
-export type ChatHandlers = Omit<IpcHandlers, 'auth:login' | 'auth:loadSession' | 'auth:logout' | 'auth:refreshBootstrap' | 'auth:oidcLogin'>
+export type ChatHandlers = Omit<IpcHandlers, 'auth:login' | 'auth:loadSession' | 'auth:logout' | 'auth:refreshBootstrap' | 'auth:oidcLogin' | 'theme:get'>
 
 export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
   // 引擎单例(持有 currentAbort/审批队列);模型经 createModel 惰性创建(登录后 token 就绪)
@@ -201,8 +195,6 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
     }
   }
   return {
-    'picoaide:version': () => VERSION,
-    'theme:get': () => (nativeTheme.shouldUseDarkColors ? 'dark' : 'light'),
     'picoaide:rendererReady': () => {
       rendererReady = true
       flushPending()

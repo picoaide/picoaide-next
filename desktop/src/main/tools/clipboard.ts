@@ -1,6 +1,6 @@
 import type { Tool } from 'ai'
 import { z } from 'zod'
-import { loadElectronModule } from './screen'
+import { loadElectronModule } from '../util/electron'
 
 export const HIGH_RISK_TOOLS: string[] = ['clipboard_read']
 

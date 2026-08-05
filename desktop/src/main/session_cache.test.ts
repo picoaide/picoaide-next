@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Session } from './gateway/config'
+import { EMPTY } from './gateway/bootstrap'
 import {
-  EMPTY_BOOTSTRAP,
   clearCaches,
   establishSession,
   getBootstrapCache,
@@ -49,7 +49,7 @@ describe('establishSession', () => {
     const deps = {
       flow: { saveSession: vi.fn().mockResolvedValue({ persisted: true }) },
       getBootstrap: vi.fn().mockResolvedValue({
-        config: { ...EMPTY_BOOTSTRAP, default_model: 'm1', models: [{ id: 'm1', display_name: 'M1' }] },
+        config: { ...EMPTY, default_model: 'm1', models: [{ id: 'm1', display_name: 'M1' }] },
         fellBack: false,
       }),
       onSessionEstablished,
@@ -67,8 +67,8 @@ describe('establishSession', () => {
       flow: { saveSession: vi.fn().mockResolvedValue({ persisted: false }) },
       getBootstrap: vi.fn().mockRejectedValue(new Error('network down')),
     })
-    expect(res.bootstrap).toEqual(EMPTY_BOOTSTRAP)
+    expect(res.bootstrap).toEqual(EMPTY)
     expect(getCurrentSession()).toEqual(SESSION)
-    expect(getBootstrapCache()).toEqual(EMPTY_BOOTSTRAP)
+    expect(getBootstrapCache()).toEqual(EMPTY)
   })
 })

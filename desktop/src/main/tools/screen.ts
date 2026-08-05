@@ -1,14 +1,8 @@
 import type { Tool } from 'ai'
 import { z } from 'zod'
+import { loadElectronModule } from '../util/electron'
 
 export const HIGH_RISK_TOOLS: string[] = ['screen_capture']
-
-// Electron 惰性动态 import(仅 main 进程可用;vitest 中用 vi.mock('electron') 拦截)
-export async function loadElectronModule(): Promise<Record<string, unknown>> {
-  const mod = (await import('electron')) as Record<string, unknown> & { default?: Record<string, unknown> }
-  const hasMainApis = mod && (mod.desktopCapturer || mod.clipboard || mod.app)
-  return hasMainApis ? mod : (mod.default ?? mod)
-}
 
 export async function captureScreen(): Promise<{ pngBase64: string; width: number; height: number }> {
   const electron = await loadElectronModule()

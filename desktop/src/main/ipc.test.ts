@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { tool } from 'ai'
 import { z } from 'zod'
 import type { LanguageModel, Tool } from 'ai'
-import { buildAgentHandlers, buildAuthHandlers, buildHandlers } from './ipc'
+import { buildAgentHandlers, buildAuthHandlers } from './ipc'
 import type { AgentIpcDeps, AuthIpcDeps, StoreLike } from './ipc'
 import type { AppendMessageInput } from './agent/engine'
 import { AuthError } from './gateway/auth'
@@ -126,10 +126,6 @@ function makeStore(): StoreLike {
       const c = conversations.find((c) => c.id === id)
       if (c) c.workspace = workspace
     },
-    touchConversation: (id: number) => {
-      const c = conversations.find((c) => c.id === id)
-      if (c) c.updated_at = new Date().toISOString()
-    },
     addArtifact: (a: { conversationId: number; path: string; type: string; size: number }): number => {
       const id = nextId++
       artifacts.push({ id, conversation_id: a.conversationId, path: a.path, type: a.type, size: a.size, created_at: '' })
@@ -138,7 +134,6 @@ function makeStore(): StoreLike {
     listArtifacts: (cid: number) => artifacts.filter((a) => a.conversation_id === cid),
     getSetting: (k: string) => settings[k] ?? null,
     setSetting: (k: string, v: string) => { settings[k] = v },
-    getAllSettings: () => ({ ...settings }),
     createConversation: (input: { title?: string; mode?: string; projectId?: number | null } = {}): number => {
       const id = nextId++
       conversations.push({
@@ -242,13 +237,6 @@ async function waitFor(cond: () => boolean, timeoutMs = 3000): Promise<void> {
     await new Promise((r) => setTimeout(r, 5))
   }
 }
-
-describe('ipc handlers', () => {
-  it('picoaide:version returns the app version', () => {
-    const handlers = buildHandlers()
-    expect(handlers['picoaide:version']()).toBe('0.2.0')
-  })
-})
 
 describe('chat:new / chat:delete', () => {
   it('creates a conversation and returns its id', () => {

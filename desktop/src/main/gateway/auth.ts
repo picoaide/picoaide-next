@@ -1,4 +1,5 @@
 import { unlinkSync, existsSync } from 'node:fs'
+import { loadElectronModule } from '../util/electron'
 import { readJsonFile, sessionPath, writePrivateJsonFile, type Session } from './config'
 
 export class AuthError extends Error {
@@ -27,29 +28,15 @@ interface SafeStorageLike {
   decryptString(encrypted: Buffer): string
 }
 
-function loadElectronModule(): any | null {
-  if (typeof require !== 'function') return null
-  try {
-    const mod = require('electron') as any
-    return mod?.safeStorage || mod?.session ? mod : (mod?.default?.safeStorage || mod?.default?.session ? mod.default : null)
-  } catch {
-    return null
-  }
-}
-
-async function lazyElectronModule(): Promise<any | null> {
-  return loadElectronModule() ?? (await import('electron').catch(() => null))
-}
-
 async function lazySafeStorage(): Promise<SafeStorageLike | null> {
-  const mod = await lazyElectronModule()
-  const ss = mod?.safeStorage ?? mod?.default?.safeStorage
+  const mod = await loadElectronModule()
+  const ss = mod?.safeStorage
   return ss && typeof ss.isEncryptionAvailable === 'function' ? ss : null
 }
 
 async function electronSessionFetch(): Promise<typeof fetch | null> {
-  const mod = await lazyElectronModule()
-  const f = mod?.session?.defaultSession?.fetch ?? mod?.default?.session?.defaultSession?.fetch
+  const mod = await loadElectronModule()
+  const f = mod?.session?.defaultSession?.fetch
   return typeof f === 'function' ? (f as typeof fetch) : null
 }
 

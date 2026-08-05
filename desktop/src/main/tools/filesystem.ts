@@ -357,5 +357,3 @@ export function createFileTools(ctx: FileToolContext): Record<string, Tool> {
     }),
   }
 }
-
-export { isAllowed, ToolError } from './paths'

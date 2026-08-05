@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Worker } from 'tesseract.js'
-import { loadElectronModule } from './screen'
+import { loadElectronModule } from '../util/electron'
 
 export const OCR_LANG_MISSING_MSG = 'OCR 语言包未安装(resources/tessdata 缺失,打包时添加)'
 

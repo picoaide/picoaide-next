@@ -20,7 +20,6 @@ export interface LoginResult {
 }
 
 const api = {
-  version: () => ipcRenderer.invoke('picoaide:version'),
   login: (serverURL: string, username: string, password: string): Promise<LoginResult> =>
     ipcRenderer.invoke('auth:login', { serverURL, username, password }),
   loadSession: (): Promise<Session | null> => ipcRenderer.invoke('auth:loadSession'),
