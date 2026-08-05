@@ -18,11 +18,7 @@ import { isAbsolute } from 'node:path'
 import type { AgentEvent } from './events'
 import { buildRunConfig, type Mode } from './modes'
 import { readOnlyTools, PLAN_MAX_STEPS } from './modes'
-
-// 计划(只读)模式系统提示:与工具白名单共同构成只读边界(对齐 opencode plan agent 的 edit/bash deny)
-const PLAN_SYSTEM_NOTICE =
-  '当前处于计划(只读)模式:只可读取文件/搜索/浏览页面/查询知识库,禁止任何写入、修改、删除、执行命令或浏览器操作;' +
-  '请调研后输出清晰的执行计划(步骤、涉及文件、预期结果),不要执行任何操作。'
+import { PLAN_SYSTEM_NOTICE } from './prompt'
 import { artifactType } from './artifacts'
 import { lastUserMessageIndex } from './continue'
 import { kbRead, kbSearch, kbList, kbUpload } from '../gateway/remote_mcp'
