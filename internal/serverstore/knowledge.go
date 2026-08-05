@@ -26,6 +26,8 @@ type KBDocument struct {
 	Source      string
 	CreatedBy   string
 	CreatedAt   time.Time
+	Status      string // ready | pending | error
+	Error       string
 }
 
 // KBAuditLog is one knowledge base audit entry.
@@ -80,13 +82,68 @@ func CreateKBDocument(db *sql.DB, folderID int64, title, content, contentType st
 	return res.LastInsertId()
 }
 
+// CreatePendingKBDocument inserts a document awaiting async extraction
+// (status=pending, empty content, size = raw file size).
+func CreatePendingKBDocument(db *sql.DB, folderID int64, title, contentType string, size int64, source, createdBy string) (int64, error) {
+	res, err := db.Exec(`INSERT INTO kb_documents (folder_id, title, content, content_type, size, source, created_by, status)
+		VALUES (?, ?, '', ?, ?, ?, ?, 'pending')`, folderID, title, contentType, size, source, createdBy)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// ClaimPendingKBDocument returns the oldest upload awaiting extraction, or
+// ErrNotFound when the queue is empty. A claim is not exclusive; workers may
+// process the same doc twice, which is harmless (idempotent re-extraction).
+func ClaimPendingKBDocument(db *sql.DB) (*KBDocument, error) {
+	row := db.QueryRow(`SELECT id, folder_id, title, content, content_type, size, source, created_by, created_at, status, error
+		FROM kb_documents WHERE status = 'pending' ORDER BY id LIMIT 1`)
+	var d KBDocument
+	var created string
+	err := row.Scan(&d.ID, &d.FolderID, &d.Title, &d.Content, &d.ContentType, &d.Size, &d.Source, &d.CreatedBy, &created, &d.Status, &d.Error)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	d.CreatedAt = parseSQLTime(created)
+	return &d, nil
+}
+
+// CompleteKBDocument finishes an async upload: errMsg == "" marks the doc
+// ready with extracted content (FTS synced by trigger kb_au); otherwise the
+// doc is marked error with the message and the raw file is kept for OCR.
+func CompleteKBDocument(db *sql.DB, id int64, content, errMsg string) error {
+	if errMsg == "" {
+		_, err := db.Exec("UPDATE kb_documents SET content = ?, size = ?, status = 'ready', error = '' WHERE id = ?", content, len(content), id)
+		return err
+	}
+	_, err := db.Exec("UPDATE kb_documents SET status = 'error', error = ? WHERE id = ?", errMsg, id)
+	return err
+}
+
+// RetryKBDocument re-queues a failed upload for extraction.
+func RetryKBDocument(db *sql.DB, id int64) error {
+	res, err := db.Exec("UPDATE kb_documents SET status = 'pending', error = '' WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // GetKBDocument returns a document or ErrNotFound.
 func GetKBDocument(db *sql.DB, id int64) (*KBDocument, error) {
-	row := db.QueryRow(`SELECT id, folder_id, title, content, content_type, size, source, created_by, created_at
+	row := db.QueryRow(`SELECT id, folder_id, title, content, content_type, size, source, created_by, created_at, status, error
 		FROM kb_documents WHERE id = ?`, id)
 	var d KBDocument
 	var created string
-	err := row.Scan(&d.ID, &d.FolderID, &d.Title, &d.Content, &d.ContentType, &d.Size, &d.Source, &d.CreatedBy, &created)
+	err := row.Scan(&d.ID, &d.FolderID, &d.Title, &d.Content, &d.ContentType, &d.Size, &d.Source, &d.CreatedBy, &created, &d.Status, &d.Error)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -274,7 +331,7 @@ func ListKBDocumentsPaged(db *sql.DB, folderID int64, offset, limit int) ([]KBDo
 	if err := db.QueryRow("SELECT COUNT(*) FROM kb_documents WHERE folder_id = ?", folderID).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := db.Query(`SELECT id, folder_id, title, content, content_type, size, source, created_by, created_at
+	rows, err := db.Query(`SELECT id, folder_id, title, content, content_type, size, source, created_by, created_at, status, error
 		FROM kb_documents WHERE folder_id = ? ORDER BY id DESC LIMIT ? OFFSET ?`, folderID, limit, offset)
 	if err != nil {
 		return nil, 0, err
@@ -284,7 +341,7 @@ func ListKBDocumentsPaged(db *sql.DB, folderID int64, offset, limit int) ([]KBDo
 	for rows.Next() {
 		var d KBDocument
 		var createdAt string
-		if err := rows.Scan(&d.ID, &d.FolderID, &d.Title, &d.Content, &d.ContentType, &d.Size, &d.Source, &d.CreatedBy, &createdAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.FolderID, &d.Title, &d.Content, &d.ContentType, &d.Size, &d.Source, &d.CreatedBy, &createdAt, &d.Status, &d.Error); err != nil {
 			return nil, 0, err
 		}
 		d.CreatedAt = parseSQLTime(createdAt)

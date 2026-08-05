@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -87,7 +88,9 @@ func main() {
 	marketplace.RegisterRoutes(r, db, *dataDir+"/skills-cache")
 	marketplace.RegisterAdminRoutes(r, db)
 	knowledge.RegisterRoutes(r, db)
-	knowledge.RegisterAdminRoutes(r, db)
+	uploadsDir := filepath.Join(*dataDir, "kb_uploads")
+	knowledge.StartUploadQueue(db, uploadsDir, 2)
+	knowledge.RegisterAdminRoutes(r, db, uploadsDir)
 	bootstrap.RegisterRoutes(r, db)
 	serverstore.CleanupPendingUsage(db, time.Now().Add(-time.Hour))
 	// 渠道模型自动同步(固定间隔 1 小时;拉取上游 /models 自动上架/下架)

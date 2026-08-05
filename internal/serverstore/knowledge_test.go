@@ -2,6 +2,7 @@ package serverstore
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -238,5 +239,56 @@ func TestKBDocumentsPaged(t *testing.T) {
 	all, err := ListKBDocuments(db, 1)
 	if err != nil || len(all) != 5 {
 		t.Fatalf("unpaged: %v %d", err, len(all))
+	}
+}
+
+func TestKBPendingDocLifecycle(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	id, err := CreatePendingKBDocument(db, 0, "待处理文档", "text", 123, "upload", "admin")
+	if err != nil || id == 0 {
+		t.Fatalf("CreatePendingKBDocument: %d %v", id, err)
+	}
+	doc, err := GetKBDocument(db, id)
+	if err != nil || doc.Status != "pending" || doc.Size != 123 {
+		t.Fatalf("pending doc = %+v %v", doc, err)
+	}
+	claimed, err := ClaimPendingKBDocument(db)
+	if err != nil || claimed.ID != id {
+		t.Fatalf("claim: %+v %v", claimed, err)
+	}
+	if err := CompleteKBDocument(db, id, "提取后的文本", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ClaimPendingKBDocument(db); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("claim after complete: %v, want ErrNotFound", err)
+	}
+	doc, _ = GetKBDocument(db, id)
+	if doc.Status != "ready" || doc.Content != "提取后的文本" || doc.Size != int64(len("提取后的文本")) || doc.Error != "" {
+		t.Fatalf("ready doc = %+v", doc)
+	}
+	id2, err := CreatePendingKBDocument(db, 0, "坏文件", "pdf", 9, "upload", "admin")
+	if err != nil || id2 == 0 {
+		t.Fatalf("CreatePendingKBDocument 2: %d %v", id2, err)
+	}
+	if err := CompleteKBDocument(db, id2, "", "pdf 解析失败"); err != nil {
+		t.Fatal(err)
+	}
+	doc, _ = GetKBDocument(db, id2)
+	if doc.Status != "error" || doc.Content != "" || !strings.Contains(doc.Error, "解析失败") {
+		t.Fatalf("error doc = %+v", doc)
+	}
+	if err := RetryKBDocument(db, id2); err != nil {
+		t.Fatal(err)
+	}
+	doc, _ = GetKBDocument(db, id2)
+	if doc.Status != "pending" || doc.Error != "" {
+		t.Fatalf("retried doc = %+v", doc)
+	}
+	if err := RetryKBDocument(db, 99999); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("retry missing: %v, want ErrNotFound", err)
 	}
 }

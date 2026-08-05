@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"html"
 	"io"
-	"mime/multipart"
 	"os"
 	"regexp"
 	"strings"
@@ -22,60 +21,49 @@ const (
 	maxExtractBytes = 32 << 20
 )
 
-// extractFile saves a multipart upload to a temp file and extracts its text
-// plus a content type. Supported: txt/md/docx/pdf.
-func extractFile(fh *multipart.FileHeader) (content, contentType string, err error) {
-	name := strings.ToLower(fh.Filename)
+// classifyFile maps an upload filename to a supported content type.
+func classifyFile(name string) (string, error) {
 	switch {
-	case strings.HasSuffix(name, ".txt"):
-		contentType = "text"
-	case strings.HasSuffix(name, ".md"):
-		contentType = "markdown"
-	case strings.HasSuffix(name, ".docx"):
-		contentType = "docx"
-	case strings.HasSuffix(name, ".pdf"):
-		contentType = "pdf"
+	case strings.HasSuffix(strings.ToLower(name), ".txt"):
+		return "text", nil
+	case strings.HasSuffix(strings.ToLower(name), ".md"):
+		return "markdown", nil
+	case strings.HasSuffix(strings.ToLower(name), ".docx"):
+		return "docx", nil
+	case strings.HasSuffix(strings.ToLower(name), ".pdf"):
+		return "pdf", nil
 	default:
-		return "", "", errors.New("仅支持 txt/md/docx/pdf 文件")
+		return "", errors.New("仅支持 txt/md/docx/pdf 文件")
 	}
-	src, err := fh.Open()
-	if err != nil {
-		return "", "", errors.New("读取文件失败")
-	}
-	defer src.Close()
-	tmp, err := os.CreateTemp("", "kb-upload-*")
-	if err != nil {
-		return "", "", errors.New("读取文件失败")
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := io.Copy(tmp, io.LimitReader(src, maxUploadBytes+1)); err != nil {
-		tmp.Close()
-		return "", "", errors.New("读取文件失败")
-	}
-	tmp.Close()
-	if info, err := os.Stat(tmp.Name()); err == nil && info.Size() > maxUploadBytes {
-		return "", "", errors.New("文件超过 16MB 上限")
-	}
+}
 
+// extractSaved reads a saved upload file and returns its text. Content is
+// capped at maxKBContent, matching IndexDocument's limit.
+func extractSaved(path, contentType string) (string, error) {
+	var content string
+	var err error
 	switch contentType {
 	case "text", "markdown":
-		b, err := os.ReadFile(tmp.Name())
+		b, err := os.ReadFile(path)
 		if err != nil {
-			return "", "", errors.New("读取文件失败")
+			return "", errors.New("读取文件失败")
 		}
 		content = string(b)
 	case "docx":
-		content, err = extractDocx(tmp.Name())
+		content, err = extractDocx(path)
 	case "pdf":
-		content, err = extractPDF(tmp.Name())
+		content, err = extractPDF(path)
 	}
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	if strings.TrimSpace(content) == "" {
-		return "", "", errors.New("无法从文件中提取文本")
+		return "", errors.New("无法从文件中提取文本")
 	}
-	return content, contentType, nil
+	if len(content) > maxKBContent {
+		return "", errors.New(fmt.Sprintf("文档内容超过上限 %d 字节", maxKBContent))
+	}
+	return content, nil
 }
 
 // extractDocx reads word/document.xml from a docx (zip) archive, turning

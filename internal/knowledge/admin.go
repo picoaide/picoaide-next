@@ -3,8 +3,11 @@ package knowledge
 import (
 	"database/sql"
 	"errors"
+	"io"
 	"mime/multipart"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -15,16 +18,19 @@ import (
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
-// RegisterAdminRoutes mounts /api/admin/kb/* behind AdminAuth.
-func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
+// RegisterAdminRoutes mounts /api/admin/kb/* behind AdminAuth. uploadsDir
+// stores raw uploads awaiting async extraction (<dir>/<doc id>).
+func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, uploadsDir string) {
+	os.MkdirAll(uploadsDir, 0700)
 	g := r.Group("/api/admin/kb", serverauth.AdminAuth(db))
-	g.POST("/upload", func(c *gin.Context) { uploadDoc(c, db) })
+	g.POST("/upload", func(c *gin.Context) { uploadDoc(c, db, uploadsDir) })
 	g.POST("/folders", func(c *gin.Context) { createFolder(c, db) })
 	g.GET("/folders", func(c *gin.Context) { listFolders(c, db) })
 	g.GET("/documents", func(c *gin.Context) { listDocuments(c, db) })
-	g.DELETE("/documents/:id", func(c *gin.Context) { deleteDoc(c, db) })
+	g.DELETE("/documents/:id", func(c *gin.Context) { deleteDoc(c, db, uploadsDir) })
 	g.PUT("/documents/:id", func(c *gin.Context) { updateDoc(c, db) })
 	g.GET("/documents/:id", func(c *gin.Context) { getDoc(c, db) })
+	g.POST("/documents/:id/retry", func(c *gin.Context) { retryDoc(c, db) })
 	g.PUT("/folders/:id/grant", func(c *gin.Context) { grantFolder(c, db) })
 	g.DELETE("/folders/:id/grant", func(c *gin.Context) { revokeGrant(c, db) })
 	g.GET("/folders/:id/grants", func(c *gin.Context) { listGrants(c, db) })
@@ -47,14 +53,15 @@ type kbUploadReq struct {
 	ContentType string `json:"content_type"`
 }
 
-func uploadDoc(c *gin.Context, db *sql.DB) {
+func uploadDoc(c *gin.Context, db *sql.DB, uploadsDir string) {
 	title := ""
 	folderID := int64(0)
-	var content, contentType string
+	var contentType string
 	var err error
 
 	if strings.HasPrefix(c.ContentType(), "multipart/form-data") {
-		// file upload: txt/md/docx/pdf, text extracted server-side
+		// file upload: txt/md/docx/pdf saved to disk, extraction runs in the
+		// async queue; the response is 202 with status=pending
 		var fh *multipart.FileHeader
 		if fh, err = c.FormFile("file"); err != nil {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "缺少 file 文件字段")
@@ -65,22 +72,42 @@ func uploadDoc(c *gin.Context, db *sql.DB) {
 			title = fh.Filename
 		}
 		folderID, _ = strconv.ParseInt(c.PostForm("folder_id"), 10, 64)
-		if content, contentType, err = extractFile(fh); err != nil {
+		if contentType, err = classifyFile(fh.Filename); err != nil {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", err.Error())
 			return
 		}
-	} else {
-		var req kbUploadReq
-		if err := c.ShouldBindJSON(&req); err != nil || req.Title == "" {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "标题必填")
+		tmp, size, err := saveUpload(fh, uploadsDir)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", err.Error())
 			return
 		}
-		title, content, contentType = req.Title, req.Content, req.ContentType
-		if contentType == "" {
-			contentType = "text"
+		id, err := serverstore.CreatePendingKBDocument(db, folderID, title, contentType, size, "upload", adminUsername(c))
+		if err != nil {
+			os.Remove(tmp)
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "上传失败")
+			return
 		}
-		folderID = req.FolderID
+		if err := os.Rename(tmp, filepath.Join(uploadsDir, strconv.FormatInt(id, 10))); err != nil {
+			os.Remove(tmp)
+			serverstore.DeleteKBDocument(db, id)
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "上传失败")
+			return
+		}
+		_ = serverstore.AuditLog(db, adminUsername(c), "kb_upload", "doc#"+strconv.FormatInt(id, 10)+" "+title)
+		c.JSON(http.StatusAccepted, gin.H{"doc": gin.H{"id": id, "title": title, "status": "pending"}})
+		return
 	}
+
+	var req kbUploadReq
+	if err := c.ShouldBindJSON(&req); err != nil || req.Title == "" {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "标题必填")
+		return
+	}
+	title, content, contentType := req.Title, req.Content, req.ContentType
+	if contentType == "" {
+		contentType = "text"
+	}
+	folderID = req.FolderID
 	if folderID < 0 {
 		folderID = 0
 	}
@@ -90,7 +117,64 @@ func uploadDoc(c *gin.Context, db *sql.DB) {
 		return
 	}
 	_ = serverstore.AuditLog(db, adminUsername(c), "kb_upload", "doc#"+strconv.FormatInt(id, 10)+" "+title)
-	c.JSON(http.StatusOK, gin.H{"doc": gin.H{"id": id, "title": title}})
+	c.JSON(http.StatusOK, gin.H{"doc": gin.H{"id": id, "title": title, "status": "ready"}})
+}
+
+// saveUpload streams a multipart file to a temp file in dir, rejecting
+// anything over maxUploadBytes; returns the temp path and byte count.
+func saveUpload(fh *multipart.FileHeader, dir string) (path string, size int64, err error) {
+	src, err := fh.Open()
+	if err != nil {
+		return "", 0, errors.New("读取文件失败")
+	}
+	defer src.Close()
+	dst, err := os.CreateTemp(dir, "kb-*")
+	if err != nil {
+		return "", 0, errors.New("保存文件失败")
+	}
+	defer func() {
+		if err != nil {
+			dst.Close()
+			os.Remove(dst.Name())
+		}
+	}()
+	n, err := io.Copy(dst, io.LimitReader(src, maxUploadBytes+1))
+	if err != nil {
+		return "", 0, errors.New("读取文件失败")
+	}
+	if n > maxUploadBytes {
+		return "", 0, errors.New("文件超过 16MB 上限")
+	}
+	if err := dst.Close(); err != nil {
+		return "", 0, errors.New("保存文件失败")
+	}
+	return dst.Name(), n, nil
+}
+
+func retryDoc(c *gin.Context, db *sql.DB) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
+		return
+	}
+	doc, err := serverstore.GetKBDocument(db, id)
+	if errors.Is(err, serverstore.ErrNotFound) {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "文档不存在")
+		return
+	} else if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if doc.Status == "ready" {
+		// the raw file is removed on success, so a retry could only break it
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "文档已就绪,无需重试")
+		return
+	}
+	if err := serverstore.RetryKBDocument(db, id); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "重试失败")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "doc": gin.H{"id": id, "status": "pending"}})
 }
 
 func createFolder(c *gin.Context, db *sql.DB) {
@@ -141,7 +225,8 @@ func listDocuments(c *gin.Context, db *sql.DB) {
 	out := make([]gin.H, 0, len(docs))
 	for _, d := range docs {
 		out = append(out, gin.H{"id": d.ID, "folder_id": d.FolderID, "title": d.Title,
-			"content_type": d.ContentType, "size": d.Size, "created_by": d.CreatedBy})
+			"content_type": d.ContentType, "size": d.Size, "created_by": d.CreatedBy,
+			"status": d.Status, "error": d.Error})
 	}
 	c.JSON(http.StatusOK, gin.H{"documents": out, "total": total})
 }
@@ -168,7 +253,7 @@ func listAudit(c *gin.Context, db *sql.DB) {
 	c.JSON(http.StatusOK, gin.H{"logs": out, "total": total})
 }
 
-func deleteDoc(c *gin.Context, db *sql.DB) {
+func deleteDoc(c *gin.Context, db *sql.DB, uploadsDir string) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
@@ -187,6 +272,7 @@ func deleteDoc(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
 		return
 	}
+	os.Remove(filepath.Join(uploadsDir, strconv.FormatInt(id, 10))) // raw file, if still awaiting/kept
 	_ = serverstore.AuditLog(db, adminUsername(c), "kb_delete", "doc#"+strconv.FormatInt(id, 10)+" "+doc.Title)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -235,7 +321,7 @@ func getDoc(c *gin.Context, db *sql.DB) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"doc": gin.H{"id": doc.ID, "folder_id": doc.FolderID, "title": doc.Title,
-		"content": doc.Content, "content_type": doc.ContentType}})
+		"content": doc.Content, "content_type": doc.ContentType, "status": doc.Status, "error": doc.Error}})
 }
 
 type kbUpdateReq struct {
