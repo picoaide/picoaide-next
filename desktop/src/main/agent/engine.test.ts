@@ -6,6 +6,7 @@ import { tool } from 'ai'
 import { z } from 'zod'
 import type { LanguageModel, ModelMessage, Tool } from 'ai'
 import { AgentEngine, createKbTools, fromModelMessage, historyMessages, sanitizeMessages, toModelMessage } from './engine'
+import { compactMessages } from './compact'
 import type { AppendMessageInput, DBMessage } from './engine'
 import type { AgentEvent } from './events'
 import { createGatewayModel } from './provider'
@@ -306,6 +307,18 @@ async function flushMicrotasks(times = 200): Promise<void> {
   for (let i = 0; i < times; i++) await Promise.resolve()
 }
 
+// 精确长度(chars)的用户消息历史,用于预算触发测试
+function longHistory(n: number, chars: number): ModelMessage[] {
+  return Array.from({ length: n }, (_, i) => ({ role: 'user', content: `m${i}`.padEnd(chars, 'x') }))
+}
+
+// 从 SDK 转换后的 prompt 中取第 idx 条消息的文本内容(string 或 parts 数组;支持负索引)
+function promptText(prompt: Array<{ role: string; content: unknown }>, idx: number): string {
+  const c = prompt[idx < 0 ? prompt.length + idx : idx].content
+  if (Array.isArray(c)) return c.map((p) => (p as { text?: string }).text ?? '').join('')
+  return String(c)
+}
+
 // 事件契约 v2:引擎自动附加 conversationId(专项测试验证归属),常规断言剥离该字段
 function eventsOf(events: AgentEvent[], type: string) {
   return events
@@ -380,11 +393,12 @@ describe('AgentEngine ask mode', () => {
     }
     const { mock, engine } = makeEngine('text', {}, store)
     await engine.ask({ conversationId: 1, content: 'hi' })
+    expect(mock.callCount).toBe(1) // 预算未超:不触发摘要调用
     const prompt = mock.prompts[0] as Array<{ role: string; content: unknown }>
     expect(prompt).toHaveLength(52) // system + 50 条历史 + 本条 user
     expect(prompt[0].role).toBe('system')
-    expect((prompt[1].content as Array<{ text: string }>)[0].text).toBe('m5')
-    expect((prompt.at(-1)?.content as Array<{ text: string }>)[0].text).toBe('hi')
+    expect(promptText(prompt, 1)).toBe('m5')
+    expect(promptText(prompt, -1)).toBe('hi')
   })
 
   it('marks the conversation running then failed and emits error when the model fails', async () => {
@@ -1395,5 +1409,122 @@ describe('browser bridge end-to-end', () => {
     } finally {
       await new Promise<void>((r) => wss.close(() => r()))
     }
+  })
+})
+
+describe('compactMessages', () => {
+  it('replaces over-budget early history with a summary user message', async () => {
+    const mock = new MockProvider('text')
+    const history = longHistory(55, 1000) // 55000 字符 > 预算
+    const out = await compactMessages(history, mock as unknown as LanguageModel, { budget: 40_000 })
+    expect(out[0].role).toBe('user')
+    expect(String(out[0].content)).toContain('以下是更早对话的摘要')
+    expect(out.length).toBe(41) // 摘要 + 预算内保留 40 条原文
+    expect(out.at(-1)).toBe(history.at(-1))
+    expect(mock.callCount).toBe(1)
+    const summaryPrompt = mock.prompts[0] as Array<{ role: string; content: unknown }>
+    expect(String(summaryPrompt[0].content)).toContain('摘要') // system 与主循环区分
+    const block = promptText(summaryPrompt, 1)
+    expect(block).toContain('## 早期对话记录')
+    const lines = block.split('\n')
+    expect(lines.some((l) => l.startsWith('user: m0'))).toBe(true)
+    expect(lines.some((l) => l.startsWith('user: m14'))).toBe(true)
+    expect(lines.some((l) => l.startsWith('user: m15'))).toBe(false)
+  })
+
+  it('truncates to last 50 when within budget (no summary call)', async () => {
+    const mock = new MockProvider('text')
+    const history = longHistory(55, 2)
+    const out = await compactMessages(history, mock as unknown as LanguageModel, { budget: 40_000 })
+    expect(out).toHaveLength(50)
+    expect(out[0]).toBe(history[5])
+    expect(mock.callCount).toBe(0)
+  })
+
+  it('falls back to last-50 truncation when the summary call fails', async () => {
+    const mock = new MockProvider('throw')
+    const history = longHistory(55, 1000)
+    const out = await compactMessages(history, mock as unknown as LanguageModel, { budget: 40_000 })
+    expect(out.length).toBe(50)
+    expect(out[0]).toBe(history[5])
+    expect(mock.callCount).toBe(1)
+  })
+
+  it('keeps at least the last 20 messages even when they exceed the budget', async () => {
+    const mock = new MockProvider('text')
+    const history = longHistory(25, 2000) // 50000 字符 > 预算,预算只够 20 条
+    const out = await compactMessages(history, mock as unknown as LanguageModel, { budget: 40_000 })
+    expect(out.length).toBe(21) // 20 条保留 + 摘要
+    expect(out.at(-1)).toBe(history.at(-1))
+  })
+
+  it('drops orphan leading tool results and summarizes only user/assistant text', async () => {
+    const mock = new MockProvider('text')
+    const history: ModelMessage[] = [
+      { role: 'user', content: '任务开始' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: '我先读取配置' },
+          { type: 'tool-call', toolCallId: 'c1', toolName: 'file_read', input: { path: '/a' } },
+        ],
+      },
+      {
+        role: 'tool',
+        content: [{ type: 'tool-result', toolCallId: 'c1', toolName: 'file_read', output: { type: 'text', value: 'X'.repeat(10_000) } }],
+      },
+      ...longHistory(22, 1500), // 33000 字符
+    ]
+    const out = await compactMessages(history, mock as unknown as LanguageModel, { budget: 40_000 })
+    // 预算边界落在 tool 结果行上(其 assistant 已被压缩)→ 孤儿结果不进上下文
+    expect(out.some((m) => m.role === 'tool')).toBe(false)
+    expect(out.length).toBe(23) // 摘要 + 22 条保留
+    const block = promptText(mock.prompts[0] as Array<{ role: string; content: unknown }>, 1)
+    expect(block).toContain('user: 任务开始')
+    expect(block).toContain('assistant: 我先读取配置')
+    expect(block).not.toContain('X'.repeat(100))
+  })
+})
+
+describe('AgentEngine LLM 摘要压缩', () => {
+  it('ask prepends the LLM summary to the model prompt for over-budget history', async () => {
+    const store = makeStore()
+    for (let i = 0; i < 55; i++) store.appendMessage({ conversationId: 1, role: 'user', content: `m${i}`.padEnd(1000, 'x') })
+    const { mock, events, engine } = makeEngine('text', {}, store)
+    await engine.ask({ conversationId: 1, content: 'hi' })
+    expect(mock.callCount).toBe(2) // 摘要调用 + 主循环调用
+    const summaryPrompt = mock.prompts[0] as Array<{ role: string; content: unknown }>
+    expect(String(summaryPrompt[0].content)).toContain('摘要')
+    const mainPrompt = mock.prompts[1] as Array<{ role: string; content: unknown }>
+    expect(mainPrompt).toHaveLength(43) // system + 摘要 + 40 条保留 + 本条 user
+    expect(mainPrompt[1].role).toBe('user')
+    expect(promptText(mainPrompt, 1)).toContain('以下是更早对话的摘要')
+    expect(eventsOf(events, 'done')).toHaveLength(1)
+    // 不落库:DB 保持完整历史(55 条 user + 回复)
+    const rows = store.listMessages(1).filter((m) => m.role === 'user')
+    expect(rows).toHaveLength(56)
+  })
+
+  it('ask falls back to last-50 truncation when summarization fails', async () => {
+    const store = makeStore()
+    for (let i = 0; i < 55; i++) store.appendMessage({ conversationId: 1, role: 'user', content: `m${i}`.padEnd(1000, 'x') })
+    const { mock, events, engine } = makeEngine('throw-once', {}, store)
+    await engine.ask({ conversationId: 1, content: 'hi' })
+    expect(mock.callCount).toBe(2) // 摘要调用抛错(1)+ 主循环成功(2)
+    expect(eventsOf(events, 'done')).toHaveLength(1)
+    const mainPrompt = mock.prompts[1] as Array<{ role: string; content: unknown }>
+    expect(mainPrompt).toHaveLength(52) // system + 50 条历史 + 本条 user,无摘要
+    expect(promptText(mainPrompt, 1)).toBe('m5'.padEnd(1000, 'x'))
+  })
+
+  it('craft compacts over-budget history before the first step', async () => {
+    const store = makeStore()
+    for (let i = 0; i < 55; i++) store.appendMessage({ conversationId: 1, role: 'user', content: `m${i}`.padEnd(1000, 'x') })
+    const { mock, events, engine } = makeEngine('text', {}, store)
+    await engine.craft({ conversationId: 1, content: 'do it', tools: {}, highRiskTools: new Set() })
+    expect(mock.callCount).toBe(2)
+    const mainPrompt = mock.prompts[1] as Array<{ role: string; content: unknown }>
+    expect(promptText(mainPrompt, 1)).toContain('以下是更早对话的摘要')
+    expect(eventsOf(events, 'done')).toHaveLength(1)
   })
 })

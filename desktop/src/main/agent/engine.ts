@@ -23,16 +23,15 @@ import { lastUserMessageIndex } from './continue'
 import { kbRead, kbSearch, kbList, kbUpload } from '../gateway/remote_mcp'
 import { isBoundaryError } from '../tools/paths'
 import type { Session } from '../gateway/config'
+import { compactMessages, DEFAULT_CONTEXT_WINDOW, DEFAULT_STREAM_TIMEOUT } from './compact'
+
+export { DEFAULT_CONTEXT_WINDOW, DEFAULT_STREAM_TIMEOUT }
 
 export const DEFAULT_MAX_STEPS = 20
 export const DEFAULT_APPROVAL_TIMEOUT_MS = 60_000
-export const DEFAULT_CONTEXT_WINDOW = 50
 export const DEFAULT_RETRY_COUNT = 1
 // 单轮输出上限(模型侧截断,防异常网关无限流撑爆内存/单行 DB)
 export const DEFAULT_MAX_OUTPUT_TOKENS = 16384
-// 流式超时(网络健壮性):网关半开(收连接不回数据/流中停)时任务不再永久挂起;
-// firstChunkMs = 首块 60s 内无响应判失败,chunkMs = 块间隔 60s 判失败
-export const DEFAULT_STREAM_TIMEOUT = { firstChunkMs: 60_000, chunkMs: 60_000 }
 const ERROR_PREFIX = 'Error: '
 
 // 注册表工具可附带按调用参数动态判定的审批谓词(如 command_exec 的白名单策略,架构设计 §3.4)。
@@ -178,6 +177,12 @@ export class AgentEngine {
     return this.runningConversationId
   }
 
+  // 长会话上下文压缩:超预算时对更早历史生成 LLM 摘要置顶(摘要失败回退 lastN 50);
+  // 不落库,仅影响发往模型的 messages;走 session.fetch 与取消信号,同主循环
+  private async compactContext(history: ModelMessage[], abort: AbortController): Promise<ModelMessage[]> {
+    return compactMessages(history, this.cfg.model, { fetch: this.cfg.fetch, abortSignal: abort.signal })
+  }
+
   // 回复中用户发新消息:入队,当前步骤(轮)完成后自动处理,不打断运行。
   // 仅对正在运行的多步任务(craft/continue)开放;消息立即落库 user 行,
   // 中断/步数超限后 continue 截断重跑会自然从这条消息继续。
@@ -219,10 +224,10 @@ export class AgentEngine {
     // 先占运行槽再写 DB(单运行守卫失败不落库)
     const abort = this.acquireRun(conversationId)
     store.updateConversationStatus(conversationId, 'planning')
-    // 上下文窗口:发送给 LLM 的历史最多最近 50 条(超出仅存 DB 供 UI 查看)
+    // 上下文窗口:超预算时对更早历史做 LLM 摘要压缩(摘要失败回退最近 50 条硬截断)
     const history = historyMessages(store.listMessages(conversationId))
     store.appendMessage({ conversationId, role: 'user', content })
-    const messages: ModelMessage[] = [...lastN(history, DEFAULT_CONTEXT_WINDOW), { role: 'user', content }]
+    const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content }]
     const tools = readOnlyTools(input.tools ?? {}) as Record<string, GatedTool>
     const system = `${input.sysPrompt ?? this.cfg.sysPrompt}
 
@@ -280,10 +285,10 @@ ${PLAN_SYSTEM_NOTICE}`
     // 入口已 acquireRun 时复用;直接调用(测试)自行占槽
     const abort = acquiredAbort ?? this.acquireRun(conversationId)
     store.updateConversationStatus(conversationId, runStatus)
-    // 上下文窗口:发送给 LLM 的历史最多最近 50 条(超出仅存 DB 供 UI 查看)
+    // 上下文窗口:超预算时对更早历史做 LLM 摘要压缩(摘要失败回退最近 50 条硬截断)
     const history = historyMessages(store.listMessages(conversationId))
     store.appendMessage({ conversationId, role: 'user', content })
-    const messages: ModelMessage[] = [...lastN(history, DEFAULT_CONTEXT_WINDOW), { role: 'user', content }]
+    const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content }]
 
     let fullText = ''
     let usage: { prompt_tokens: number; completion_tokens: number } = { prompt_tokens: 0, completion_tokens: 0 }
@@ -381,10 +386,10 @@ ${PLAN_SYSTEM_NOTICE}`
     // 先占运行槽再写 DB(单运行守卫失败不落库)
     const abort = this.acquireRun(conversationId)
     store.updateConversationStatus(conversationId, 'running')
-    // 上下文窗口:发送给 LLM 的历史最多最近 50 条(超出仅存 DB 供 UI 查看)
+    // 上下文窗口:超预算时对更早历史做 LLM 摘要压缩(摘要失败回退最近 50 条硬截断)
     const history = historyMessages(store.listMessages(conversationId))
     store.appendMessage({ conversationId, role: 'user', content })
-    const messages: ModelMessage[] = [...lastN(history, DEFAULT_CONTEXT_WINDOW), { role: 'user', content }]
+    const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content }]
     await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps, 'done', input.sysPrompt ?? this.cfg.sysPrompt, abort)
   }
 
@@ -414,7 +419,7 @@ ${PLAN_SYSTEM_NOTICE}`
     const abort = this.acquireRun(conversationId)
     store.updateConversationStatus(conversationId, input.status ?? 'running')
     const history = historyMessages(rows.slice(0, idx + 1))
-    const messages = lastN(history, DEFAULT_CONTEXT_WINDOW)
+    const messages = await this.compactContext(history, abort)
     const maxSteps = input.maxSteps ?? this.cfg.maxSteps ?? DEFAULT_MAX_STEPS
     await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps, 'done', input.sysPrompt ?? this.cfg.sysPrompt, abort)
   }
@@ -1135,10 +1140,6 @@ function parseToolCalls(json: string | undefined): StoredToolCall[] {
   } catch {
     return []
   }
-}
-
-function lastN<T>(items: T[], n: number): T[] {
-  return items.slice(Math.max(0, items.length - n))
 }
 
 function isAbortError(err: unknown): boolean {
