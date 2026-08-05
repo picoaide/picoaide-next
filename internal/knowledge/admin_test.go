@@ -9,6 +9,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -18,7 +20,7 @@ import (
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
-func kbAdminSetup(t *testing.T) (http.Handler, *sql.DB, map[string]string) {
+func kbAdminSetup(t *testing.T) (http.Handler, *sql.DB, map[string]string, string) {
 	t.Helper()
 	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/kb.db", t.TempDir()))
 	if err != nil {
@@ -35,7 +37,8 @@ func kbAdminSetup(t *testing.T) (http.Handler, *sql.DB, map[string]string) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	serverauth.RegisterAdminRoutes(r, db)
-	RegisterAdminRoutes(r, db)
+	uploadsDir := filepath.Join(t.TempDir(), "uploads")
+	RegisterAdminRoutes(r, db, uploadsDir)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))
@@ -51,7 +54,7 @@ func kbAdminSetup(t *testing.T) (http.Handler, *sql.DB, map[string]string) {
 		}
 	}
 	hdr := map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
-	return r, db, hdr
+	return r, db, hdr, uploadsDir
 }
 
 func kbReq(t *testing.T, r http.Handler, method, path, body string, hdr map[string]string) (*httptest.ResponseRecorder, map[string]any) {
@@ -69,7 +72,7 @@ func kbReq(t *testing.T, r http.Handler, method, path, body string, hdr map[stri
 }
 
 func TestAdminKB(t *testing.T) {
-	r, db, hdr := kbAdminSetup(t)
+	r, db, hdr, _ := kbAdminSetup(t)
 	defer db.Close()
 
 	// folder
@@ -169,7 +172,7 @@ func minimalDocx(t *testing.T, body string) []byte {
 }
 
 func TestAdminKBRevokeGrant(t *testing.T) {
-	r, db, hdr := kbAdminSetup(t)
+	r, db, hdr, _ := kbAdminSetup(t)
 	defer db.Close()
 
 	w, out := kbReq(t, r, "POST", "/api/admin/kb/folders", `{"name":"产品文档"}`, hdr)
@@ -227,7 +230,7 @@ func TestAdminKBRevokeGrant(t *testing.T) {
 }
 
 func TestAdminKBDocUpdate(t *testing.T) {
-	r, db, hdr := kbAdminSetup(t)
+	r, db, hdr, _ := kbAdminSetup(t)
 	defer db.Close()
 
 	w, out := kbReq(t, r, "POST", "/api/admin/kb/upload",
@@ -277,26 +280,37 @@ func TestAdminKBDocUpdate(t *testing.T) {
 }
 
 func TestAdminKBUploadMultipartTxt(t *testing.T) {
-	r, db, hdr := kbAdminSetup(t)
+	r, db, hdr, uploadsDir := kbAdminSetup(t)
 	defer db.Close()
 
 	content := "第一条需求是支持多文件上传"
 	w, out := kbMultipart(t, r, map[string]string{"title": "需求文档", "folder_id": "0"}, "需求.txt", []byte(content), hdr)
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusAccepted {
 		t.Fatalf("txt upload: %d %s", w.Code, w.Body.String())
 	}
 	docID := int64(out["doc"].(map[string]any)["id"].(float64))
+	if out["doc"].(map[string]any)["status"] != "pending" {
+		t.Fatalf("upload status = %v", out)
+	}
+	// not searchable until the async queue processes it
+	if w, out = kbReq(t, r, "GET", "/api/admin/kb/search?q=多文件上传", "", hdr); w.Code != http.StatusOK || len(out["results"].([]any)) != 0 {
+		t.Fatalf("search before process: %d %s", w.Code, w.Body.String())
+	}
+	for processNextPending(db, uploadsDir) {
+	}
 	doc, err := serverstore.GetKBDocument(db, docID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if doc.Content != content || doc.Size != int64(len(content)) {
+	if doc.Status != "ready" || doc.Content != content || doc.Size != int64(len(content)) {
 		t.Fatalf("doc = %+v", doc)
 	}
 	// title missing → defaults to filename
 	w, out = kbMultipart(t, r, map[string]string{"folder_id": "0"}, "默认标题.txt", []byte("备用内容"), hdr)
-	if w.Code != http.StatusOK || out["doc"].(map[string]any)["title"] != "默认标题.txt" {
+	if w.Code != http.StatusAccepted || out["doc"].(map[string]any)["title"] != "默认标题.txt" {
 		t.Fatalf("default title: %d %s", w.Code, w.Body.String())
+	}
+	for processNextPending(db, uploadsDir) {
 	}
 	// extractable via admin search (LIKE fallback)
 	if w, out = kbReq(t, r, "GET", "/api/admin/kb/search?q=多文件上传", "", hdr); w.Code != http.StatusOK {
@@ -305,10 +319,15 @@ func TestAdminKBUploadMultipartTxt(t *testing.T) {
 	if len(out["results"].([]any)) == 0 {
 		t.Fatal("search found nothing")
 	}
+	// oversize file rejected synchronously (no pending row)
+	big := make([]byte, maxUploadBytes+1)
+	if w, _ := kbMultipart(t, r, map[string]string{"title": "太大"}, "大.txt", big, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("oversize: %d %s", w.Code, w.Body.String())
+	}
 }
 
 func TestAdminKBUploadMultipartDocx(t *testing.T) {
-	r, db, hdr := kbAdminSetup(t)
+	r, db, hdr, uploadsDir := kbAdminSetup(t)
 	defer db.Close()
 
 	docx := minimalDocx(t, `<?xml version="1.0"?><w:document><w:body>
@@ -316,47 +335,96 @@ func TestAdminKBUploadMultipartDocx(t *testing.T) {
 		<w:p><w:r><w:t>A &amp; B 第二段</w:t></w:r></w:p>
 	</w:body></w:document>`)
 	w, out := kbMultipart(t, r, map[string]string{"title": "产品说明", "folder_id": "0"}, "说明.docx", docx, hdr)
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusAccepted {
 		t.Fatalf("docx upload: %d %s", w.Code, w.Body.String())
 	}
 	docID := int64(out["doc"].(map[string]any)["id"].(float64))
+	for processNextPending(db, uploadsDir) {
+	}
 	doc, err := serverstore.GetKBDocument(db, docID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(doc.Content, "Docx 第一段内容") || !strings.Contains(doc.Content, "A & B 第二段") {
-		t.Fatalf("extracted = %q", doc.Content)
+	if doc.Status != "ready" || !strings.Contains(doc.Content, "Docx 第一段内容") || !strings.Contains(doc.Content, "A & B 第二段") {
+		t.Fatalf("extracted = %+v", doc)
 	}
 	if doc.ContentType != "docx" {
 		t.Fatalf("content type = %q", doc.ContentType)
 	}
-	// broken zip → clear validation error
-	if w, _ := kbMultipart(t, r, map[string]string{"title": "坏文件"}, "坏.docx", []byte("not a zip"), hdr); w.Code != http.StatusBadRequest {
+	// broken zip → accepted, then error status with message, excluded from search
+	w, out = kbMultipart(t, r, map[string]string{"title": "坏文件"}, "坏.docx", []byte("not a zip"), hdr)
+	if w.Code != http.StatusAccepted {
 		t.Fatalf("bad docx: %d %s", w.Code, w.Body.String())
+	}
+	badID := int64(out["doc"].(map[string]any)["id"].(float64))
+	for processNextPending(db, uploadsDir) {
+	}
+	doc, err = serverstore.GetKBDocument(db, badID)
+	if err != nil || doc.Status != "error" || !strings.Contains(doc.Error, "docx") {
+		t.Fatalf("bad docx status = %+v %v", doc, err)
+	}
+	if w, out = kbReq(t, r, "GET", "/api/admin/kb/search?q=坏文件", "", hdr); w.Code != http.StatusOK || len(out["results"].([]any)) != 0 {
+		t.Fatalf("search failed doc: %d %s", w.Code, w.Body.String())
+	}
+	// retry re-queues and fails again (raw file kept for future OCR)
+	if w, _ := kbReq(t, r, "POST", fmt.Sprintf("/api/admin/kb/documents/%d/retry", badID), "", hdr); w.Code != http.StatusOK {
+		t.Fatalf("retry: %d", w.Code)
+	}
+	doc, _ = serverstore.GetKBDocument(db, badID)
+	if doc.Status != "pending" || doc.Error != "" {
+		t.Fatalf("after retry = %+v", doc)
+	}
+	for processNextPending(db, uploadsDir) {
+	}
+	doc, _ = serverstore.GetKBDocument(db, badID)
+	if doc.Status != "error" {
+		t.Fatalf("after retry+process = %+v", doc)
+	}
+	if w, _ := kbReq(t, r, "POST", "/api/admin/kb/documents/99999/retry", "", hdr); w.Code != http.StatusNotFound {
+		t.Fatalf("retry missing: %d", w.Code)
+	}
+	// retrying a ready doc is rejected (its raw file is already gone)
+	if w, _ := kbReq(t, r, "POST", fmt.Sprintf("/api/admin/kb/documents/%d/retry", docID), "", hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("retry ready: %d", w.Code)
+	}
+	// deleting a pending upload also removes its raw file
+	w, out = kbMultipart(t, r, map[string]string{"title": "待删"}, "删.txt", []byte("x"), hdr)
+	delID := int64(out["doc"].(map[string]any)["id"].(float64))
+	rawPath := filepath.Join(uploadsDir, fmt.Sprintf("%d", delID))
+	if _, err := os.Stat(rawPath); err != nil {
+		t.Fatalf("raw file missing after upload: %v", err)
+	}
+	if w, _ := kbReq(t, r, "DELETE", fmt.Sprintf("/api/admin/kb/documents/%d", delID), "", hdr); w.Code != http.StatusOK {
+		t.Fatalf("delete: %d", w.Code)
+	}
+	if _, err := os.Stat(rawPath); !os.IsNotExist(err) {
+		t.Fatalf("raw file still present after delete: %v", err)
 	}
 }
 
 func TestAdminKBUploadMultipartPDFErrors(t *testing.T) {
-	r, _, hdr := kbAdminSetup(t)
-	// a garbage pdf must fail with a clear VALIDATION error, not a 500
-	// (a hand-built pdf with a valid xref table is not worth maintaining;
-	// ledongthuc/pdf's text path is exercised in its own repo)
+	r, db, hdr, uploadsDir := kbAdminSetup(t)
+	// a garbage pdf is accepted, then marked error with a message (not a 500;
+	// OCR is a later round)
 	w, out := kbMultipart(t, r, map[string]string{"title": "假pdf"}, "假.pdf", []byte("%PDF-1.4\ngarbage"), hdr)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("bad pdf: %d %s", w.Code, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("bad pdf upload: %d %s", w.Code, w.Body.String())
 	}
-	errObj, ok := out["error"].(map[string]any)
-	if !ok || errObj["code"] != "VALIDATION" || !strings.Contains(errObj["message"].(string), "pdf") {
-		t.Fatalf("bad pdf error = %v", out)
+	docID := int64(out["doc"].(map[string]any)["id"].(float64))
+	for processNextPending(db, uploadsDir) {
 	}
-	// unsupported extension
+	doc, err := serverstore.GetKBDocument(db, docID)
+	if err != nil || doc.Status != "error" || !strings.Contains(doc.Error, "pdf") {
+		t.Fatalf("bad pdf status = %+v %v", doc, err)
+	}
+	// unsupported extension rejected synchronously
 	if w, _ := kbMultipart(t, r, map[string]string{"title": "病毒"}, "evil.exe", []byte("MZ"), hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("bad ext: %d", w.Code)
 	}
 }
 
 func TestAdminKBPagedDocsAndAudit(t *testing.T) {
-	r, db, hdr := kbAdminSetup(t)
+	r, db, hdr, _ := kbAdminSetup(t)
 	defer db.Close()
 	for i := 0; i < 5; i++ {
 		if w, _ := kbReq(t, r, "POST", "/api/admin/kb/upload",

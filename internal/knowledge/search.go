@@ -103,7 +103,7 @@ func searchInFolders(db *sql.DB, folders []int64, query string, page, pageSize i
 	// FTS5 hits, best relevance first.
 	rows, err := db.Query(`SELECT d.id, d.folder_id, d.title, d.content, d.content_type, d.size, d.source, d.created_by, bm25(kb_fts)
 		FROM kb_documents d JOIN kb_fts f ON f.rowid = d.id
-		WHERE kb_fts MATCH ? AND d.folder_id IN (`+in+`)
+		WHERE kb_fts MATCH ? AND d.folder_id IN (`+in+`) AND d.status = 'ready'
 		ORDER BY bm25(kb_fts)`,
 		append([]any{strings.Join(ftsQuery, " ")}, inArgs()...)...)
 	if err != nil {
@@ -132,7 +132,7 @@ func searchInFolders(db *sql.DB, folders []int64, query string, page, pageSize i
 	}
 	likeArgs = append(likeArgs, inArgs()...)
 	rows, err = db.Query(`SELECT id, folder_id, title, content, content_type, size, source, created_by
-		FROM kb_documents d WHERE (`+strings.Join(conds, " AND ")+`) AND d.folder_id IN (`+in+`)`, likeArgs...)
+		FROM kb_documents d WHERE (`+strings.Join(conds, " AND ")+`) AND d.folder_id IN (`+in+`) AND d.status = 'ready'`, likeArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
