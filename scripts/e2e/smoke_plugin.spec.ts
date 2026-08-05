@@ -21,7 +21,7 @@ const { startMockCdpServer } = require('./mock-cdp-server')
 const EXT_PATH = path.resolve(__dirname, '../../browser-extension')
 const CDP_PORT = 54321
 
-test.setTimeout(120_000)
+test.describe.configure({ timeout: 120_000 })
 
 const PAGE_HTML = `<!doctype html><html><head><title>PicoAide Smoke</title></head>
 <body>
