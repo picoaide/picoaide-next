@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import Database from 'better-sqlite3'
 import { openDb } from './db'
 import { migrate } from './migrations'
-import { getAllSettings, getSetting, setSetting } from './settings'
+import { getSetting, setSetting } from './settings'
 
 function openTestDb(): { db: Database.Database; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), 'picoaide-set-test-'))
@@ -31,17 +31,6 @@ describe('settings', () => {
       expect(getSetting(db, 'theme')).toBe('dark')
       setSetting(db, 'theme', 'light')
       expect(getSetting(db, 'theme')).toBe('light')
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('getAllSettings returns all key/value pairs', () => {
-    const { db, cleanup } = openTestDb()
-    try {
-      setSetting(db, 'a', '1')
-      setSetting(db, 'b', '2')
-      expect(getAllSettings(db)).toEqual({ a: '1', b: '2' })
     } finally {
       cleanup()
     }

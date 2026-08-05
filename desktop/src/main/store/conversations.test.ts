@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import Database from 'better-sqlite3'
 import { openDb } from './db'
 import { migrate } from './migrations'
-import { createConversation, deleteConversation, getConversation, listConversations, setConversationTitle, setConversationWorkspace, touchConversation, updateConversationStatus } from './conversations'
+import { createConversation, deleteConversation, getConversation, listConversations, setConversationTitle, setConversationWorkspace, updateConversationStatus } from './conversations'
 import { appendMessage, listMessages } from './messages'
 
 function openTestDb(): { db: Database.Database; cleanup: () => void } {
@@ -25,20 +25,6 @@ describe('conversations', () => {
       expect(row!.title).toBe('hi')
       expect(row!.status).toBe('done')
       expect(row!.mode).toBe('ask')
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('listConversations orders by updated_at DESC, touch moves a row to the top', async () => {
-    const { db, cleanup } = openTestDb()
-    try {
-      const a = createConversation(db, { title: 'a' })
-      const b = createConversation(db, { title: 'b' })
-      expect(listConversations(db).map((r) => r.id)).toEqual([b, a])
-      await new Promise((resolve) => setTimeout(resolve, 5))
-      touchConversation(db, a)
-      expect(listConversations(db).map((r) => r.id)).toEqual([a, b])
     } finally {
       cleanup()
     }

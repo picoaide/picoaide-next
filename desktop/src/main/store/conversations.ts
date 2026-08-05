@@ -56,10 +56,6 @@ export function updateConversationStatus(db: Database.Database, id: number, stat
   db.prepare('UPDATE conversations SET status = ?, updated_at = strftime(\'%Y-%m-%d %H:%M:%f\',\'now\',\'localtime\') WHERE id = ?').run(status, id)
 }
 
-export function touchConversation(db: Database.Database, id: number): void {
-  db.prepare('UPDATE conversations SET updated_at = strftime(\'%Y-%m-%d %H:%M:%f\',\'now\',\'localtime\') WHERE id = ?').run(id)
-}
-
 export function deleteConversation(db: Database.Database, id: number): void {
   db.prepare('DELETE FROM conversations WHERE id = ?').run(id)
 }

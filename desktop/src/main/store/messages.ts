@@ -62,7 +62,3 @@ export function deleteMessagesAfter(db: Database.Database, conversationId: numbe
 export function deleteMessage(db: Database.Database, id: number): void {
   db.prepare('DELETE FROM messages WHERE id = ?').run(id)
 }
-
-export function deleteMessages(db: Database.Database, conversationId: number): void {
-  db.prepare('DELETE FROM messages WHERE conversation_id = ?').run(conversationId)
-}

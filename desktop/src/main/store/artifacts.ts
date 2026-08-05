@@ -28,7 +28,3 @@ export function listArtifacts(db: Database.Database, conversationId: number): Ar
     .prepare('SELECT * FROM artifacts WHERE conversation_id = ? ORDER BY id ASC')
     .all(conversationId) as ArtifactRow[]
 }
-
-export function deleteArtifacts(db: Database.Database, conversationId: number): void {
-  db.prepare('DELETE FROM artifacts WHERE conversation_id = ?').run(conversationId)
-}

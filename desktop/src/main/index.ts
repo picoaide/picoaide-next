@@ -9,13 +9,13 @@ import { openDb } from './store/db'
 import { migrate } from './store/migrations'
 import {
   createConversation, listConversations, getConversation,
-  updateConversationStatus, deleteConversation, setConversationTitle, setConversationWorkspace, touchConversation,
+  updateConversationStatus, deleteConversation, setConversationTitle, setConversationWorkspace,
   setConversationStarred, setConversationArchived,
 } from './store/conversations'
 import { createProject, listProjects, getProject, deleteProject, setConversationProject } from './store/projects'
 import { listMessages, appendMessage, updateMessageContent, deleteMessagesAfter, deleteMessage } from './store/messages'
 import { addArtifact, listArtifacts } from './store/artifacts'
-import { getSetting, setSetting, getAllSettings } from './store/settings'
+import { getSetting, setSetting } from './store/settings'
 import { dataDir, dbPath, workspaceDir } from './paths'
 import { installCertificateVerification } from './gateway/tls'
 import { createGatewayModel as makeGatewayModel } from './agent/provider'
@@ -156,10 +156,9 @@ async function loadBrowserTools(): Promise<{ tools: Record<string, Tool>; highRi
   try {
     const mod = (await import('./tools/browser')) as {
       createBrowserTools?: () => Record<string, Tool>
-      browserTools?: () => Record<string, Tool>
       HIGH_RISK_TOOLS?: string[]
     }
-    const tools = mod.createBrowserTools?.() ?? mod.browserTools?.() ?? {}
+    const tools = mod.createBrowserTools?.() ?? {}
     return { tools, highRisk: mod.HIGH_RISK_TOOLS ?? [] }
   } catch {
     return { tools: {}, highRisk: [] }
@@ -295,10 +294,10 @@ app.whenReady().then(async () => {
   const db = openDb(dbPath())
   migrate(db)
 
-  // 浏览器插件桥(3.15):固定监听 127.0.0.1:54321(可经 settings cdp.port 调整),退出时关闭
+  // 浏览器插件桥(3.15):固定监听 127.0.0.1:54321,退出时关闭
   let cdpServer: import('./cdp_server').CdpServer | null = null
   let cdpExtension = false
-  const cdpPort = Number(getSetting(db, 'cdp.port') ?? '') || 54321
+  const cdpPort = 54321
   import('./cdp_server').then((m) => m.startCdpServer({ port: cdpPort, onExtensionChange: (connected) => {
     cdpExtension = connected
     mainWindow?.webContents.send('cdp:extension', { connected })
@@ -335,7 +334,6 @@ app.whenReady().then(async () => {
     setConversationStarred: (id, starred) => setConversationStarred(db, id, starred),
     setConversationArchived: (id, archived) => setConversationArchived(db, id, archived),
     setConversationWorkspace: (id, ws) => setConversationWorkspace(db, id, ws),
-    touchConversation: (id) => touchConversation(db, id),
     listMessages: (cid) => listMessages(db, cid),
     updateMessageContent: (id, content) => updateMessageContent(db, id, content),
     deleteMessagesAfter: (cid, id) => deleteMessagesAfter(db, cid, id),
@@ -345,7 +343,6 @@ app.whenReady().then(async () => {
     listArtifacts: (cid) => listArtifacts(db, cid),
     getSetting: (k) => getSetting(db, k),
     setSetting: (k, v) => setSetting(db, k, v),
-    getAllSettings: () => getAllSettings(db),
     createProject: (input) => createProject(db, input),
     listProjects: () => listProjects(db),
     getProject: (id) => getProject(db, id),

@@ -6,7 +6,7 @@ import Database from 'better-sqlite3'
 import { openDb } from './db'
 import { migrate } from './migrations'
 import { createConversation } from './conversations'
-import { addArtifact, deleteArtifacts, listArtifacts } from './artifacts'
+import { addArtifact, listArtifacts } from './artifacts'
 
 function openTestDb(): { db: Database.Database; convId: number; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), 'picoaide-art-test-'))
@@ -28,18 +28,6 @@ describe('artifacts', () => {
       expect(rows[0].type).toBe('file')
       expect(rows[0].size).toBe(10)
       expect(rows[0].conversation_id).toBe(convId)
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('deleteArtifacts removes all artifacts of a conversation', () => {
-    const { db, convId, cleanup } = openTestDb()
-    try {
-      addArtifact(db, { conversationId: convId, path: '/tmp/a.md', type: 'file', size: 1 })
-      addArtifact(db, { conversationId: convId, path: '/tmp/b.md', type: 'file', size: 2 })
-      deleteArtifacts(db, convId)
-      expect(listArtifacts(db, convId)).toHaveLength(0)
     } finally {
       cleanup()
     }
