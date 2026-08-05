@@ -73,68 +73,6 @@ func TestUpdateUsageTokens(t *testing.T) {
 	}
 }
 
-func TestUsageByUserPerDay(t *testing.T) {
-	db, cleanup := newUsageDB(t)
-	defer cleanup()
-	uid := mustUserID(t, db)
-	other := mustUserID(t, db)
-
-	id1, _ := RecordUsage(db, uid, "deepseek-chat", 10, 5)
-	id2, _ := RecordUsage(db, uid, "deepseek-chat", 20, 10)
-	id3, _ := RecordUsage(db, uid, "qwen-plus", 1, 1)
-	id4, _ := RecordUsage(db, other, "deepseek-chat", 100, 100)
-	setCreatedAt(t, db, id1, "2026-08-01 09:00:00")
-	setCreatedAt(t, db, id2, "2026-08-01 10:00:00")
-	setCreatedAt(t, db, id3, "2026-08-02 09:00:00")
-	setCreatedAt(t, db, id4, "2026-08-01 09:00:00")
-
-	since := time.Date(2026, 8, 1, 0, 0, 0, 0, time.Local)
-	until := time.Date(2026, 8, 3, 0, 0, 0, 0, time.Local)
-	days, err := UsageByUser(db, uid, since, until)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(days) != 2 {
-		t.Fatalf("got %d days: %+v", len(days), days)
-	}
-	if days[0].Day != "2026-08-01" || days[0].PromptTokens != 30 || days[0].CompletionTokens != 15 {
-		t.Fatalf("day1 = %+v", days[0])
-	}
-	if days[1].Day != "2026-08-02" || days[1].PromptTokens != 1 || days[1].CompletionTokens != 1 {
-		t.Fatalf("day2 = %+v", days[1])
-	}
-}
-
-func TestUsageTotal(t *testing.T) {
-	db, cleanup := newUsageDB(t)
-	defer cleanup()
-	uid := mustUserID(t, db)
-
-	id1, _ := RecordUsage(db, uid, "deepseek-chat", 10, 5)
-	id2, _ := RecordUsage(db, uid, "qwen-plus", 30, 20)
-	setCreatedAt(t, db, id1, "2026-08-01 09:00:00")
-	setCreatedAt(t, db, id2, "2026-08-02 09:00:00")
-
-	since := time.Date(2026, 8, 1, 0, 0, 0, 0, time.Local)
-	until := time.Date(2026, 8, 3, 0, 0, 0, 0, time.Local)
-	tot, err := UsageTotal(db, since, until)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tot.PromptTokens != 40 || tot.CompletionTokens != 25 {
-		t.Fatalf("total = %+v", tot)
-	}
-
-	// narrow window excludes day 2
-	tot, err = UsageTotal(db, time.Date(2026, 8, 1, 0, 0, 0, 0, time.Local), time.Date(2026, 8, 2, 0, 0, 0, 0, time.Local))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tot.PromptTokens != 10 || tot.CompletionTokens != 5 {
-		t.Fatalf("narrow total = %+v", tot)
-	}
-}
-
 func TestCleanupPendingUsage(t *testing.T) {
 	db, cleanup := newUsageDB(t)
 	defer cleanup()

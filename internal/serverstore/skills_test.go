@@ -61,14 +61,4 @@ func TestSkills(t *testing.T) {
 	if len(all) != 2 {
 		t.Fatalf("all list = %+v", all)
 	}
-
-	if err := DeleteSkill(db, "demo"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := GetSkill(db, "demo"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("after delete err = %v, want ErrNotFound", err)
-	}
-	if err := DeleteSkill(db, "demo"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("delete twice err = %v, want ErrNotFound", err)
-	}
 }

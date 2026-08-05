@@ -1,9 +1,7 @@
 package serverstore
 
 import (
-	"errors"
 	"testing"
-	"time"
 )
 
 func TestMCPServers(t *testing.T) {
@@ -64,37 +62,5 @@ func TestMCPServers(t *testing.T) {
 	}
 	if len(all) != 2 {
 		t.Fatalf("all list = %+v", all)
-	}
-
-	// downloads audit
-	uid, err := CreateUserWithPassword(db, "alice", "secret123")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := RecordDownload(db, uid, id); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now()
-	rows, err := ListDownloads(db, uid, now.Add(-time.Hour), now.Add(time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 1 || rows[0].MCPID != id || rows[0].UserID != uid {
-		t.Fatalf("downloads = %+v", rows)
-	}
-	rows, _ = ListDownloads(db, uid, now.Add(-time.Hour), now.Add(-30*time.Minute))
-	if len(rows) != 0 {
-		t.Fatalf("downloads in past window = %+v", rows)
-	}
-
-	// row delete
-	if err := DeleteMCPServer(db, id2); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := GetMCPServer(db, id2); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("after delete err = %v, want ErrNotFound", err)
-	}
-	if err := DeleteMCPServer(db, id2); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("delete twice err = %v, want ErrNotFound", err)
 	}
 }

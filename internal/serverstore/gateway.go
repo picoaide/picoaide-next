@@ -137,25 +137,6 @@ func SyncProviderModels(db *sql.DB, providerID int64, names []string) error {
 	return tx.Commit()
 }
 
-// ListModels returns all model rows, ordered by id.
-func ListModels(db *sql.DB) ([]Model, error) {
-	rows, err := db.Query(`SELECT id, name, provider_id, display_name, default_params
-		FROM models ORDER BY id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Model
-	for rows.Next() {
-		m, err := scanModel(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *m)
-	}
-	return out, rows.Err()
-}
-
 // SyncProviderModel upsert 一个模型的 display_name 与 default_params(幂等)。
 func SyncProviderModel(db *sql.DB, providerID int64, name, defaultParams string) error {
 	_, err := db.Exec(`INSERT INTO models (name, provider_id, display_name, default_params)

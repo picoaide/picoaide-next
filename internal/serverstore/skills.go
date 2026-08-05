@@ -73,19 +73,6 @@ func UpdateSkill(db *sql.DB, s *Skill) error {
 	return nil
 }
 
-// DeleteSkill removes the row; returns ErrNotFound if absent.
-func DeleteSkill(db *sql.DB, name string) error {
-	res, err := db.Exec("DELETE FROM skills WHERE name = ?", name)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
 // SetSkillEnabled enables/disables a skill (下架 = enabled 0, row kept).
 // Returns the skill id or ErrNotFound.
 func SetSkillEnabled(db *sql.DB, name string, enabled bool) (int64, error) {

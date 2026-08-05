@@ -35,7 +35,7 @@ func TestSyncOnceAddsNewModels(t *testing.T) {
 	if _, err := SyncOnce(db, fetchFn); err != nil {
 		t.Fatal(err)
 	}
-	models, err := serverstore.ListModels(db)
+	models, err := ListModels(db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,8 +58,8 @@ func TestSyncOnceRemovesGoneModels(t *testing.T) {
 	if _, err := SyncOnce(db, fetchFn2); err != nil {
 		t.Fatal(err)
 	}
-	models, _ := serverstore.ListModels(db)
-	if len(models) != 1 || models[0].Name != "deepseek-v4-pro" {
+	models, _ := ListModels(db)
+	if len(models) != 1 || models[0].ID != "deepseek-v4-pro" {
 		t.Fatalf("models after removal = %+v", models)
 	}
 }
@@ -79,7 +79,7 @@ func TestSyncEmptyFetchKeepsModels(t *testing.T) {
 	if _, err := SyncOnce(db, empty); err != nil {
 		t.Fatal(err)
 	}
-	models, _ := serverstore.ListModels(db)
+	models, _ := ListModels(db)
 	if len(models) != 2 {
 		t.Fatalf("empty fetch wiped models: %+v", models)
 	}
@@ -93,7 +93,7 @@ func TestSyncOnceFetchFailureSkips(t *testing.T) {
 	if _, err := SyncOnce(db, fetchFn); err != nil {
 		t.Fatalf("SyncOnce should tolerate fetch failure, got %v", err)
 	}
-	models, _ := serverstore.ListModels(db)
+	models, _ := ListModels(db)
 	if len(models) != 0 {
 		t.Fatalf("no models expected, got %+v", models)
 	}

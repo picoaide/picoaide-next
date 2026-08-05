@@ -82,9 +82,12 @@ func TestSyncProviderModelAndRemoveMissing(t *testing.T) {
 	if removed != 1 {
 		t.Fatalf("removed = %d, want 1", removed)
 	}
-	models, _ := ListModels(db)
-	if len(models) != 1 || models[0].Name != "deepseek-v4-pro" {
-		t.Fatalf("models = %+v", models)
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM models WHERE name = 'deepseek-v4-pro'").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("models = %d, want 1", n)
 	}
 	// default_model 被删时重置为空
 	if err := SetSetting(db, "gateway.default_model", "deepseek-v4-pro"); err != nil {

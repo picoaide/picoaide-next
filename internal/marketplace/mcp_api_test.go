@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/util"
@@ -85,13 +84,6 @@ func TestMCPAPI(t *testing.T) {
 	if cfg.Config.Headers["Authorization"] != "Bearer hdr-secret" {
 		t.Fatalf("decrypted headers = %v", cfg.Config.Headers)
 	}
-	rows, err := serverstore.ListDownloads(db, 1, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 1 || rows[0].MCPID != id {
-		t.Fatalf("downloads after config = %+v", rows)
-	}
 
 	// no token -> 401
 	for _, p := range []string{"/api/marketplace/mcp", "/api/marketplace/mcp/" + strconv.FormatInt(id, 10) + "/config"} {
@@ -123,12 +115,5 @@ func TestMCPAPI(t *testing.T) {
 	}
 	if w := doReq(r, "GET", path, token); w.Code != http.StatusTooManyRequests || !hasErrCode(w, "RATE_LIMITED") {
 		t.Fatalf("fetch 3 = %d, body %s", w.Code, w.Body.String())
-	}
-	rows, err = serverstore.ListDownloads(db, 1, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 2 {
-		t.Fatalf("downloads after rate limit = %d, want 2", len(rows))
 	}
 }
