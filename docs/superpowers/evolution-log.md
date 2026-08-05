@@ -65,14 +65,27 @@
 
 **验证**:make check EXIT 0;496 passed | 2 skipped;build 成功;已 push
 
-## Round 4 计划(待执行)
+## Round 4(2026-08-06):artifact 预览回灌 + 语义快照
+
+**实施**:
+1. `e86b029` feat: artifact preview and re-edit round-trip
+   - artifact:read IPC(复用 isAllowed 目录校验,文本 1MB/图片 5MB 上限,按扩展名 kind: html/md/text/image/other,图片回 dataUrl)
+   - ArtifactPreview.tsx(shadcn Dialog:HTML→sandbox iframe、图片→img、.md→Markdown.tsx、文本→pre)
+   - 回灌:requestEditArtifact(path)→"请继续修改文件 {path}"走 sendMessage;ArtifactsPanel 预览+文件夹双按钮
+   - 6 新测试;502 passed
+2. `4e4a009` feat: semantic DOM snapshot for getContent
+   - 插件 semanticSnapshot()(toString 注入零依赖):限深 6/300 节点/≤6000 字符截断;[H1]/[BUTTON]/[INPUT]/[LINK]/[IMG]/[TABLE] 语义标注,输入框标注 fill 定位提示;getContent 默认快照,{mode:'text'} 兼容
+   - 新 browser-extension/snapshot.test.js(零依赖 node 测试 + 最小 DOM mock);503 passed
+
+**验证**:make check EXIT 0;503 passed | 2 skipped;已 push
+
+## Round 5 计划(待执行)
 
 剩余项(按价值):
-- 高:artifact 预览/回灌(HTML/图片 iframe sandbox 预览 + 继续修改回灌上下文)——易用性大项
-- 中高:文档技能包(pdf 表格/xlsx;需评估沙盒 python 依赖,风险后置)
-- 中:浏览器结构化快照(getContent 输出 accessibility 式语义树,省 token)
-- 中:跨会话记忆(AGENTS.md 已有;自动记忆提取性价比低,暂缓)
-- 低:上下文健康显示(上下文占用进度条)
+- 中高:文档技能包(pdf 表格/xlsx;沙盒 python 依赖需评估,可选 JS 方案)
+- 中:上下文健康显示(占用进度条,低)
+- 中:跨会话记忆(自动记忆提取性价比低,暂缓)
+- 服务端侧审视:网关/商城/知识库/webadmin 与客户端能力对齐(用户要求"服务端所有功能完善",下一轮派服务端调研:用量页、商城上架流程、知识库权限、LDAP/OIDC 体验)
 
 ## 验证基线(每轮后更新)
 
