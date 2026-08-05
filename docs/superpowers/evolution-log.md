@@ -131,18 +131,25 @@
 **验证**:make check EXIT 0;505 passed | 2 skipped;已 push(e203f66)
 - 注意:两子代理并行曾发生提交交叉事故,已重建历史(89286db 只含 A 工作,e203f66 只含 B 工作,树无重叠),已核验
 
-## Round 8 计划(待执行)
+## Round 8(2026-08-06):端到端联调冒烟
 
-调研剩余项盘点:
-- 中高:文档技能包(pdf 表格/xlsx;沙盒 python 依赖需评估,可选 JS 方案)
-- 中:知识库上传异步化(差距 #7:大文件同步阻塞;扫描版 PDF OCR)
-- 低:技能包签名/checksum 验签(差距 #5)
-- 低:密码策略最小长度(差距 #4)
-- 客户端与服务端联调冒烟(完整链路:登录→bootstrap→对话→浏览器→artifact;此前各轮分域验证,需要一次端到端)
-- 下一轮应评估"是否已达完善标准"并给出收尾结论
+**执行**(controller 亲测,真实进程):
+- 起真实 bin/picoaide-server + mock 上游(127.0.0.1:18081)+ AES 加密 api_key 直插 DB
+- 验证全链路:healthz(DB Ping 200)→ 登录 → bootstrap(默认模型回退)→ LLM 网关非流式代理 ✓ → 流式 SSE 分块 ✓ → api_key 解密 ✓
+- 意外收获:SIGTERM → 优雅退出日志 "shutting down…"(Round 7 功能真实生效)
+- 踩坑:pkill -f 匹配 bash 自身命令行自杀(第 3 次,改用精确进程名);api_key 明文被 DecryptSecret 拒绝(安全设计有效)
+
+## Round 9 计划(待执行)
+
+剩余低优先项(做完全部即收尾):
+- 密码策略:admin 建用户强制最小长度(差距 #4)
+- 技能包 checksum 验签落地(差距 #5)
+- 知识库上传异步化(差距 #7:大文件同步阻塞;扫描版 PDF OCR 后置)
+- 文档技能包评估(pdf 表格/xlsx;沙盒 python 依赖评估,不合适则 JS 方案或放弃并记录理由)
+- 最终评估"完善标准"结论 + 收尾
 
 ## 验证基线(每轮后更新)
 
 - make check(服务端 go test + 客户端 vitest + typecheck)EXIT 0
-- 客户端:448 passed | 2 skipped(450)
+- 客户端:505 passed | 2 skipped(507)(各轮递增)
 - 构建:cd desktop && npm run build 成功
