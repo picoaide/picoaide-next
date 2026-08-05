@@ -60,7 +60,8 @@ export const PLAN_SYSTEM_NOTICE =
   '当前处于计划(只读)模式:只可读取文件/搜索/浏览页面/查询知识库,禁止任何写入、修改、删除、执行命令或浏览器操作;' +
   '请调研后输出清晰的执行计划(步骤、涉及文件、预期结果),不要执行任何操作。'
 
-// 拼接核心提示词与技能注入段(extra 为空时返回核心提示词本身)
+// 拼接核心提示词与技能注入段;extra 需自带分隔换行(调用方返回 '\n\n## Skills\n...' 形式),
+// 为空时返回核心提示词本身
 export function buildSystemPrompt(extra?: string): string {
   return extra ? DEFAULT_SYSTEM_PROMPT + extra : DEFAULT_SYSTEM_PROMPT
 }

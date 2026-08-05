@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { DEFAULT_SYSTEM_PROMPT, PLAN_SYSTEM_NOTICE, buildSystemPrompt } from './prompt'
 
 describe('default system prompt', () => {
-  const eleven = [
+  const requiredPhrases = [
     'PicoAide', // 1 身份职责
     '输出到对话', // 2 系统规则
     '先读文件再修改', // 3 执行任务
@@ -18,7 +18,7 @@ describe('default system prompt', () => {
     '密钥只存在服务端', // 11 安全边界
     '不虚构', // 兜底:禁止虚构操作结果
   ]
-  for (const key of eleven) {
+  for (const key of requiredPhrases) {
     it(`contains: ${key}`, () => {
       expect(DEFAULT_SYSTEM_PROMPT).toContain(key)
     })
@@ -29,8 +29,10 @@ describe('default system prompt', () => {
   })
 
   it('contains the plan-mode notice', () => {
-    expect(PLAN_SYSTEM_NOTICE).toContain('计划(只读)模式')
-    expect(PLAN_SYSTEM_NOTICE).toContain('禁止')
+    expect(PLAN_SYSTEM_NOTICE).toBe(
+      '当前处于计划(只读)模式:只可读取文件/搜索/浏览页面/查询知识库,禁止任何写入、修改、删除、执行命令或浏览器操作;' +
+        '请调研后输出清晰的执行计划(步骤、涉及文件、预期结果),不要执行任何操作。'
+    )
   })
 
   it('buildSystemPrompt appends skill instructions', () => {
