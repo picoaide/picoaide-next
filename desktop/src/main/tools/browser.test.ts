@@ -43,6 +43,7 @@ describe('browser tool execution', () => {
     await srv.close() // 释放端口 → 连接被拒绝
     const tools = createBrowserTools({ port })
     await expect(tools.browser_tab_info.execute!({}, {} as never)).rejects.toThrow('浏览器插件未连接')
+    await expect(tools.browser_get_content.execute!({}, {} as never)).rejects.toThrow('浏览器插件未连接')
     await expect(tools.browser_execute_js.execute!({ code: '1+1' }, {} as never)).rejects.toThrow('浏览器插件未连接')
     await expect(tools.browser_fill.execute!({ selector: '#q', value: 'x' }, {} as never)).rejects.toThrow('浏览器插件未连接')
   })
@@ -83,6 +84,27 @@ describe('browser tool execution', () => {
     await expect(
       tools.browser_fill.execute!({ selector: '#q', value: 'hello' }, {} as never),
     ).resolves.toBe(true)
+    ws.close()
+  })
+
+  it('forwards browser_get_content to the plugin and returns the semantic snapshot', async () => {
+    const srv = await startCdpServer({ port: 0, adoptDelayMs: 50 })
+    servers.push(srv)
+    const ws = await new Promise<WebSocket>((resolve, reject) => {
+      const w = new WebSocket(`ws://127.0.0.1:${srv.port}`)
+      w.on('open', () => resolve(w))
+      w.on('error', reject)
+    })
+    await new Promise((r) => setTimeout(r, 80)) // 等接管
+    ws.on('message', (data: Buffer) => {
+      const msg = JSON.parse(data.toString()) as { id: number; method: string; params: unknown }
+      if (msg.method === 'browser.getContent')
+        ws.send(JSON.stringify({ id: msg.id, result: '[H1] smoke\n[BUTTON] go' }))
+    })
+    const tools = createBrowserTools({ port: srv.port })
+    await expect(tools.browser_get_content.execute!({}, {} as never)).resolves.toBe(
+      '[H1] smoke\n[BUTTON] go',
+    )
     ws.close()
   })
 })

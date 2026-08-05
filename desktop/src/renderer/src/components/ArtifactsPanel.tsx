@@ -1,13 +1,16 @@
-import { FolderOpen } from 'lucide-react'
+import { useState } from 'react'
+import { Eye, FolderOpen } from 'lucide-react'
 import { picoaide } from '../api/picoaide'
 import type { ArtifactRow } from '../../../main/ipc'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { ScrollArea } from './ui/scroll-area'
 import { basename } from '../lib/utils'
+import ArtifactPreview from './ArtifactPreview'
 
-// 右侧产物面板(架构设计 §3.5):当前会话产物列表 + "在文件夹中显示"
+// 右侧产物面板(架构设计 §3.5):当前会话产物列表 + "在文件夹中显示" + "预览/继续修改"
 export default function ArtifactsPanel({ artifacts }: { artifacts: ArtifactRow[] }) {
+  const [preview, setPreview] = useState<ArtifactRow | null>(null)
   return (
     <aside className="flex w-56 shrink-0 flex-col border-l bg-muted/20">
       <div className="border-b px-3 py-2 text-sm font-medium">产物</div>
@@ -26,20 +29,32 @@ export default function ArtifactsPanel({ artifacts }: { artifacts: ArtifactRow[]
                     {a.type}
                   </Badge>
                 </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="mt-1 h-6 w-full justify-start px-1 text-xs text-muted-foreground"
-                  title={a.path}
-                  onClick={() => void picoaide().artifactShowInFolder(a.path)}
-                >
-                  <FolderOpen className="h-3 w-3" /> 在文件夹中显示
-                </Button>
+                <div className="mt-1 flex gap-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 flex-1 justify-start px-1 text-xs text-muted-foreground"
+                    title={`预览 ${a.path}`}
+                    onClick={() => setPreview(a)}
+                  >
+                    <Eye className="h-3 w-3" /> 预览
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 flex-1 justify-start px-1 text-xs text-muted-foreground"
+                    title={a.path}
+                    onClick={() => void picoaide().artifactShowInFolder(a.path)}
+                  >
+                    <FolderOpen className="h-3 w-3" /> 文件夹
+                  </Button>
+                </div>
               </div>
             ))}
           </div>
         </ScrollArea>
       )}
+      {preview && <ArtifactPreview artifact={preview} onClose={() => setPreview(null)} />}
     </aside>
   )
 }

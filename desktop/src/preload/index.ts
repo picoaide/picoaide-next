@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import type { Session, BootstrapConfig } from '../main/gateway/config'
 import type { AgentEvent } from '../main/agent/events'
-import type { ArtifactRow, ConversationRow, MessageRow, ProjectRow } from '../main/ipc'
+import type { ArtifactReadResult, ArtifactRow, ConversationRow, MessageRow, ProjectRow } from '../main/ipc'
 import type { McpInstalledRecord, McpListResult, McpRiskInfo, SettingsInfo, SkillRiskInfo, SkillsListResult, InstalledSkillRecord } from '../main/plugin_ipc'
 import type { AttachmentInput, AttachResult } from '../shared/attachments'
 
@@ -72,6 +72,7 @@ const api = {
   confirm: (requestId: string, ok: boolean): Promise<void> =>
     ipcRenderer.invoke('agent:confirm', { requestId, ok }),
   artifactShowInFolder: (path: string): Promise<void> => ipcRenderer.invoke('artifact:showInFolder', { path }),
+  artifactRead: (path: string): Promise<ArtifactReadResult> => ipcRenderer.invoke('artifact:read', { path }),
   ready: (): Promise<void> => ipcRenderer.invoke('picoaide:rendererReady'),
   getTheme: (): Promise<'dark' | 'light'> => ipcRenderer.invoke('theme:get'),
   onThemeChanged: (cb: (t: 'dark' | 'light') => void): Unsub => subscribe('theme:changed', cb),

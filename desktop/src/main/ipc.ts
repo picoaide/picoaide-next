@@ -1,5 +1,5 @@
 import { dialog, ipcMain, nativeTheme, shell } from 'electron'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { AgentEngine } from './agent/engine'
 import type { GatedTool, StoreLike as EngineStore } from './agent/engine'
@@ -14,7 +14,7 @@ import { updateMessageContent, deleteMessagesAfter } from './store/messages'
 import { dataUrlBytes, imageExt, validateImage, MAX_FILE_BYTES } from '../shared/attachments'
 import type { AttachmentInput, AttachResult } from '../shared/attachments'
 import { workspaceDir } from './paths'
-import { resolveWorkspace } from './tools/paths'
+import { isAllowed, resolveWorkspace } from './tools/paths'
 
 // 与 src/main/store/conversations.ts ConversationRow 结构一致(自包含,不 import store)
 export interface ConversationRow {
@@ -90,6 +90,40 @@ export interface ArtifactRow {
   created_at: string
 }
 
+// artifact 预览读取结果(artifact:read 返回;dataUrl 给 <img>,content 给 iframe/pre/Markdown)
+export interface ArtifactReadResult {
+  kind: 'html' | 'md' | 'text' | 'image' | 'other'
+  content?: string
+  dataUrl?: string
+}
+
+// 预览大小上限(与附件/工具结果阈值同量级):文本 1MB,图片 5MB
+const PREVIEW_TEXT_LIMIT = 1024 * 1024
+const PREVIEW_IMAGE_LIMIT = 5 * 1024 * 1024
+
+const PREVIEW_TEXT_EXTS = new Set([
+  'txt', 'json', 'js', 'ts', 'tsx', 'jsx', 'py', 'go', 'css', 'scss', 'yml', 'yaml', 'xml',
+  'csv', 'sh', 'bash', 'toml', 'ini', 'conf', 'log', 'sql', 'env', 'diff', 'rs', 'java', 'c', 'h', 'cpp',
+])
+const PREVIEW_IMAGE_MIME: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+}
+
+// 预览种类按扩展名推断(html/md 走独立渲染,其余文本归 text,图片归 image)
+export function artifactPreviewKind(path: string): ArtifactReadResult['kind'] {
+  const ext = path.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ?? ''
+  if (ext === 'html' || ext === 'htm') return 'html'
+  if (ext === 'md') return 'md'
+  if (ext in PREVIEW_IMAGE_MIME) return 'image'
+  if (PREVIEW_TEXT_EXTS.has(ext)) return 'text'
+  return 'other'
+}
+
 // AGENTS.md 注入上限:单文件最长 4096 字符(防超大指令文件撑爆上下文)
 const MAX_PROJECT_INSTRUCTION_CHARS = 4096
 
@@ -155,6 +189,7 @@ export interface IpcHandlers {
   'chat:search': (input: { query: string }) => { conversationId: number; title: string; snippet: string }[]
   'agent:confirm': (input: { requestId: string; ok: boolean }) => void
   'artifact:showInFolder': (input: { path: string }) => void
+  'artifact:read': (input: { path: string }) => ArtifactReadResult
   'project:list': () => ProjectRow[]
   'project:create': (input: { name: string; path: string }) => number
   'project:delete': (input: { id: number }) => void
@@ -423,6 +458,29 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
     },
     'artifact:showInFolder': ({ path }) => {
       if (typeof path === 'string' && path.length > 0) shell.showItemInFolder(path)
+    },
+    // 产物预览读取(架构设计 §3.5):安全边界与 workspace:listFiles 同源——只读主进程组装的
+    // 目录(全部项目目录 + 可访问目录),复用 isAllowed 路径校验,禁止新写安全逻辑;
+    // 大小上限按种类(文本 1MB/图片 5MB),其他类型不读内容只报 kind
+    'artifact:read': ({ path }) => {
+      if (typeof path !== 'string' || path.length === 0) throw new Error('无效的产物路径')
+      const dirs = [...(deps.listProjectPaths?.() ?? []), ...(deps.listAllowedDirs?.() ?? [])]
+      if (!isAllowed(path, dirs)) throw new Error('路径不在允许目录内')
+      if (!existsSync(path)) throw new Error('文件不存在或不可读')
+      const kind = artifactPreviewKind(path)
+      if (kind === 'image') {
+        const st = statSync(path)
+        if (st.size > PREVIEW_IMAGE_LIMIT) throw new Error('文件超过 5MB 预览大小限制')
+        const ext = path.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ?? 'png'
+        const mime = PREVIEW_IMAGE_MIME[ext] ?? 'image/png'
+        return { kind, dataUrl: `data:${mime};base64,${readFileSync(path).toString('base64')}` }
+      }
+      if (kind === 'html' || kind === 'md' || kind === 'text') {
+        const st = statSync(path)
+        if (st.size > PREVIEW_TEXT_LIMIT) throw new Error('文件超过 1MB 预览大小限制')
+        return { kind, content: readFileSync(path, 'utf8') }
+      }
+      return { kind: 'other' }
     },
   }
 }

@@ -552,6 +552,68 @@ describe('workspace AGENTS.md injection', () => {
   })
 })
 
+describe('artifact:read', () => {
+  it('returns markdown content for in-bounds .md files', () => {
+    const { deps } = makeDeps()
+    const dir = mkdtempSync(join(tmpdir(), 'picoaide-art-'))
+    const file = join(dir, 'report.md')
+    writeFileSync(file, '# hello')
+    deps.listAllowedDirs = () => [dir]
+    const handlers = buildAgentHandlers(deps)
+    expect(handlers['artifact:read']({ path: file })).toEqual({ kind: 'md', content: '# hello' })
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('returns image dataUrl for image files', () => {
+    const { deps } = makeDeps()
+    const dir = mkdtempSync(join(tmpdir(), 'picoaide-art-'))
+    const file = join(dir, 'pic.png')
+    writeFileSync(file, Buffer.from('89504e470d0a1a0a', 'hex'))
+    deps.listAllowedDirs = () => [dir]
+    const handlers = buildAgentHandlers(deps)
+    const r = handlers['artifact:read']({ path: file })
+    expect(r.kind).toBe('image')
+    expect((r as { dataUrl: string }).dataUrl).toMatch(/^data:image\/png;base64,/)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('rejects out-of-bounds paths (system files and siblings)', () => {
+    const { deps } = makeDeps()
+    const dir = mkdtempSync(join(tmpdir(), 'picoaide-art-'))
+    const outside = mkdtempSync(join(tmpdir(), 'picoaide-art-out-'))
+    const file = join(outside, 'leak.txt')
+    writeFileSync(file, 'secret')
+    deps.listAllowedDirs = () => [dir]
+    const handlers = buildAgentHandlers(deps)
+    expect(() => handlers['artifact:read']({ path: file })).toThrow(/允许目录/)
+    expect(() => handlers['artifact:read']({ path: '/etc/passwd' })).toThrow(/允许目录/)
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(outside, { recursive: true, force: true })
+  })
+
+  it('rejects text files over 1MB and image files over 5MB', () => {
+    const { deps } = makeDeps()
+    const dir = mkdtempSync(join(tmpdir(), 'picoaide-art-'))
+    const big = join(dir, 'big.md')
+    writeFileSync(big, 'x'.repeat(1024 * 1024 + 1))
+    deps.listAllowedDirs = () => [dir]
+    const handlers = buildAgentHandlers(deps)
+    expect(() => handlers['artifact:read']({ path: big })).toThrow(/大小/)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('returns kind other for unsupported extensions', () => {
+    const { deps } = makeDeps()
+    const dir = mkdtempSync(join(tmpdir(), 'picoaide-art-'))
+    const file = join(dir, 'a.docx')
+    writeFileSync(file, 'x')
+    deps.listAllowedDirs = () => [dir]
+    const handlers = buildAgentHandlers(deps)
+    expect(handlers['artifact:read']({ path: file })).toEqual({ kind: 'other' })
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
 describe('chat:continue / chat:approvePlan / chat:listRunning / artifacts', () => {
   it('chat:continue replays the last user message and finishes done', async () => {
     const { deps, store, sent } = makeDeps('text')

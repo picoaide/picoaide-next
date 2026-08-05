@@ -87,6 +87,8 @@ interface ChatState {
   selectConversation: (id: number) => Promise<void>
   deleteConversation: (id: number) => Promise<void>
   sendMessage: (content: string, attachments?: AttachmentInput[]) => Promise<boolean>
+  // 产物回灌(4-A):把 artifact 路径拼成用户消息"继续修改",复用 sendMessage 全流程
+  requestEditArtifact: (path: string) => Promise<boolean>
   continueConversation: (id: number) => Promise<void>
   approvePlan: (id: number, ok: boolean) => Promise<void>
   cancel: () => Promise<void>
@@ -376,6 +378,9 @@ export const useChatStore = create<ChatState>((set, get) => {
   },
 
   setMode: (m) => set({ mode: m }),
+
+  requestEditArtifact: (path) =>
+    get().sendMessage(`请继续修改文件 ${path},基于当前内容继续修改`),
 
   // 消息编辑:改内容 + 截断重跑;UI 先展示"正在重新生成"状态,完成后从 DB 重载
   editMessage: async (messageId, content) => {

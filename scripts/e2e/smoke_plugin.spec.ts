@@ -27,8 +27,9 @@ const PAGE_HTML = `<!doctype html><html><head><title>PicoAide Smoke</title></hea
 <body>
   <h1>smoke</h1>
   <button id="btn" onclick="document.title='clicked!'">go</button>
-  <input id="input" oninput="document.getElementById('echo').textContent=this.value">
+  <input id="input" placeholder="search" oninput="document.getElementById('echo').textContent=this.value">
   <span id="echo"></span>
+  <a href="https://smoke.local/next">next</a>
 </body></html>`
 
 test('extension auto-connects and the bridge protocol round-trips', async () => {
@@ -74,8 +75,16 @@ test('extension auto-connects and the bridge protocol round-trips', async () => 
     const typed = await mock.request('browser.type', { selector: '#input', text: 'hello' })
     expect(typed.result).toBe(true)
     const content = await mock.request('browser.getContent')
-    expect(content.result).toContain('hello')
-    expect(content.result).toContain('smoke')
+    // getContent 默认返回结构化语义快照(省 token):标题/按钮/输入框(placeholder+value)/链接
+    expect(content.result).toContain('[H1] smoke')
+    expect(content.result).toContain('[BUTTON] go')
+    expect(content.result).toContain('[INPUT:text] placeholder="search"')
+    expect(content.result).toContain('value="hello"')
+    expect(content.result).toContain('[LINK] next https://smoke.local/next')
+    // mode:'text' 兼容旧行为:返回原始 innerText
+    const raw = await mock.request('browser.getContent', { mode: 'text' })
+    expect(raw.result).toContain('hello')
+    expect(raw.result).toContain('smoke')
 
     // 5. navigate via the bridge
     const nav = await mock.request('browser.navigate', { url: 'https://smoke.local/page2' })

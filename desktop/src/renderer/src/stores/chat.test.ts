@@ -77,6 +77,12 @@ beforeEach(() => {
 })
 
 describe('chat store', () => {
+  it('requestEditArtifact sends a message referencing the artifact path', async () => {
+    useChatStore.setState({ activeId: 5 })
+    await useChatStore.getState().requestEditArtifact('/w/report.md')
+    expect(fake.api.chatAsk).toHaveBeenCalledWith(5, expect.stringContaining('/w/report.md'), 'craft')
+  })
+
   it('newConversation creates a conversation and selects it', async () => {
     const id = (await useChatStore.getState().newConversation())!
     expect(id).toBe(1)

@@ -131,6 +131,115 @@ async function evaluate(expression) {
   return r.result && r.result.value
 }
 
+// 语义快照(纯函数,经 toString 序列化注入页面上下文执行,无外部依赖):
+// 输出 accessibility 式语义树文本,信息密度高、token 少,供 LLM 读取当前页结构。
+// 只走 body;限深 6、上限 300 个语义节点;≤6000 字符,超出尾部截断并注明;
+// 交互元素(按钮/输入框/链接)标注 placeholder/aria-label/value,可配合 browser_fill 语义定位。
+function semanticSnapshot() {
+  const BUDGET = 6000
+  const LIMIT = 300
+  const DEPTH = 6
+  const SCAN_CAP = 5000
+  const SKIP = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, TEMPLATE: 1, SVG: 1, IFRAME: 1, HEAD: 1, TITLE: 1, META: 1, LINK: 1, BR: 1, HR: 1, CANVAS: 1, VIDEO: 1, AUDIO: 1, EMBED: 1, OBJECT: 1, SOURCE: 1, TRACK: 1 }
+  const LEAF = { A: 1, BUTTON: 1, INPUT: 1, TEXTAREA: 1, SELECT: 1, IMG: 1, LI: 1, TR: 1 }
+  const lines = []
+  const seen = {}
+  let chars = 0
+  let emitted = 0
+  let omitted = 0
+  let scanned = 0
+  const cap = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
+  const text = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim()
+  const esc = (s) => s.replace(/"/g, '&quot;')
+  const emit = (s) => {
+    if (seen[s]) return
+    seen[s] = true
+    if (chars >= BUDGET) { omitted++; return }
+    chars += s.length + 1
+    lines.push(s)
+  }
+  const walk = (node, depth) => {
+    if (!node || node.nodeType !== 1 || depth > DEPTH) return
+    if (++scanned > SCAN_CAP) return
+    const tag = node.tagName
+    if (SKIP[tag]) return
+    let line = null
+    const h = tag.match(/^H([1-6])$/)
+    if (h) {
+      const t = text(node)
+      if (t) line = '[H' + h[1] + '] ' + cap(t, 120)
+    } else if (tag === 'A') {
+      let t = text(node)
+      if (!t) {
+        const img = node.querySelector('img')
+        t = (img && img.getAttribute('alt')) || ''
+      }
+      let href = node.getAttribute('href') || ''
+      if (href.indexOf('javascript:') === 0) href = ''
+      if (t || href) line = '[LINK] ' + (t ? cap(t, 100) + ' ' : '') + cap(href, 80)
+    } else if (tag === 'BUTTON') {
+      const t = text(node) || node.getAttribute('aria-label') || node.value || ''
+      if (t) line = '[BUTTON] ' + cap(t, 100)
+    } else if (tag === 'INPUT') {
+      const type = node.type || 'text'
+      const attrs = []
+      if (node.placeholder) attrs.push('placeholder="' + esc(cap(node.placeholder, 50)) + '"')
+      const al = node.getAttribute('aria-label')
+      if (al) attrs.push('aria-label="' + esc(cap(al, 50)) + '"')
+      const v = node.value
+      if (v !== undefined && v !== null && v !== '' && /^(text|search|email|password|number|tel|url|date|time)$/.test(type))
+        attrs.push('value="' + esc(cap(String(v), 40)) + '"')
+      line = '[INPUT:' + type + ']' + (attrs.length ? ' ' + attrs.join(' ') : '')
+    } else if (tag === 'TEXTAREA') {
+      const al = node.placeholder || node.getAttribute('aria-label') || ''
+      line = '[TEXTAREA]' + (al ? ' placeholder="' + esc(cap(al, 50)) + '"' : '')
+    } else if (tag === 'SELECT') {
+      const al = node.getAttribute('aria-label') || ''
+      const so = node.selectedOptions
+      let sel = ''
+      if (so && so.length) sel = cap((so[0].textContent || '').trim(), 30)
+      line = '[SELECT]' + (al ? ' aria-label="' + esc(cap(al, 50)) + '"' : '') + (sel ? ' selected="' + esc(sel) + '"' : '')
+    } else if (tag === 'IMG') {
+      const alt = node.getAttribute('alt') || ''
+      if (alt) line = '[IMG] ' + cap(alt, 120)
+    } else if (tag === 'LI') {
+      const t = text(node)
+      if (t) line = '[LI] ' + cap(t, 120)
+    } else if (tag === 'TR') {
+      const cells = []
+      for (let i = 0; i < node.children.length; i++) {
+        const c = node.children[i]
+        if (c.tagName === 'TD' || c.tagName === 'TH') cells.push(cap(text(c), 40))
+      }
+      if (cells.length) line = '[ROW] ' + cells.join(' | ')
+    } else if (tag === 'TABLE') {
+      line = '[TABLE]'
+    } else {
+      let t = ''
+      for (let i = 0; i < node.childNodes.length; i++) {
+        if (node.childNodes[i].nodeType === 3) t += node.childNodes[i].nodeValue
+      }
+      t = t.replace(/\s+/g, ' ').trim()
+      if (t.length > 15) line = '[TEXT] ' + cap(t, 200)
+    }
+    if (line) {
+      if (emitted >= LIMIT) { omitted++; return }
+      emitted++
+      emit(line)
+    }
+    if (LEAF[tag] || h) return
+    const kids = node.childNodes
+    for (let i = 0; i < kids.length; i++) walk(kids[i], depth + 1)
+  }
+  try {
+    walk(document.body, 0)
+  } catch (e) {
+    lines.push('[snapshot error] ' + cap(String((e && e.message) || e), 80))
+  }
+  if (omitted > 0) lines.push('[snapshot truncated: ' + omitted + ' nodes omitted]')
+  return lines.join('\n')
+}
+
 const q = (selector) => JSON.stringify(selector)
 
 // 语义定位(纯函数,经 toString 序列化注入页面上下文执行):
@@ -188,7 +297,12 @@ async function dispatch(method, params) {
       return { url: tab.url, title: tab.title }
     }
     case 'browser.getContent':
-      return evaluate("document.body ? document.body.innerText.slice(0, 200000) : ''")
+      // 默认返回语义快照(结构化、省 token);mode:'text' 兼容旧行为返回原始 innerText
+      return evaluate(
+        params.mode === 'text'
+          ? "document.body ? document.body.innerText.slice(0, 200000) : ''"
+          : `(() => { try { return (${semanticSnapshot.toString()})() } catch (e) { return '[snapshot error] ' + String((e && e.message) || e).slice(0, 100) } })()`,
+      )
     case 'browser.click':
       return evaluate(
         `(() => { const el = document.querySelector(${q(params.selector)}); if (!el) throw new Error('元素未找到: ${q(params.selector)}'); el.click(); return true })()`,

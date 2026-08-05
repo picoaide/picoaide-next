@@ -24,7 +24,8 @@ export function createBrowserTools(opts: { port?: number } = {}): Record<string,
       execute: async () => call('browser.tabInfo')({}),
     },
     browser_get_content: {
-      description: '读取浏览器当前页可见文本(已去除 script/style;需浏览器插件已连接)',
+      description:
+        '读取浏览器当前页的结构化语义快照(标题/链接/按钮/输入框含 placeholder 与 aria-label/图片 alt/列表/表格行/正文段落);输入框可用其 placeholder 或 aria-label 配合 browser_fill/browser_select 语义定位(需浏览器插件已连接)',
       inputSchema: z.object({}),
       execute: async () => call('browser.getContent')({}),
     },
