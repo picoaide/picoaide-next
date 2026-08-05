@@ -116,12 +116,30 @@
 
 **验证**:make check EXIT 0;505 passed | 2 skipped;已 push
 
-## Round 7 计划(待执行)
+## Round 7(2026-08-06):知识库可写 + webadmin/运维完善
 
-服务端剩余项:
-- ③ 知识库 revoke+编辑接口(高)
-- ④ webadmin 危险操作确认+用户搜索(中)
-- ⑤ 优雅退出+healthz DB Ping+版本号(低)
+**实施**:
+1. `89286db` feat: knowledge revoke and document edit
+   - DELETE /api/admin/kb/folders/:id/grant(与 PUT grant 对称)+ GET grants;RevokeFolderUser/Group(幂等)+ ListKBFolderGrants;撤销即刻生效(查询时校验)+ kb_revoke 审计
+   - PUT /api/admin/kb/documents/:id(标题必填/≤1MB)+ GET 取内容;UpdateKBDocument 重算 size,FTS 由 kb_au trigger 重索引(零迁移)+ kb_update 审计
+   - webadmin 文档编辑对话框(新 textarea 组件)+ 授权列表带撤销
+2. `e203f66` feat: webadmin UX and ops primitives
+   - 优雅退出(signal.NotifyContext SIGINT/SIGTERM→Shutdown 10s);-version flag(ldflags 注入,默认 dev);/healthz 加 db.PingContext(3s,DB 挂 503)
+   - Users 搜索(?q= LIKE 过滤);Knowledge 分页(20/页);删除确认补齐(商城下架 MCP/技能、网关删模型);新增 /audit 审计页(kb 操作,分页)
+   - 测试:users 搜索/KB 分页与审计 HTTP 层/healthz 503
+
+**验证**:make check EXIT 0;505 passed | 2 skipped;已 push(e203f66)
+- 注意:两子代理并行曾发生提交交叉事故,已重建历史(89286db 只含 A 工作,e203f66 只含 B 工作,树无重叠),已核验
+
+## Round 8 计划(待执行)
+
+调研剩余项盘点:
+- 中高:文档技能包(pdf 表格/xlsx;沙盒 python 依赖需评估,可选 JS 方案)
+- 中:知识库上传异步化(差距 #7:大文件同步阻塞;扫描版 PDF OCR)
+- 低:技能包签名/checksum 验签(差距 #5)
+- 低:密码策略最小长度(差距 #4)
+- 客户端与服务端联调冒烟(完整链路:登录→bootstrap→对话→浏览器→artifact;此前各轮分域验证,需要一次端到端)
+- 下一轮应评估"是否已达完善标准"并给出收尾结论
 
 ## 验证基线(每轮后更新)
 
