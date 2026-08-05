@@ -12,6 +12,20 @@ import (
 // real documents are far below 1MB of plain text).
 const maxKBContent = 1 << 20
 
+// UpdateDocument overwrites a document's title/content (content type kept),
+// enforcing the same size cap as IndexDocument. The FTS index is re-synced by
+// the kb_au trigger inside the store update.
+func UpdateDocument(db *sql.DB, id int64, title, content string) error {
+	if len(content) > maxKBContent {
+		return errors.New(fmt.Sprintf("文档内容超过上限 %d 字节", maxKBContent))
+	}
+	doc, err := serverstore.GetKBDocument(db, id)
+	if err != nil {
+		return err
+	}
+	return serverstore.UpdateKBDocument(db, id, title, content, doc.ContentType)
+}
+
 // IndexDocument stores a document into the knowledge base, recording the
 // extracted text length as its size. txt/md text is accepted as-is; docx/pdf
 // extraction happens in extract.go.

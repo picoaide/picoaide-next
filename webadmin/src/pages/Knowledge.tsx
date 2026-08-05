@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
+import { Textarea } from '../components/ui/textarea'
 import { cn } from '../lib/utils'
 
 interface Folder {
@@ -43,6 +44,8 @@ export default function Knowledge() {
   const [folders, setFolders] = useState<Folder[]>([])
   const [selected, setSelected] = useState(0)
   const [docs, setDocs] = useState<Document[]>([])
+  const [docTotal, setDocTotal] = useState(0)
+  const [docPage, setDocPage] = useState(1)
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<SearchHit[]>([])
   const [error, setError] = useState('')
@@ -56,6 +59,12 @@ export default function Knowledge() {
   const [grantDialog, setGrantDialog] = useState(false)
   const [grantFolder, setGrantFolder] = useState<Folder | null>(null)
   const [grantTarget, setGrantTarget] = useState('')
+  const [grantUsers, setGrantUsers] = useState<string[]>([])
+  const [grantGroups, setGrantGroups] = useState<string[]>([])
+  const [editDialog, setEditDialog] = useState(false)
+  const [editId, setEditId] = useState(0)
+  const [editTitle, setEditTitle] = useState('')
+  const [editContent, setEditContent] = useState('')
 
   const loadFolders = useCallback(async () => {
     try {
@@ -130,6 +139,30 @@ export default function Knowledge() {
     }
   }
 
+  async function loadGrants(folderId: number) {
+    try {
+      const data = await request(`/api/admin/kb/folders/${folderId}/grants`)
+      setGrantUsers(data.users ?? [])
+      setGrantGroups(data.groups ?? [])
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
+  async function revoke(target: string, isGroup: boolean) {
+    if (!grantFolder) return
+    if (!window.confirm(`撤销「${target}」对「${grantFolder.name}」的授权?`)) return
+    try {
+      await request(`/api/admin/kb/folders/${grantFolder.id}/grant`, {
+        method: 'DELETE',
+        body: JSON.stringify(isGroup ? { group: target } : { username: target }),
+      })
+      loadGrants(grantFolder.id)
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
   async function grant() {
     if (!grantFolder || !grantTarget.trim()) return
     const isGroup = grantTarget.trim().startsWith('@')
@@ -138,8 +171,35 @@ export default function Knowledge() {
         method: 'PUT',
         body: JSON.stringify(isGroup ? { group: grantTarget.trim().slice(1) } : { username: grantTarget.trim() }),
       })
-      setGrantDialog(false)
       setGrantTarget('')
+      loadGrants(grantFolder.id)
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
+  async function openEdit(id: number, title: string) {
+    try {
+      const data = await request(`/api/admin/kb/documents/${id}`)
+      setEditId(id)
+      setEditTitle(title)
+      setEditContent(data.doc.content ?? '')
+      setEditDialog(true)
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
+  async function saveEdit() {
+    if (!editTitle.trim()) return
+    try {
+      await request(`/api/admin/kb/documents/${editId}`, {
+        method: 'PUT',
+        body: JSON.stringify({ title: editTitle, content: editContent }),
+      })
+      setEditDialog(false)
+      if (searching) doSearch()
+      loadDocs()
     } catch (err: any) {
       setError(err.message)
     }
@@ -178,6 +238,7 @@ export default function Knowledge() {
                       onClick={() => {
                         setGrantFolder(f)
                         setGrantTarget('')
+                        loadGrants(f.id)
                         setGrantDialog(true)
                       }}
                     >
@@ -228,7 +289,10 @@ export default function Knowledge() {
                       <TableCell className="text-muted-foreground">{fmtSize(h.content.length)}</TableCell>
                       <TableCell />
                       <TableCell className="text-right">
-                        <Button size="sm" variant="destructive" onClick={() => deleteDoc(h.id, h.title)}>删除</Button>
+                        <div className="flex justify-end gap-2">
+                          <Button size="sm" variant="outline" onClick={() => openEdit(h.id, h.title)}>编辑</Button>
+                          <Button size="sm" variant="destructive" onClick={() => deleteDoc(h.id, h.title)}>删除</Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))
@@ -239,7 +303,10 @@ export default function Knowledge() {
                       <TableCell>{fmtSize(d.size)}</TableCell>
                       <TableCell>{d.created_by}</TableCell>
                       <TableCell className="text-right">
-                        <Button size="sm" variant="destructive" onClick={() => deleteDoc(d.id, d.title)}>删除</Button>
+                        <div className="flex justify-end gap-2">
+                          <Button size="sm" variant="outline" onClick={() => openEdit(d.id, d.title)}>编辑</Button>
+                          <Button size="sm" variant="destructive" onClick={() => deleteDoc(d.id, d.title)}>删除</Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -299,11 +366,44 @@ export default function Knowledge() {
         <DialogContent>
           <DialogHeader><DialogTitle>授权文件夹「{grantFolder?.name}」</DialogTitle></DialogHeader>
           <div className="space-y-3">
+            {grantUsers.length + grantGroups.length > 0 && (
+              <div className="space-y-2 rounded-md border p-3">
+                {grantUsers.map((u) => (
+                  <div key={`u${u}`} className="flex items-center justify-between text-sm">
+                    <Badge variant="secondary">{u}</Badge>
+                    <Button size="sm" variant="ghost" onClick={() => revoke(u, false)}>撤销</Button>
+                  </div>
+                ))}
+                {grantGroups.map((g) => (
+                  <div key={`g${g}`} className="flex items-center justify-between text-sm">
+                    <Badge variant="secondary">@{g}</Badge>
+                    <Button size="sm" variant="ghost" onClick={() => revoke(g, true)}>撤销</Button>
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="space-y-1">
               <Label>用户名或组(组名以 @ 开头,如 @研发组)</Label>
               <Input value={grantTarget} onChange={(e) => setGrantTarget(e.target.value)} />
             </div>
             <Button className="w-full" disabled={!grantTarget.trim()} onClick={grant}>授权</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={editDialog} onOpenChange={setEditDialog}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>编辑文档</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label>标题</Label>
+              <Input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label>内容</Label>
+              <Textarea className="min-h-56" value={editContent} onChange={(e) => setEditContent(e.target.value)} />
+            </div>
+            <Button className="w-full" disabled={!editTitle.trim()} onClick={saveEdit}>保存</Button>
           </div>
         </DialogContent>
       </Dialog>

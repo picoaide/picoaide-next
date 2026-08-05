@@ -100,6 +100,89 @@ func TestKBPermissions(t *testing.T) {
 	}
 }
 
+func TestKBRevoke(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	fid, err := CreateKBFolder(db, "team", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := GrantFolderUser(db, fid, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := GrantFolderGroup(db, fid, "devs"); err != nil {
+		t.Fatal(err)
+	}
+	users, groups, err := ListKBFolderGrants(db, fid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 1 || users[0] != "alice" || len(groups) != 1 || groups[0] != "devs" {
+		t.Fatalf("grants = %v %v", users, groups)
+	}
+
+	// revoke user grant: permission check must drop the folder
+	if err := RevokeFolderUser(db, fid, "alice"); err != nil {
+		t.Fatalf("RevokeFolderUser: %v", err)
+	}
+	ids, err := GetAccessibleFolderIDs(db, "alice", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ids {
+		if id == fid {
+			t.Fatal("folder still accessible after revoke")
+		}
+	}
+	// idempotent: revoking again (or a non-existent grant) is not an error
+	if err := RevokeFolderUser(db, fid, "alice"); err != nil {
+		t.Fatalf("RevokeFolderUser twice: %v", err)
+	}
+	if err := RevokeFolderUser(db, fid, "nobody"); err != nil {
+		t.Fatalf("RevokeFolderUser nonexistent: %v", err)
+	}
+
+	// group revoke
+	if err := RevokeFolderGroup(db, fid, "devs"); err != nil {
+		t.Fatalf("RevokeFolderGroup: %v", err)
+	}
+	if err := RevokeFolderGroup(db, fid, "devs"); err != nil {
+		t.Fatalf("RevokeFolderGroup twice: %v", err)
+	}
+	users, groups, _ = ListKBFolderGrants(db, fid)
+	if len(users) != 0 || len(groups) != 0 {
+		t.Fatalf("grants after revoke = %v %v, want empty", users, groups)
+	}
+}
+
+func TestKBUpdateDocument(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	did, err := CreateKBDocument(db, 0, "旧标题", "旧内容", "text", 0, "upload", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateKBDocument(db, did, "新标题", "新内容", "markdown"); err != nil {
+		t.Fatalf("UpdateKBDocument: %v", err)
+	}
+	doc, err := GetKBDocument(db, did)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Title != "新标题" || doc.Content != "新内容" || doc.ContentType != "markdown" || doc.Size != int64(len("新内容")) {
+		t.Fatalf("doc = %+v", doc)
+	}
+	if err := UpdateKBDocument(db, 99999, "x", "y", "text"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("UpdateKBDocument nonexistent: %v, want ErrNotFound", err)
+	}
+}
+
 func TestKBAuditLog(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()

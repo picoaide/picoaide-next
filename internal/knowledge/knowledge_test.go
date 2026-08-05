@@ -143,6 +143,62 @@ func TestSearchPagination(t *testing.T) {
 	}
 }
 
+func TestRevokeInvalidatesSearch(t *testing.T) {
+	db := kbDB(t)
+	aliceFolder, _ := seedDocs(t, db)
+
+	res, total, err := Search(db, "alice", nil, "知识", 1, 10)
+	if err != nil || total != 1 {
+		t.Fatalf("before revoke: total=%d err=%v", total, err)
+	}
+	if err := serverstore.RevokeFolderUser(db, aliceFolder, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	// permission is checked per query: revoke takes effect immediately
+	res, total, err = Search(db, "alice", nil, "知识", 1, 10)
+	if err != nil || total != 0 || len(res) != 0 {
+		t.Fatalf("after revoke: total=%d res=%v err=%v, want empty", total, res, err)
+	}
+}
+
+func TestUpdateDocumentReindexesFTS(t *testing.T) {
+	db := kbDB(t)
+	aliceFolder, _ := seedDocs(t, db)
+
+	id, err := IndexDocument(db, aliceFolder, "变更日志", "旧版本功能描述", "text", "upload", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, total, _ := Search(db, "alice", nil, "旧版本功能", 1, 10)
+	if total != 1 || res[0].ID != id {
+		t.Fatalf("before update: total=%d", total)
+	}
+
+	if err := UpdateDocument(db, id, "变更日志", "全新特性描述"); err != nil {
+		t.Fatal(err)
+	}
+	// new content searchable
+	res, total, _ = Search(db, "alice", nil, "全新特性", 1, 10)
+	if total != 1 || res[0].ID != id {
+		t.Fatalf("new content: total=%d res=%v", total, res)
+	}
+	// old content gone from the index
+	res, total, _ = Search(db, "alice", nil, "旧版本功能", 1, 10)
+	if total != 0 || len(res) != 0 {
+		t.Fatalf("old content still hits: total=%d res=%v", total, res)
+	}
+	// title update reflected
+	res, total, _ = Search(db, "alice", nil, "变更日志", 1, 10)
+	if total != 1 || res[0].Title != "变更日志" {
+		t.Fatalf("title search: total=%d res=%v", total, res)
+	}
+	// size recomputed
+	doc, err := serverstore.GetKBDocument(db, id)
+	if err != nil || doc.Size != int64(len("全新特性描述")) {
+		t.Fatalf("size = %d err=%v", doc.Size, err)
+	}
+}
+
 func TestIndexDocument(t *testing.T) {
 	db := kbDB(t)
 	aliceFolder, _ := seedDocs(t, db)

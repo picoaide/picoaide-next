@@ -168,6 +168,114 @@ func minimalDocx(t *testing.T, body string) []byte {
 	return buf.Bytes()
 }
 
+func TestAdminKBRevokeGrant(t *testing.T) {
+	r, db, hdr := kbAdminSetup(t)
+	defer db.Close()
+
+	w, out := kbReq(t, r, "POST", "/api/admin/kb/folders", `{"name":"产品文档"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create folder: %d", w.Code)
+	}
+	folderID := int64(out["folder"].(map[string]any)["id"].(float64))
+	if _, err := serverstore.CreateUserWithPassword(db, "alice", "pw"); err != nil {
+		t.Fatal(err)
+	}
+	if w, _ := kbReq(t, r, "PUT", fmt.Sprintf("/api/admin/kb/folders/%d/grant", folderID), `{"username":"alice"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("grant: %d", w.Code)
+	}
+	if w, _ := kbReq(t, r, "PUT", fmt.Sprintf("/api/admin/kb/folders/%d/grant", folderID), `{"group":"devs"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("grant group: %d", w.Code)
+	}
+	// list grants
+	w, out = kbReq(t, r, "GET", fmt.Sprintf("/api/admin/kb/folders/%d/grants", folderID), "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list grants: %d %s", w.Code, w.Body.String())
+	}
+	users := out["users"].([]any)
+	groups := out["groups"].([]any)
+	if len(users) != 1 || users[0] != "alice" || len(groups) != 1 || groups[0] != "devs" {
+		t.Fatalf("grants = %v %v", users, groups)
+	}
+	// revoke user grant → permission check drops the folder immediately
+	if w, _ := kbReq(t, r, "DELETE", fmt.Sprintf("/api/admin/kb/folders/%d/grant", folderID), `{"username":"alice"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("revoke: %d", w.Code)
+	}
+	accessible, err := serverstore.GetAccessibleFolderIDs(db, "alice", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range accessible {
+		if id == folderID {
+			t.Fatal("alice still has access after revoke")
+		}
+	}
+	// revoke again (idempotent) and missing body validation
+	if w, _ := kbReq(t, r, "DELETE", fmt.Sprintf("/api/admin/kb/folders/%d/grant", folderID), `{"username":"alice"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("revoke twice: %d", w.Code)
+	}
+	if w, _ := kbReq(t, r, "DELETE", fmt.Sprintf("/api/admin/kb/folders/%d/grant", folderID), `{}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("revoke empty body: %d", w.Code)
+	}
+	// revoke group grant
+	if w, _ := kbReq(t, r, "DELETE", fmt.Sprintf("/api/admin/kb/folders/%d/grant", folderID), `{"group":"devs"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("revoke group: %d", w.Code)
+	}
+	w, out = kbReq(t, r, "GET", fmt.Sprintf("/api/admin/kb/folders/%d/grants", folderID), "", hdr)
+	if len(out["users"].([]any)) != 0 || len(out["groups"].([]any)) != 0 {
+		t.Fatalf("grants after revoke = %v", out)
+	}
+}
+
+func TestAdminKBDocUpdate(t *testing.T) {
+	r, db, hdr := kbAdminSetup(t)
+	defer db.Close()
+
+	w, out := kbReq(t, r, "POST", "/api/admin/kb/upload",
+		`{"title":"变更日志","content":"旧版本功能描述","content_type":"text","folder_id":0}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("upload: %d %s", w.Code, w.Body.String())
+	}
+	docID := int64(out["doc"].(map[string]any)["id"].(float64))
+
+	// fetch single doc for editing
+	w, out = kbReq(t, r, "GET", fmt.Sprintf("/api/admin/kb/documents/%d", docID), "", hdr)
+	if w.Code != http.StatusOK || out["doc"].(map[string]any)["content"] != "旧版本功能描述" {
+		t.Fatalf("get doc: %d %s", w.Code, w.Body.String())
+	}
+	// update title + content
+	if w, _ := kbReq(t, r, "PUT", fmt.Sprintf("/api/admin/kb/documents/%d", docID),
+		`{"title":"更新日志","content":"全新特性描述"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("update: %d %s", w.Code, w.Body.String())
+	}
+	// new content searchable, old content gone, title updated
+	if w, out = kbReq(t, r, "GET", "/api/admin/kb/search?q=全新特性", "", hdr); w.Code != http.StatusOK || len(out["results"].([]any)) != 1 {
+		t.Fatalf("search new content: %d %s", w.Code, w.Body.String())
+	}
+	if w, out = kbReq(t, r, "GET", "/api/admin/kb/search?q=旧版本功能", "", hdr); w.Code != http.StatusOK || len(out["results"].([]any)) != 0 {
+		t.Fatalf("search old content: %d %s", w.Code, w.Body.String())
+	}
+	w, out = kbReq(t, r, "GET", "/api/admin/kb/search?q=更新日志", "", hdr)
+	if w.Code != http.StatusOK || len(out["results"].([]any)) != 1 || out["results"].([]any)[0].(map[string]any)["title"] != "更新日志" {
+		t.Fatalf("search title: %d %s", w.Code, w.Body.String())
+	}
+	// audit log entry written for the update
+	logs, err := serverstore.ListAuditLogs(db, 10)
+	if err != nil || len(logs) != 2 {
+		t.Fatalf("audit logs = %v %v", logs, err)
+	}
+	// validation: empty title, nonexistent id, oversized content
+	if w, _ := kbReq(t, r, "PUT", fmt.Sprintf("/api/admin/kb/documents/%d", docID), `{"title":"","content":"x"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("empty title: %d", w.Code)
+	}
+	if w, _ := kbReq(t, r, "PUT", "/api/admin/kb/documents/99999", `{"title":"t","content":"x"}`, hdr); w.Code != http.StatusNotFound {
+		t.Fatalf("nonexistent: %d", w.Code)
+	}
+	big := strings.Repeat("字", (1<<20)+1)
+	if w, _ := kbReq(t, r, "PUT", fmt.Sprintf("/api/admin/kb/documents/%d", docID), `{"title":"t","content":"`+big+`"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("oversized: %d", w.Code)
+	}
+}
+
 func TestAdminKBUploadMultipartTxt(t *testing.T) {
 	r, db, hdr := kbAdminSetup(t)
 	defer db.Close()

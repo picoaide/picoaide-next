@@ -126,6 +126,68 @@ func GrantFolderGroup(db *sql.DB, folderID int64, groupName string) error {
 	return err
 }
 
+// RevokeFolderUser removes a username grant (idempotent). Permission checks
+// run at query time, so revoking takes effect immediately.
+func RevokeFolderUser(db *sql.DB, folderID int64, username string) error {
+	_, err := db.Exec("DELETE FROM kb_folder_users WHERE folder_id = ? AND username = ?", folderID, username)
+	return err
+}
+
+// RevokeFolderGroup removes a group grant by name (idempotent).
+func RevokeFolderGroup(db *sql.DB, folderID int64, groupName string) error {
+	_, err := db.Exec("DELETE FROM kb_folder_groups WHERE folder_id = ? AND group_id = (SELECT id FROM groups WHERE name = ?)", folderID, groupName)
+	return err
+}
+
+// ListKBFolderGrants returns usernames and group names granted on a folder.
+func ListKBFolderGrants(db *sql.DB, folderID int64) (users, groups []string, err error) {
+	rows, err := db.Query("SELECT username FROM kb_folder_users WHERE folder_id = ? ORDER BY username", folderID)
+	if err != nil {
+		return nil, nil, err
+	}
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		users = append(users, u)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	rows, err = db.Query(`SELECT g.name FROM kb_folder_groups kfg JOIN groups g ON g.id = kfg.group_id
+		WHERE kfg.folder_id = ? ORDER BY g.name`, folderID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var g string
+		if err := rows.Scan(&g); err != nil {
+			return nil, nil, err
+		}
+		groups = append(groups, g)
+	}
+	return users, groups, rows.Err()
+}
+
+// UpdateKBDocument overwrites title/content/content_type and recomputes size.
+// The FTS index is synced by trigger kb_au; ErrNotFound when id is missing.
+func UpdateKBDocument(db *sql.DB, id int64, title, content, contentType string) error {
+	res, err := db.Exec(`UPDATE kb_documents SET title = ?, content = ?, content_type = ?, size = ?
+		WHERE id = ?`, title, content, contentType, len(content), id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // GetAccessibleFolderIDs returns folder ids the user can access: direct user
 // grants, grants through the given groups, and always folder 0 (global root).
 func GetAccessibleFolderIDs(db *sql.DB, username string, groups []string) ([]int64, error) {

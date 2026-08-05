@@ -22,7 +22,11 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	g.GET("/folders", func(c *gin.Context) { listFolders(c, db) })
 	g.GET("/documents", func(c *gin.Context) { listDocuments(c, db) })
 	g.DELETE("/documents/:id", func(c *gin.Context) { deleteDoc(c, db) })
+	g.PUT("/documents/:id", func(c *gin.Context) { updateDoc(c, db) })
+	g.GET("/documents/:id", func(c *gin.Context) { getDoc(c, db) })
 	g.PUT("/folders/:id/grant", func(c *gin.Context) { grantFolder(c, db) })
+	g.DELETE("/folders/:id/grant", func(c *gin.Context) { revokeGrant(c, db) })
+	g.GET("/folders/:id/grants", func(c *gin.Context) { listGrants(c, db) })
 	g.GET("/search", func(c *gin.Context) { search(c, db) })
 }
 
@@ -180,6 +184,112 @@ func grantFolder(c *gin.Context, db *sql.DB) {
 			return
 		}
 	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func getDoc(c *gin.Context, db *sql.DB) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
+		return
+	}
+	doc, err := serverstore.GetKBDocument(db, id)
+	if errors.Is(err, serverstore.ErrNotFound) {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "文档不存在")
+		return
+	}
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"doc": gin.H{"id": doc.ID, "folder_id": doc.FolderID, "title": doc.Title,
+		"content": doc.Content, "content_type": doc.ContentType}})
+}
+
+type kbUpdateReq struct {
+	Title   string `json:"title"`
+	Content string `json:"content"`
+}
+
+func updateDoc(c *gin.Context, db *sql.DB) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
+		return
+	}
+	var req kbUpdateReq
+	if err := c.ShouldBindJSON(&req); err != nil || req.Title == "" {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "标题必填")
+		return
+	}
+	if _, err := serverstore.GetKBDocument(db, id); errors.Is(err, serverstore.ErrNotFound) {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "文档不存在")
+		return
+	}
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if err := UpdateDocument(db, id, req.Title, req.Content); err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "文档不存在")
+		} else if strings.Contains(err.Error(), "上限") {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", err.Error())
+		} else {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+		}
+		return
+	}
+	_ = serverstore.AuditLog(db, adminUsername(c), "kb_update", "doc#"+strconv.FormatInt(id, 10)+" "+req.Title)
+	c.JSON(http.StatusOK, gin.H{"ok": true, "doc": gin.H{"id": id, "title": req.Title}})
+}
+
+func listGrants(c *gin.Context, db *sql.DB) {
+	folderID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
+		return
+	}
+	users, groups, err := serverstore.ListKBFolderGrants(db, folderID)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if users == nil {
+		users = []string{}
+	}
+	if groups == nil {
+		groups = []string{}
+	}
+	c.JSON(http.StatusOK, gin.H{"users": users, "groups": groups})
+}
+
+func revokeGrant(c *gin.Context, db *sql.DB) {
+	folderID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
+		return
+	}
+	var req struct {
+		Username string `json:"username"`
+		Group    string `json:"group"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || (req.Username == "" && req.Group == "") {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "username 或 group 必填")
+		return
+	}
+	if req.Username != "" {
+		if err := serverstore.RevokeFolderUser(db, folderID, req.Username); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "撤销失败")
+			return
+		}
+	} else {
+		if err := serverstore.RevokeFolderGroup(db, folderID, req.Group); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "撤销失败")
+			return
+		}
+	}
+	_ = serverstore.AuditLog(db, adminUsername(c), "kb_revoke", "folder#"+strconv.FormatInt(folderID, 10)+" "+req.Username+req.Group)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
