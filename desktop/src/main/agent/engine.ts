@@ -18,7 +18,7 @@ import { isAbsolute } from 'node:path'
 import type { AgentEvent } from './events'
 import { readOnlyTools, PLAN_MAX_STEPS } from './modes'
 import { PLAN_SYSTEM_NOTICE } from './prompt'
-import { artifactType } from './artifacts'
+import { artifactType, spillToolOutput, TOOL_OUTPUT_SPILL_THRESHOLD } from './artifacts'
 import { lastUserMessageIndex } from './continue'
 import { kbRead, kbSearch, kbList, kbUpload } from '../gateway/remote_mcp'
 import { isBoundaryError } from '../tools/paths'
@@ -75,7 +75,7 @@ export interface AppendMessageInput {
 
 // 与 src/main/store/* 模块签名一致(引擎自包含,不 import store)
 export interface StoreLike {
-  getConversation(id: number): { id: number; status: string } | null
+  getConversation(id: number): { id: number; status: string; workspace?: string } | null
   updateConversationStatus(id: number, status: ConversationStatus): void
   listMessages(conversationId: number): DBMessage[]
   appendMessage(input: AppendMessageInput): number
@@ -724,8 +724,11 @@ ${PLAN_SYSTEM_NOTICE}`
         const startedAt = Date.now()
         try {
           // 审批由 SDK toolApproval 配置处理(v7 原生,不再包一层)
-          const output = await this.runWithBoundaryGuide(id, name, input, options, execute)
-          this.maybeEmitArtifact(conversationId, output)
+          const raw = await this.runWithBoundaryGuide(id, name, input, options, execute)
+          this.maybeEmitArtifact(conversationId, raw)
+          // 大文本结果落盘替换:tool_end 事件、SDK tool-result part(进上下文/落库)同源,
+          // 都在此统一替换,避免上下文爆炸与 DB 膨胀
+          const output = this.spillForContext(conversationId, id, raw)
           this.emitEvent({ type: 'tool_end', data: { id, name, output, duration_ms: Date.now() - startedAt } })
           return output
         } catch (err) {
@@ -842,6 +845,19 @@ ${PLAN_SYSTEM_NOTICE}`
     return out
   }
 
+  // 大文本工具结果落盘替换(架构设计 §3.5):值超过阈值 → 写入会话 workspace 下
+  // tool-outputs/ 文件,返回短引用+摘要;无 workspace(空串/会话已删)→ 保持原样。
+  // 只处理文本输出(string 或 {type:'text',value}),不改 tool-error 路径。
+  private spillForContext(conversationId: number | undefined, toolCallId: string, output: unknown): unknown {
+    const value = textOutputValue(output)
+    if (value === null || value.length <= TOOL_OUTPUT_SPILL_THRESHOLD) return output
+    const workspace = conversationId !== undefined ? this.deps.store?.getConversation(conversationId)?.workspace : undefined
+    if (!workspace || workspace.trim().length === 0) return output
+    const { path: file, summary } = spillToolOutput(workspace, toolCallId, value)
+    const ref = `[工具输出过长(${value.length} 字符),已保存至 ${file}。摘要: ${summary}...]`
+    return typeof output === 'string' ? ref : { ...(output as object), value: ref }
+  }
+
   // 产物提取:工具结果含绝对路径 {path, size?} → artifact 事件 + artifacts 表落库;缺 path/相对路径 → 静默跳过
   // 字符串结果(file_write 风格 "已写入 <abs>")也提取首个绝对路径,否则产物面板永远为空
   private maybeEmitArtifact(conversationId: number | undefined, output: unknown): void {
@@ -866,6 +882,16 @@ ${PLAN_SYSTEM_NOTICE}`
       this.deps.store.addArtifact?.({ conversationId, path, type, size })
     }
   }
+}
+
+// 工具输出的文本值(string 原样;SDK 文本形态 {type:'text', value});非文本(JSON 对象等)→ null
+function textOutputValue(output: unknown): string | null {
+  if (typeof output === 'string') return output
+  if (typeof output === 'object' && output !== null) {
+    const rec = output as Record<string, unknown>
+    if (rec.type === 'text' && typeof rec.value === 'string') return rec.value
+  }
+  return null
 }
 
 function approvalTarget(toolName: string, input: unknown): string {

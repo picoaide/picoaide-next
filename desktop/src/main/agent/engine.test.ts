@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { tool } from 'ai'
 import { z } from 'zod'
 import type { LanguageModel, ModelMessage, Tool } from 'ai'
@@ -230,8 +233,8 @@ class MockProvider {
 }
 
 // 内存版 StoreLike:默认建好 id=1 的会话;测试可覆写方法制造"会话被删"等场景
-function makeStore() {
-  const conversations = new Map<number, { id: number; status: string }>()
+function makeStore(opts: { workspace?: string } = {}) {
+  const conversations = new Map<number, { id: number; status: string; workspace: string }>()
   const messages: Array<AppendMessageInput & { id: number }> = []
   const artifacts: Array<{ conversationId: number; path: string; type: string; size: number }> = []
   let nextId = 1
@@ -239,7 +242,7 @@ function makeStore() {
     artifacts,
     createConversation: (): number => {
       const id = nextId++
-      conversations.set(id, { id, status: 'done' })
+      conversations.set(id, { id, status: 'done', workspace: opts.workspace ?? '' })
       return id
     },
     getConversation: (id: number) => conversations.get(id) ?? null,
@@ -738,6 +741,60 @@ describe('AgentEngine craft (store-backed)', () => {
     engine.confirm(req0.data.request_id, true)
     await run
     expect(deletedPaths).toEqual(['/home/u/x.doc'])
+  })
+})
+
+describe('AgentEngine tool output spill', () => {
+  const tmpDirs: string[] = []
+  // 7000 字符 > 6000 阈值:摘要=前 400 字符(全部 A),正文全部 B
+  const BIG_TEXT = 'A'.repeat(400) + 'B'.repeat(6600)
+
+  const bigOutputTool = tool({
+    description: 'returns an oversized text output',
+    inputSchema: z.object({}),
+    execute: async () => BIG_TEXT,
+  })
+
+  afterEach(() => {
+    for (const d of tmpDirs) rmSync(d, { recursive: true, force: true })
+    tmpDirs.length = 0
+  })
+
+  it('spills oversized tool text output to the workspace file and feeds a reference back to the model', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'picoaide-spill-'))
+    tmpDirs.push(workspace)
+    const store = makeStore({ workspace })
+    const { mock, engine, events } = makeEngine('tool-call', {}, store, 'big_output')
+    await engine.craft({ conversationId: 1, content: 'run it', tools: { big_output: bigOutputTool }, highRiskTools: new Set() })
+    // 落盘:文件存在且内容完整(信息不丢)
+    const file = join(workspace, 'tool-outputs', 'call_1.txt')
+    expect(readFileSync(file, 'utf8')).toBe(BIG_TEXT)
+    // 上下文:后续模型调用收到引用+摘要,不含完整输出
+    const prompt = mock.prompts[1] as Array<{ role: string }>
+    const json = JSON.stringify(prompt)
+    expect(json).toContain('已保存至')
+    expect(json).toContain(BIG_TEXT.slice(0, 400))
+    expect(json).not.toContain('B'.repeat(100))
+    expect(eventsOf(events, 'done')).toHaveLength(1)
+  })
+
+  it('keeps small tool outputs in context and writes no spill file', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'picoaide-spill-'))
+    tmpDirs.push(workspace)
+    const store = makeStore({ workspace })
+    const { mock, engine } = makeEngine('tool-call', {}, store, 'file_read')
+    await engine.craft({ conversationId: 1, content: 'read', tools, highRiskTools: new Set() })
+    expect(existsSync(join(workspace, 'tool-outputs'))).toBe(false)
+    expect(JSON.stringify(mock.prompts[1])).toContain('contents of /home/u/x.doc')
+  })
+
+  it('skips spilling when the conversation has no workspace', async () => {
+    const store = makeStore({ workspace: '' })
+    const { mock, engine, events } = makeEngine('tool-call', {}, store, 'big_output')
+    await engine.craft({ conversationId: 1, content: 'run it', tools: { big_output: bigOutputTool }, highRiskTools: new Set() })
+    expect(eventsOf(events, 'done')).toHaveLength(1)
+    // 无目录可用:信息不丢原则让位于保持原样,完整输出照常进上下文
+    expect(JSON.stringify(mock.prompts[1])).toContain(BIG_TEXT)
   })
 })
 
