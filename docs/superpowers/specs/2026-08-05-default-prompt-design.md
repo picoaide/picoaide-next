@@ -29,7 +29,7 @@ desktop/src/main/agent/prompt.ts      # 新文件
   └── buildSystemPrompt(extra?)       # 拼接:核心段 + 技能指令注入段(可选)
 ```
 
-- `index.ts` 的 sysPrompt 改为调用 `buildSystemPrompt`(技能注入逻辑保留在调用方或移入)
+- `index.ts` 的 sysPrompt 改为调用 `buildSystemPrompt`,技能指令注入(现 loadInstalledSkillInstruction 逻辑)由调用方负责:读取后作为 extra 传入,读取失败传 undefined,拼装职责只在 prompt.ts
 - `engine.ts` 引用 prompt.ts 的 PLAN_SYSTEM_NOTICE,删除本地重复定义
 - 零配置原则不变:无用户配置入口,提示词随客户端包分发
 
