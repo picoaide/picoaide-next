@@ -30,6 +30,17 @@ const defaultRateLimit = 60
 // requests are a few hundred KB even with long context).
 const maxChatBody = 16 << 20
 
+// STREAM_IDLE_TIMEOUT is the max gap between upstream SSE chunks before the
+// stream is treated as hung and terminated.
+const STREAM_IDLE_TIMEOUT = 90 * time.Second
+
+// streamIdleTimeout is test-injectable, defaulting to STREAM_IDLE_TIMEOUT.
+var streamIdleTimeout = STREAM_IDLE_TIMEOUT
+
+// errStreamIdleTimeout is returned by readLineWithIdle when no upstream data
+// arrived within the idle window.
+var errStreamIdleTimeout = errors.New("upstream stream idle timeout")
+
 // API holds gateway dependencies.
 type API struct {
 	DB     *sql.DB
@@ -70,19 +81,19 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		return
 	}
 
-	up, err := MatchModel(a.DB, req.Model)
-	if errors.Is(err, serverstore.ErrNotFound) {
-		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "模型不存在或不可用")
-		return
-	}
+	ups, err := MatchModels(a.DB, req.Model)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "模型路由查询失败")
 		return
 	}
+	if len(ups) == 0 {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "模型不存在或不可用")
+		return
+	}
 
 	// 渠道参数注入:思考模式等;注入失败不阻塞请求(原样转发)
-	if up.Channel != "" {
-		if ch, ok := channels.Get(up.Channel); ok {
+	if ups[0].Channel != "" {
+		if ch, ok := channels.Get(ups[0].Channel); ok {
 			ov, rm := ch.RequestOverrides(req.Model)
 			if raw2, err := applyChannelOverrides(raw, ov, rm); err == nil {
 				raw = raw2
@@ -107,8 +118,17 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		}
 	}
 
-	resp, err := a.forward(c, up, raw, req.Stream)
-	if err != nil {
+	// 故障转移:按序尝试每个 provider(连接失败/5xx/首字节超时 → 下一个)。
+	// 单 provider 失败即返回,不重试(避免重复计费);4xx 由 forward 原样返回。
+	var resp *http.Response
+	for i := range ups {
+		resp, err = a.forward(c, &ups[i], raw, req.Stream)
+		if err == nil {
+			break
+		}
+		log.Printf("gateway: model %s provider %s failed: %v", req.Model, ups[i].Name, err)
+	}
+	if resp == nil {
 		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "上游服务不可用:"+err.Error())
 		return
 	}
@@ -196,35 +216,33 @@ func upstreamURL(base string) string {
 }
 
 // forward sends the raw body to the upstream, replacing Authorization with
-// the upstream key. Retries once on transport error only: a 5xx response may
-// have been partially processed/billed upstream, re-sending would double-bill.
+// the upstream key. It makes exactly one attempt: failover lives in the
+// caller's candidate loop, so a repeated call only happens on a different
+// provider (re-sending to the same one could double-bill). 4xx responses are
+// returned as-is (client error, no failover); connection errors, 5xx and
+// header timeouts return an error, which the caller treats as failover-eligible.
 func (a *API) forward(c *gin.Context, up *Upstream, raw []byte, stream bool) (*http.Response, error) {
 	url := upstreamURL(up.BaseURL)
 	client := a.client
 	if stream {
 		client = a.sse
 	}
-	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
-		req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, url, bytes.NewReader(raw))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+up.APIKey)
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if resp.StatusCode < 500 {
-			return resp, nil
-		}
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, url, bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+up.APIKey)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 500 {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
 		return nil, fmt.Errorf("upstream status %d", resp.StatusCode)
 	}
-	return nil, lastErr
+	return resp, nil
 }
 
 // serveJSON passes a non-stream upstream response through and records usage.
@@ -260,7 +278,7 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 	fl, _ := c.Writer.(http.Flusher)
 	br := bufio.NewReader(resp.Body)
 	for {
-		line, err := br.ReadString('\n')
+		line, err := readLineWithIdle(br, streamIdleTimeout)
 		if len(line) > 0 {
 			if s := strings.TrimSpace(line); strings.HasPrefix(s, "data:") {
 				if pt, ct, ok, perr := parseUsage([]byte(s)); perr != nil {
@@ -276,9 +294,42 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 				fl.Flush()
 			}
 		}
-		if err != nil { // EOF or client disconnect (request ctx canceled)
+		if err != nil { // EOF, client disconnect, or idle timeout
+			if errors.Is(err, errStreamIdleTimeout) {
+				log.Printf("gateway: stream idle timeout after %v, terminating", streamIdleTimeout)
+				fmt.Fprintf(c.Writer, "data: %s\n\n", `{"error":{"code":"UPSTREAM_IDLE_TIMEOUT","message":"上游响应空闲超时"}}`)
+				if fl != nil {
+					fl.Flush()
+				}
+			}
 			break
 		}
+	}
+}
+
+// readLineWithIdle reads a line, failing with errStreamIdleTimeout if no
+// bytes arrive within idle. A blocked read goroutine is released by the
+// caller's deferred resp.Body.Close() once this returns.
+func readLineWithIdle(br *bufio.Reader, idle time.Duration) (string, error) {
+	if idle <= 0 {
+		return br.ReadString('\n')
+	}
+	type lineRes struct {
+		line string
+		err  error
+	}
+	ch := make(chan lineRes, 1)
+	go func() {
+		l, e := br.ReadString('\n')
+		ch <- lineRes{l, e}
+	}()
+	timer := time.NewTimer(idle)
+	defer timer.Stop()
+	select {
+	case r := <-ch:
+		return r.line, r.err
+	case <-timer.C:
+		return "", errStreamIdleTimeout
 	}
 }
 
