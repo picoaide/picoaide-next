@@ -133,6 +133,54 @@ async function evaluate(expression) {
 
 const q = (selector) => JSON.stringify(selector)
 
+// 语义定位(纯函数,经 toString 序列化注入页面上下文执行):
+// 按 label[for=id] 文本/placeholder/aria-label 匹配表单元素,均失败回退 CSS selector。
+// 返回 (root) => element|null;与 cdp_server 的 browser.* 转发协议无关,便于将来单测。
+function locate({ label, placeholder, ariaLabel, selector }) {
+  const norm = (s) => (s || '').trim().toLowerCase()
+  return (root) => {
+    if (label || placeholder || ariaLabel) {
+      for (const el of root.querySelectorAll('input, textarea, select')) {
+        if (label && el.id) {
+          const labelEl = root.querySelector('label[for="' + el.id + '"]')
+          if (labelEl && norm(labelEl.textContent) === norm(label)) return el
+        }
+        if (placeholder && norm(el.getAttribute('placeholder')) === norm(placeholder)) return el
+        if (ariaLabel && norm(el.getAttribute('aria-label')) === norm(ariaLabel)) return el
+      }
+    }
+    return selector ? root.querySelector(selector) : null
+  }
+}
+
+// 单字段 selector 同时按 label/placeholder/aria-label 尝试(语义优先),失败回退 CSS 选择器
+const findExpr = (selector) =>
+  `(${locate.toString()})(${JSON.stringify({ label: selector, placeholder: selector, ariaLabel: selector, selector })})`
+
+// JS 弹窗(alert/confirm/prompt)统一拦截:弹窗会阻塞页面 JS,Agent 无法自行点掉;
+// browser.dialog 先武装 pendingDialogAction,弹窗一开即按 action 处理(未武装默认 dismiss 防阻塞页面)。
+let pendingDialogAction = null
+let pendingDialogResolve = null
+let dialogTimer = null
+
+chrome.debugger.onEvent.addListener((source, method) => {
+  if (method !== 'Page.javascriptDialogOpening') return
+  const action = pendingDialogAction || 'dismiss'
+  if (pendingDialogResolve) {
+    clearTimeout(dialogTimer)
+    const resolve = pendingDialogResolve
+    pendingDialogResolve = null
+    pendingDialogAction = null
+    resolve(action === 'accept' ? 'accepted' : 'dismissed')
+  }
+  chrome.debugger.sendCommand(
+    { tabId: source.tabId },
+    'Page.handleJavaScriptDialog',
+    { accept: action === 'accept' },
+    () => {},
+  )
+})
+
 async function dispatch(method, params) {
   switch (method) {
     case 'browser.tabInfo': {
@@ -170,6 +218,61 @@ async function dispatch(method, params) {
       return evaluate(
         `(() => { const fn = new Function(${q(String(params.code))}); const r = fn(); if (r === undefined) return null; try { return JSON.parse(JSON.stringify(r)); } catch { return String(r); } })()`,
       )
+    case 'browser.fill':
+      return evaluate(
+        `(() => {
+          const el = ${findExpr(params.selector)}(document);
+          if (!el) throw new Error('元素未找到: ${q(params.selector)}');
+          const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+          Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, ${q(params.value)});
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        })()`,
+      )
+    case 'browser.select':
+      return evaluate(
+        `(() => {
+          const el = ${findExpr(params.selector)}(document);
+          if (!el) throw new Error('元素未找到: ${q(params.selector)}');
+          const target = ${q(params.value)};
+          let index = -1;
+          for (const opt of el.options) {
+            if (opt.value === target || (opt.textContent || '').trim() === target) { index = opt.index; break; }
+          }
+          if (index === -1) throw new Error('选项未找到: ' + target);
+          el.selectedIndex = index;
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        })()`,
+      )
+    case 'browser.waitFor': {
+      const timeoutMs = Math.min(params.timeoutMs || 10000, 60000)
+      return evaluate(
+        `new Promise((resolve, reject) => {
+          const find = ${findExpr(params.selector)};
+          const deadline = Date.now() + ${timeoutMs};
+          const tick = () => {
+            if (find(document)) return resolve(true);
+            if (Date.now() > deadline) return reject(new Error('等待超时: ${q(params.selector)}'));
+            setTimeout(tick, 200);
+          };
+          tick();
+        })`,
+      )
+    }
+    case 'browser.dialog':
+      // 先确保活动标签已 attach 且 Page 域已启用(弹窗事件才能送达)
+      await cdp('Page.enable')
+      return new Promise((resolve) => {
+        pendingDialogAction = params.action === 'accept' ? 'accept' : 'dismiss'
+        pendingDialogResolve = resolve
+        dialogTimer = setTimeout(() => {
+          pendingDialogAction = null
+          pendingDialogResolve = null
+          resolve('no dialog')
+        }, 10000)
+      })
     default:
       throw new Error('未知方法: ' + method)
   }

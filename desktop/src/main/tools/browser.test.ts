@@ -11,6 +11,9 @@ describe('browser tool registration', () => {
       'browser_navigate',
       'browser_scroll',
       'browser_execute_js',
+      'browser_fill',
+      'browser_select',
+      'browser_dialog',
     ])
   })
 
@@ -18,6 +21,7 @@ describe('browser tool registration', () => {
     const tools = createBrowserTools()
     expect(tools.browser_tab_info.needsApproval).toBeUndefined()
     expect(tools.browser_get_content.needsApproval).toBeUndefined()
+    expect(tools.browser_wait_for.needsApproval).toBeUndefined()
   })
 
   it('operation tools are high risk via HIGH_RISK_TOOLS (not SDK needsApproval)', () => {
@@ -40,6 +44,7 @@ describe('browser tool execution', () => {
     const tools = createBrowserTools({ port })
     await expect(tools.browser_tab_info.execute!({}, {} as never)).rejects.toThrow('浏览器插件未连接')
     await expect(tools.browser_execute_js.execute!({ code: '1+1' }, {} as never)).rejects.toThrow('浏览器插件未连接')
+    await expect(tools.browser_fill.execute!({ selector: '#q', value: 'x' }, {} as never)).rejects.toThrow('浏览器插件未连接')
   })
 
   it('returns the plugin result on success', async () => {
@@ -58,6 +63,26 @@ describe('browser tool execution', () => {
     })
     const tools = createBrowserTools({ port: srv.port })
     await expect(tools.browser_tab_info.execute!({}, {} as never)).resolves.toEqual({ url: 'u', title: 't' })
+    ws.close()
+  })
+
+  it('forwards browser_fill to the plugin and returns its result', async () => {
+    const srv = await startCdpServer({ port: 0, adoptDelayMs: 50 })
+    servers.push(srv)
+    const ws = await new Promise<WebSocket>((resolve, reject) => {
+      const w = new WebSocket(`ws://127.0.0.1:${srv.port}`)
+      w.on('open', () => resolve(w))
+      w.on('error', reject)
+    })
+    await new Promise((r) => setTimeout(r, 80)) // 等接管
+    ws.on('message', (data: Buffer) => {
+      const msg = JSON.parse(data.toString()) as { id: number; method: string; params: unknown }
+      if (msg.method === 'browser.fill') ws.send(JSON.stringify({ id: msg.id, result: true }))
+    })
+    const tools = createBrowserTools({ port: srv.port })
+    await expect(
+      tools.browser_fill.execute!({ selector: '#q', value: 'hello' }, {} as never),
+    ).resolves.toBe(true)
     ws.close()
   })
 })

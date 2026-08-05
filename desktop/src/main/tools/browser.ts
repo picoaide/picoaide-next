@@ -10,6 +10,9 @@ export const HIGH_RISK_TOOLS: string[] = [
   'browser_navigate',
   'browser_scroll',
   'browser_execute_js',
+  'browser_fill',
+  'browser_select',
+  'browser_dialog',
 ]
 
 export function createBrowserTools(opts: { port?: number } = {}): Record<string, Tool> {
@@ -49,6 +52,29 @@ export function createBrowserTools(opts: { port?: number } = {}): Record<string,
       description: '在当前页面执行任意 JavaScript 代码(最高风险,需审批)',
       inputSchema: z.object({ code: z.string() }),
       execute: async (input: { code: string }) => call('browser.executeScript')(input),
+    },
+    browser_fill: {
+      description:
+        '向页面表单元素(输入框/文本域)填入值。selector 优先按语义定位(label 文本/placeholder/aria-label,忽略大小写),找不到才当作 CSS 选择器;兼容 React(触发 input/change 事件;高危,需审批)',
+      inputSchema: z.object({ selector: z.string(), value: z.string() }),
+      execute: async (input: { selector: string; value: string }) => call('browser.fill')(input),
+    },
+    browser_select: {
+      description:
+        '在页面下拉框(select)中选择与 value 或可见文本匹配的选项。selector 语义定位同 browser_fill(高危,需审批)',
+      inputSchema: z.object({ selector: z.string(), value: z.string() }),
+      execute: async (input: { selector: string; value: string }) => call('browser.select')(input),
+    },
+    browser_wait_for: {
+      description:
+        '等待页面出现匹配的元素(selector 语义定位同 browser_fill;timeoutMs 默认 10000,只读不审批)',
+      inputSchema: z.object({ selector: z.string(), timeoutMs: z.number().optional() }),
+      execute: async (input: { selector: string; timeoutMs?: number }) => call('browser.waitFor')(input),
+    },
+    browser_dialog: {
+      description: '处理浏览器 JS 弹窗(confirm/alert/prompt):action=accept 确认,action=dismiss 取消;最多等 10s(高危,需审批)',
+      inputSchema: z.object({ action: z.enum(['accept', 'dismiss']) }),
+      execute: async (input: { action: 'accept' | 'dismiss' }) => call('browser.dialog')(input),
     },
   }
 }
