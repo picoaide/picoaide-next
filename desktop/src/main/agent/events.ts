@@ -9,6 +9,7 @@ export type AgentEvent =
   | { type: 'tool_error'; conversationId: number; data: { id: string; name: string; error: string } }
   | { type: 'confirm_required'; conversationId: number; data: { request_id: string; tool_call_id: string; op: string; target: string; reason: string } }
   | { type: 'artifact'; conversationId: number; data: { path: string; type: string; size: number } }
+  | { type: 'context_usage'; conversationId: number; data: { chars: number; budget: number } }
   | { type: 'done'; conversationId: number; data: { usage?: { prompt_tokens: number; completion_tokens: number } } }
   | { type: 'canceled'; conversationId: number; data: { reason: string } }
   | { type: 'error'; conversationId: number; data: string }

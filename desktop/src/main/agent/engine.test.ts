@@ -7,7 +7,7 @@ import { streamText } from 'ai'
 import { z } from 'zod'
 import type { LanguageModel, ModelMessage, Tool } from 'ai'
 import { AgentEngine, createKbTools, fromModelMessage, historyMessages, sanitizeMessages, toModelMessage } from './engine'
-import { compactMessages } from './compact'
+import { compactMessages, CONTEXT_TOKEN_BUDGET } from './compact'
 import type { AppendMessageInput, DBMessage } from './engine'
 import type { AgentEvent } from './events'
 import { createGatewayModel } from './provider'
@@ -570,6 +570,21 @@ describe('AgentEngine craft (store-backed)', () => {
     const done = eventsOf(events, 'done')[0]
     // totalUsage 累计整个多步 run(两轮 10/5)
     expect(done).toEqual({ type: 'done', data: { usage: { prompt_tokens: 20, completion_tokens: 10 } } })
+  })
+
+  it('emits context_usage once per round with chars and budget', async () => {
+    const { events, engine } = makeEngine('tool-call', {}, makeStore(), 'file_read')
+    await engine.craft({ conversationId: 1, content: 'read the file', tools, highRiskTools: new Set() })
+    const usage = eventsOf(events, 'context_usage')
+    expect(usage).toHaveLength(2)
+    for (const ev of usage) {
+      expect(ev).toEqual({ type: 'context_usage', data: expect.objectContaining({ budget: CONTEXT_TOKEN_BUDGET }) })
+      expect((ev as { data: { chars: number } }).data.chars).toBeGreaterThan(0)
+    }
+    // 第二轮含工具结果,占用应大于第一轮
+    expect((usage[1] as { data: { chars: number } }).data.chars).toBeGreaterThan(
+      (usage[0] as { data: { chars: number } }).data.chars,
+    )
   })
 
   it('marks the conversation running before starting and persists the user message', async () => {

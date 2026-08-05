@@ -433,4 +433,12 @@ describe('chat store attachments', () => {
     expect(fake.api.chatAsk).not.toHaveBeenCalled()
     expect(useChatStore.getState().localError).toContain('5MB')
   })
+
+  it('context_usage event sets contextUsage; done clears it', () => {
+    useChatStore.setState({ activeId: 1 })
+    useChatStore.getState().onAgentEvent({ conversationId: 1, type: 'context_usage', data: { chars: 32_400, budget: 40_000 } })
+    expect(useChatStore.getState().contextUsage).toEqual({ chars: 32_400, budget: 40_000 })
+    useChatStore.getState().onAgentEvent({ conversationId: 1, type: 'done', data: {} })
+    expect(useChatStore.getState().contextUsage).toBeNull()
+  })
 })

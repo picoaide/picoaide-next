@@ -76,6 +76,8 @@ interface ChatState {
   // 最近一轮运行的工具步骤轨迹(tool_start/tool_end/tool_error 驱动);done 后清列表、保留计数
   runSteps: RunStep[]
   runStepCount: number
+  // 上下文占用(引擎每轮 context_usage 事件;done/canceled/error 清除)
+  contextUsage: { chars: number; budget: number } | null
   mode: Mode
   localError: string | null
   hasMoreMessages: boolean
@@ -123,7 +125,7 @@ export const useChatStore = create<ChatState>((set, get) => {
   async function runTask(label: string, fn: () => Promise<boolean>): Promise<boolean> {
     pendingDelta = ''
     runToken++
-    set({ streaming: true, streamingText: '', streamingReasoning: '', localError: null, runSteps: [], runStepCount: 0 })
+    set({ streaming: true, streamingText: '', streamingReasoning: '', localError: null, runSteps: [], runStepCount: 0, contextUsage: null })
     try {
       const ok = await fn()
       if (!ok) return false
@@ -160,6 +162,7 @@ export const useChatStore = create<ChatState>((set, get) => {
   toolCalls: [],
   runSteps: [],
   runStepCount: 0,
+  contextUsage: null,
   mode: 'craft',
   localError: null,
   hasMoreMessages: false,
@@ -177,7 +180,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       const id = await picoaide().chatNew({ mode: get().mode, projectId: get().activeProjectId })
       const [conversations, projects] = await Promise.all([picoaide().chatList(), picoaide().projectList()])
       pendingDelta = ''
-      set({ conversations, projects, activeId: id, messages: [], artifacts: [], streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], runSteps: [], runStepCount: 0, localError: null, hasMoreMessages: false, loadedTotal: 0 })
+      set({ conversations, projects, activeId: id, messages: [], artifacts: [], streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], runSteps: [], runStepCount: 0, contextUsage: null, localError: null, hasMoreMessages: false, loadedTotal: 0 })
       return id
     } finally {
       creatingConversation = false
@@ -244,6 +247,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       toolCalls: [],
       runSteps: [],
       runStepCount: 0,
+      contextUsage: null,
       localError: null,
     })
   },
@@ -272,7 +276,7 @@ export const useChatStore = create<ChatState>((set, get) => {
   deleteConversation: async (id) => {
     await picoaide().chatDelete(id)
     if (get().activeId === id) {
-      set({ activeId: null, messages: [], artifacts: [], streaming: false, streamingText: '', toolCalls: [], runSteps: [], runStepCount: 0 })
+      set({ activeId: null, messages: [], artifacts: [], streaming: false, streamingText: '', toolCalls: [], runSteps: [], runStepCount: 0, contextUsage: null })
     }
   },
 
@@ -371,7 +375,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     setTimeout(() => {
       const s = useChatStore.getState()
       if (runToken === token && s.streaming) {
-        useChatStore.setState({ streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], runSteps: [], runStepCount: 0 })
+        useChatStore.setState({ streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], runSteps: [], runStepCount: 0, contextUsage: null })
         useApprovalsStore.getState().clear()
       }
     }, CANCEL_FALLBACK_MS)
@@ -507,6 +511,9 @@ export const useChatStore = create<ChatState>((set, get) => {
           ),
         }))
         break
+      case 'context_usage':
+        set({ contextUsage: ev.data })
+        break
       case 'artifact':
         // 流式期间实时追加;最终以 done 后的 DB 重载为准(事件不含 conversationId)
         set((s) => ({
@@ -527,19 +534,19 @@ export const useChatStore = create<ChatState>((set, get) => {
         break
       case 'done':
         // 轨迹折叠为汇总行:保留步数,步骤列表清空(组件渲染"✓ 完成(N 步)")
-        set((s) => ({ streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], runSteps: [], runStepCount: s.runSteps.length }))
+        set((s) => ({ streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], runSteps: [], runStepCount: s.runSteps.length, contextUsage: null }))
         useApprovalsStore.getState().clear()
         void reloadMessages()
         void reloadArtifacts()
         break
       case 'canceled':
-        set({ streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], runSteps: [], runStepCount: 0 })
+        set({ streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], runSteps: [], runStepCount: 0, contextUsage: null })
         useApprovalsStore.getState().clear()
         void reloadMessages()
         void reloadArtifacts()
         break
       case 'error':
-        set({ streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], runSteps: [], runStepCount: 0, localError: ev.data })
+        set({ streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], runSteps: [], runStepCount: 0, contextUsage: null, localError: ev.data })
         useApprovalsStore.getState().clear()
         void reloadMessages()
         void reloadArtifacts()

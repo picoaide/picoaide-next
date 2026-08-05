@@ -61,8 +61,9 @@ export async function compactMessages(
   }
 }
 
-// 预算近似:content 字符串长度求和;assistant tool-call/tool-result 按 JSON 文本估算
-function messageLength(m: ModelMessage): number {
+// 预算近似:content 字符串长度求和;assistant tool-call/tool-result 按 JSON 文本估算。
+// 导出:引擎侧 context_usage 事件复用同一口径,显示占用与压缩触发阈值严格一致
+export function messageLength(m: ModelMessage): number {
   if (m.role === 'user') return String(m.content).length
   if (!Array.isArray(m.content)) return String(m.content).length
   let len = 0

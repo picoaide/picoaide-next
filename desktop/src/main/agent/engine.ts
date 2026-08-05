@@ -23,7 +23,7 @@ import { lastUserMessageIndex } from './continue'
 import { kbRead, kbSearch, kbList, kbUpload } from '../gateway/remote_mcp'
 import { isBoundaryError } from '../tools/paths'
 import type { Session } from '../gateway/config'
-import { compactMessages, DEFAULT_CONTEXT_WINDOW, DEFAULT_STREAM_TIMEOUT } from './compact'
+import { compactMessages, messageLength, CONTEXT_TOKEN_BUDGET, DEFAULT_CONTEXT_WINDOW, DEFAULT_STREAM_TIMEOUT } from './compact'
 import { userContentParts } from './attachments'
 
 export { DEFAULT_CONTEXT_WINDOW, DEFAULT_STREAM_TIMEOUT }
@@ -171,6 +171,15 @@ export class AgentEngine {
   // 未运行(探针/断言错误)时用 0,renderer 侧忽略
   private emitEvent(ev: Omit<AgentEvent, 'conversationId'>): void {
     this.deps.emit({ ...ev, conversationId: this.runningConversationId ?? 0 } as AgentEvent)
+  }
+
+  // 上下文占用估算(与压缩预算同一口径 messageLength):每轮发往模型的 messages 字符数,
+  // 经 context_usage 事件推给 renderer 渲染进度条(运行中实时,不落库)
+  private emitContextUsage(messages: ModelMessage[]): void {
+    this.emitEvent({
+      type: 'context_usage',
+      data: { chars: messages.reduce((sum, m) => sum + messageLength(m), 0), budget: CONTEXT_TOKEN_BUDGET },
+    })
   }
 
   // 当前运行任务所属会话(ipc 删除会话/登出时判断是否需先中止)
@@ -333,6 +342,7 @@ ${PLAN_SYSTEM_NOTICE}`
     try {
       let outcome: 'done' | 'canceled' = 'done'
       for (let attempt = 0; ; attempt++) {
+        this.emitContextUsage(messages)
         fullText = ''
         usage = { prompt_tokens: 0, completion_tokens: 0 } // 重试时清零,避免 failed 轮用量重复计数
         try {
@@ -558,6 +568,8 @@ ${PLAN_SYSTEM_NOTICE}`
     // 外层手动循环:每轮 streamText(1 步),轮末若有审批请求则挂起等用户回执再续跑。
     try {
       while (steps < maxSteps) {
+        // 每轮推一次上下文占用(运行中实时;完成后 renderer 清除)
+        this.emitContextUsage(messages)
         // 每轮可重试:仅当本轮"流尚未开始"就失败(网络拒绝/5xx/首块超时)时重试——
         // 无任何部分输出、无落库、无工具副作用,重试安全;流中途断(已有输出/已执行
         // 工具)不重试,避免副作用重复与落库重复,走 failed + 用户继续恢复
