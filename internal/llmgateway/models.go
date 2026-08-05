@@ -36,6 +36,19 @@ func ListModels(db *sql.DB) ([]Model, error) {
 	return ms, rows.Err()
 }
 
+// ModelEnabled reports whether id is in the model list (empty id is never enabled).
+func ModelEnabled(models []Model, id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, m := range models {
+		if m.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *API) handleModels(c *gin.Context) {
 	ms, err := ListModels(a.DB)
 	if err != nil {

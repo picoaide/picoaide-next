@@ -235,7 +235,7 @@ func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model
 		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "读取上游响应失败")
 		return
 	}
-	if pt, ct, ok := parseUsageBody(body); ok {
+	if pt, ct, ok, _ := parseUsage(body); ok {
 		if _, err := serverstore.RecordUsage(a.DB, userID, model, pt, ct); err != nil {
 			log.Printf("gateway: record usage: %v", err)
 		}
@@ -263,7 +263,7 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 		line, err := br.ReadString('\n')
 		if len(line) > 0 {
 			if s := strings.TrimSpace(line); strings.HasPrefix(s, "data:") {
-				if pt, ct, ok, perr := parseUsageLine(s); perr != nil {
+				if pt, ct, ok, perr := parseUsage([]byte(s)); perr != nil {
 					log.Printf("gateway: parse usage line: %v", perr)
 				} else if ok && usageID > 0 {
 					if uerr := serverstore.UpdateUsageTokens(a.DB, usageID, pt, ct); uerr != nil {
@@ -282,10 +282,11 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 	}
 }
 
-// parseUsageLine extracts token counts from an SSE data line containing usage.
-func parseUsageLine(s string) (pt, ct int64, ok bool, err error) {
-	data := strings.TrimSpace(strings.TrimPrefix(s, "data:"))
-	if data == "" || data == "[DONE]" {
+// parseUsage extracts token counts from a chat completion response: a full
+// JSON body (non-stream) or an SSE "data:" line carrying usage.
+func parseUsage(raw []byte) (pt, ct int64, ok bool, err error) {
+	data := bytes.TrimSpace(bytes.TrimPrefix(raw, []byte("data:")))
+	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
 		return 0, 0, false, nil
 	}
 	var chunk struct {
@@ -294,27 +295,13 @@ func parseUsageLine(s string) (pt, ct int64, ok bool, err error) {
 			CompletionTokens int64 `json:"completion_tokens"`
 		} `json:"usage"`
 	}
-	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+	if err := json.Unmarshal(data, &chunk); err != nil {
 		return 0, 0, false, err
 	}
 	if chunk.Usage == nil {
 		return 0, 0, false, nil
 	}
 	return chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, true, nil
-}
-
-// parseUsageBody extracts token counts from a non-stream response body.
-func parseUsageBody(body []byte) (pt, ct int64, ok bool) {
-	var resp struct {
-		Usage *struct {
-			PromptTokens     int64 `json:"prompt_tokens"`
-			CompletionTokens int64 `json:"completion_tokens"`
-		} `json:"usage"`
-	}
-	if err := json.Unmarshal(body, &resp); err != nil || resp.Usage == nil {
-		return 0, 0, false
-	}
-	return resp.Usage.PromptTokens, resp.Usage.CompletionTokens, true
 }
 
 // rateLimitPerMinute reads the configurable per-user limit from settings.
