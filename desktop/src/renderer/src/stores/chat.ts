@@ -36,6 +36,28 @@ export interface ToolCallView {
   reason?: string
 }
 
+// 执行轨迹步(会话头部 RunSteps 条):tool_start 追加,tool_end/tool_error 配对收尾;
+// done 后折叠为 runStepCount 汇总行,不跨会话保留
+export interface RunStep {
+  id: string
+  toolName: string
+  status: 'running' | 'done' | 'error'
+  durationMs?: number
+}
+
+// 按 id 配对收尾;无匹配 id(渲染器刷新/事件丢失)时按顺序收尾第一个 running 步
+function completeStep(steps: RunStep[], id: string, patch: Partial<RunStep>): RunStep[] {
+  let matched = false
+  return steps.map((step) => {
+    if (matched) return step
+    if (step.id === id || (!steps.some((x) => x.id === id) && step.status === 'running')) {
+      matched = true
+      return { ...step, ...patch }
+    }
+    return step
+  })
+}
+
 interface ChatState {
   conversations: ConversationRow[]
   activeId: number | null
@@ -51,6 +73,9 @@ interface ChatState {
   streamingText: string
   streamingReasoning: string
   toolCalls: ToolCallView[]
+  // 最近一轮运行的工具步骤轨迹(tool_start/tool_end/tool_error 驱动);done 后清列表、保留计数
+  runSteps: RunStep[]
+  runStepCount: number
   mode: Mode
   localError: string | null
   hasMoreMessages: boolean
@@ -96,7 +121,7 @@ export const useChatStore = create<ChatState>((set, get) => {
   async function runTask(label: string, fn: () => Promise<boolean>): Promise<boolean> {
     pendingDelta = ''
     runToken++
-    set({ streaming: true, streamingText: '', streamingReasoning: '', localError: null })
+    set({ streaming: true, streamingText: '', streamingReasoning: '', localError: null, runSteps: [], runStepCount: 0 })
     try {
       const ok = await fn()
       if (!ok) return false
@@ -131,6 +156,8 @@ export const useChatStore = create<ChatState>((set, get) => {
   streamingText: '',
   streamingReasoning: '',
   toolCalls: [],
+  runSteps: [],
+  runStepCount: 0,
   mode: 'craft',
   localError: null,
   hasMoreMessages: false,
@@ -148,7 +175,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       const id = await picoaide().chatNew({ mode: get().mode, projectId: get().activeProjectId })
       const [conversations, projects] = await Promise.all([picoaide().chatList(), picoaide().projectList()])
       pendingDelta = ''
-      set({ conversations, projects, activeId: id, messages: [], artifacts: [], streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], localError: null, hasMoreMessages: false, loadedTotal: 0 })
+      set({ conversations, projects, activeId: id, messages: [], artifacts: [], streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], runSteps: [], runStepCount: 0, localError: null, hasMoreMessages: false, loadedTotal: 0 })
       return id
     } finally {
       creatingConversation = false
@@ -213,6 +240,8 @@ export const useChatStore = create<ChatState>((set, get) => {
       streamingText: '',
       streamingReasoning: '',
       toolCalls: [],
+      runSteps: [],
+      runStepCount: 0,
       localError: null,
     })
   },
@@ -241,7 +270,7 @@ export const useChatStore = create<ChatState>((set, get) => {
   deleteConversation: async (id) => {
     await picoaide().chatDelete(id)
     if (get().activeId === id) {
-      set({ activeId: null, messages: [], artifacts: [], streaming: false, streamingText: '', toolCalls: [] })
+      set({ activeId: null, messages: [], artifacts: [], streaming: false, streamingText: '', toolCalls: [], runSteps: [], runStepCount: 0 })
     }
   },
 
@@ -340,7 +369,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     setTimeout(() => {
       const s = useChatStore.getState()
       if (runToken === token && s.streaming) {
-        useChatStore.setState({ streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [] })
+        useChatStore.setState({ streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], runSteps: [], runStepCount: 0 })
         useApprovalsStore.getState().clear()
       }
     }, CANCEL_FALLBACK_MS)
@@ -419,6 +448,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       case 'tool_start':
         set((s) => ({
           toolCalls: [...s.toolCalls.filter((t) => t.id !== ev.data.id), { ...ev.data, status: 'running' }],
+          runSteps: [...s.runSteps, { id: ev.data.id, toolName: ev.data.name, status: 'running' }],
         }))
         break
       case 'reasoning_delta':
@@ -437,6 +467,7 @@ export const useChatStore = create<ChatState>((set, get) => {
               status: 'done',
             },
           ],
+          runSteps: completeStep(s.runSteps, ev.data.id, { status: 'done', durationMs: ev.data.duration_ms }),
         }))
         break
       case 'tool_error':
@@ -451,6 +482,7 @@ export const useChatStore = create<ChatState>((set, get) => {
               status: 'error',
             },
           ],
+          runSteps: completeStep(s.runSteps, ev.data.id, { status: 'error' }),
         }))
         break
       case 'confirm_required':
@@ -489,14 +521,20 @@ export const useChatStore = create<ChatState>((set, get) => {
         }))
         break
       case 'done':
+        // 轨迹折叠为汇总行:保留步数,步骤列表清空(组件渲染"✓ 完成(N 步)")
+        set((s) => ({ streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], runSteps: [], runStepCount: s.runSteps.length }))
+        useApprovalsStore.getState().clear()
+        void reloadMessages()
+        void reloadArtifacts()
+        break
       case 'canceled':
-        set({ streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [] })
+        set({ streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], runSteps: [], runStepCount: 0 })
         useApprovalsStore.getState().clear()
         void reloadMessages()
         void reloadArtifacts()
         break
       case 'error':
-        set({ streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], localError: ev.data })
+        set({ streaming: false, streamingText: '', streamingReasoning: '', toolCalls: [], runSteps: [], runStepCount: 0, localError: ev.data })
         useApprovalsStore.getState().clear()
         void reloadMessages()
         void reloadArtifacts()

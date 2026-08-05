@@ -72,7 +72,7 @@ let fake: ReturnType<typeof makeFake>
 beforeEach(() => {
   fake = makeFake()
   ;(globalThis as any).window = { picoaide: fake.api }
-  useChatStore.setState({ conversations: [], activeId: null, messages: [], artifacts: [], interrupted: [], streaming: false, streamingText: '', mode: 'craft', localError: null })
+  useChatStore.setState({ conversations: [], activeId: null, messages: [], artifacts: [], interrupted: [], streaming: false, streamingText: '', mode: 'craft', localError: null, runSteps: [], runStepCount: 0 })
   useConnectionStore.setState({ status: 'online' })
 })
 
@@ -285,6 +285,101 @@ describe('chat store', () => {
     expect(useChatStore.getState().interrupted.map((c) => c.id)).toEqual([1])
     useChatStore.getState().clearInterrupted()
     expect(useChatStore.getState().interrupted).toEqual([])
+  })
+})
+
+describe('chat store run steps trajectory', () => {
+  it('tool_start appends a running step', () => {
+    useChatStore.setState({ activeId: 1 })
+    useChatStore.getState().onAgentEvent({ conversationId: 1, type: 'tool_start', data: { id: 't1', name: 'read_file', input: {} } })
+    useChatStore.getState().onAgentEvent({ conversationId: 1, type: 'tool_start', data: { id: 't2', name: 'bash', input: {} } })
+    expect(useChatStore.getState().runSteps).toEqual([
+      { id: 't1', toolName: 'read_file', status: 'running' },
+      { id: 't2', toolName: 'bash', status: 'running' },
+    ])
+  })
+
+  it('tool_end completes the matching step with duration', () => {
+    useChatStore.setState({ activeId: 1 })
+    const s = useChatStore.getState()
+    s.onAgentEvent({ conversationId: 1, type: 'tool_start', data: { id: 't1', name: 'read_file', input: {} } })
+    s.onAgentEvent({ conversationId: 1, type: 'tool_end', data: { id: 't1', name: 'read_file', output: {}, duration_ms: 42 } })
+    expect(useChatStore.getState().runSteps).toEqual([{ id: 't1', toolName: 'read_file', status: 'done', durationMs: 42 }])
+  })
+
+  it('tool_end without a matching start falls back to the first running step', () => {
+    useChatStore.setState({ activeId: 1 })
+    const s = useChatStore.getState()
+    s.onAgentEvent({ conversationId: 1, type: 'tool_start', data: { id: 't1', name: 'read_file', input: {} } })
+    s.onAgentEvent({ conversationId: 1, type: 'tool_end', data: { id: 'ghost', name: 'read_file', output: {}, duration_ms: 7 } })
+    expect(useChatStore.getState().runSteps).toEqual([{ id: 't1', toolName: 'read_file', status: 'done', durationMs: 7 }])
+  })
+
+  it('tool_error marks the matching step error', () => {
+    useChatStore.setState({ activeId: 1 })
+    const s = useChatStore.getState()
+    s.onAgentEvent({ conversationId: 1, type: 'tool_start', data: { id: 't1', name: 'bash', input: {} } })
+    s.onAgentEvent({ conversationId: 1, type: 'tool_error', data: { id: 't1', name: 'bash', error: 'boom' } })
+    expect(useChatStore.getState().runSteps).toEqual([{ id: 't1', toolName: 'bash', status: 'error' }])
+  })
+
+  it('tool_error without a matching id falls back to the first running step', () => {
+    useChatStore.setState({ activeId: 1 })
+    const s = useChatStore.getState()
+    s.onAgentEvent({ conversationId: 1, type: 'tool_start', data: { id: 't1', name: 'bash', input: {} } })
+    s.onAgentEvent({ conversationId: 1, type: 'tool_start', data: { id: 't2', name: 'web_search', input: {} } })
+    s.onAgentEvent({ conversationId: 1, type: 'tool_error', data: { id: 'ghost', name: 'bash', error: 'boom' } })
+    expect(useChatStore.getState().runSteps.map((r) => r.status)).toEqual(['error', 'running'])
+  })
+
+  it('done collapses the trajectory into a count summary', () => {
+    useChatStore.setState({ activeId: 1 })
+    const s = useChatStore.getState()
+    s.onAgentEvent({ conversationId: 1, type: 'tool_start', data: { id: 't1', name: 'read_file', input: {} } })
+    s.onAgentEvent({ conversationId: 1, type: 'tool_end', data: { id: 't1', name: 'read_file', output: {}, duration_ms: 5 } })
+    s.onAgentEvent({ conversationId: 1, type: 'done', data: {} })
+    expect(useChatStore.getState().runSteps).toEqual([])
+    expect(useChatStore.getState().runStepCount).toBe(1)
+  })
+
+  it('canceled clears the trajectory entirely', () => {
+    useChatStore.setState({ activeId: 1 })
+    const s = useChatStore.getState()
+    s.onAgentEvent({ conversationId: 1, type: 'tool_start', data: { id: 't1', name: 'read_file', input: {} } })
+    s.onAgentEvent({ conversationId: 1, type: 'canceled', data: { reason: 'user' } })
+    expect(useChatStore.getState().runSteps).toEqual([])
+    expect(useChatStore.getState().runStepCount).toBe(0)
+  })
+
+  it('session error clears the trajectory entirely', () => {
+    useChatStore.setState({ activeId: 1 })
+    const s = useChatStore.getState()
+    s.onAgentEvent({ conversationId: 1, type: 'tool_start', data: { id: 't1', name: 'read_file', input: {} } })
+    s.onAgentEvent({ conversationId: 1, type: 'error', data: 'upstream 502' })
+    expect(useChatStore.getState().runSteps).toEqual([])
+    expect(useChatStore.getState().runStepCount).toBe(0)
+  })
+
+  it('a new run resets the previous summary', async () => {
+    useChatStore.setState({ activeId: 1 })
+    const s = useChatStore.getState()
+    s.onAgentEvent({ conversationId: 1, type: 'tool_start', data: { id: 't1', name: 'read_file', input: {} } })
+    s.onAgentEvent({ conversationId: 1, type: 'done', data: {} })
+    expect(useChatStore.getState().runStepCount).toBe(1)
+    await useChatStore.getState().sendMessage('再来一轮')
+    expect(useChatStore.getState().runSteps).toEqual([])
+    expect(useChatStore.getState().runStepCount).toBe(0)
+  })
+
+  it('switching conversations clears the trajectory', async () => {
+    const first = (await useChatStore.getState().newConversation())!
+    const s = useChatStore.getState()
+    s.onAgentEvent({ conversationId: first, type: 'tool_start', data: { id: 't1', name: 'read_file', input: {} } })
+    const second = (await useChatStore.getState().newConversation())!
+    expect(useChatStore.getState().runSteps).toEqual([])
+    await useChatStore.getState().selectConversation(second)
+    expect(useChatStore.getState().runSteps).toEqual([])
+    expect(useChatStore.getState().runStepCount).toBe(0)
   })
 })
 

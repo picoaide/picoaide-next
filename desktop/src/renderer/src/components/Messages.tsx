@@ -3,6 +3,7 @@ import { Check, Copy, FileText, MessageSquareQuote, Pencil, RefreshCw, Sparkles,
 import { ScrollArea } from './ui/scroll-area'
 import { cn } from '../lib/utils'
 import ToolCalls from './ToolCalls'
+import RunSteps from './RunSteps'
 import Markdown from './Markdown'
 import { Button } from './ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip'
@@ -106,6 +107,8 @@ export default function Messages({ messages, streaming, streamingText, streaming
           </Button>
         </div>
       )}
+      {/* 执行轨迹条:当前运行步骤序列,完成后折叠为"✓ 完成(N 步)" */}
+      <RunSteps />
       <ScrollArea className="flex-1" onViewportScroll={(e) => {
         const el = e.currentTarget
         nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
