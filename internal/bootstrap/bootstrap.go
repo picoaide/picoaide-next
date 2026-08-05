@@ -3,10 +3,12 @@
 package bootstrap
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -35,8 +37,15 @@ type Response struct {
 // RegisterRoutes mounts GET /api/config/bootstrap behind BearerAuth,
 // plus an unauthenticated /healthz for docker healthchecks.
 func RegisterRoutes(r *gin.Engine, db *sql.DB) {
-	// 无需认证的存活探针:docker HEALTHCHECK 用(docker 官方语义:退出码 0=healthy)
+	// 无需认证的存活探针:docker HEALTHCHECK 用(docker 官方语义:退出码 0=healthy)。
+	// 查询 DB(3s 超时),DB 不可用返回 503。
 	r.GET("/healthz", func(c *gin.Context) {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+		defer cancel()
+		if err := db.PingContext(ctx); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": "db unavailable"})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 	r.GET("/api/config/bootstrap", serverauth.BearerAuth(db), func(c *gin.Context) {

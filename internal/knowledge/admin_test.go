@@ -354,3 +354,37 @@ func TestAdminKBUploadMultipartPDFErrors(t *testing.T) {
 		t.Fatalf("bad ext: %d", w.Code)
 	}
 }
+
+func TestAdminKBPagedDocsAndAudit(t *testing.T) {
+	r, db, hdr := kbAdminSetup(t)
+	defer db.Close()
+	for i := 0; i < 5; i++ {
+		if w, _ := kbReq(t, r, "POST", "/api/admin/kb/upload",
+			fmt.Sprintf(`{"title":"文档%d","content":"内容%d","folder_id":0}`, i, i), hdr); w.Code != http.StatusOK {
+			t.Fatalf("upload %d: %d", i, w.Code)
+		}
+	}
+	// paginated documents: page 2 size 2 → 2 docs, total 5
+	w, out := kbReq(t, r, "GET", "/api/admin/kb/documents?folder_id=0&page=2&size=2", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("docs: %d", w.Code)
+	}
+	if total := out["total"].(float64); total != 5 {
+		t.Fatalf("total = %v", total)
+	}
+	if docs := out["documents"].([]any); len(docs) != 2 || docs[0].(map[string]any)["title"] != "文档2" {
+		t.Fatalf("docs = %v", docs)
+	}
+	// audit endpoint lists uploads newest first, paged
+	w, out = kbReq(t, r, "GET", "/api/admin/kb/audit?page=1&size=3", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("audit: %d", w.Code)
+	}
+	if total := out["total"].(float64); total != 5 {
+		t.Fatalf("audit total = %v", total)
+	}
+	logs := out["logs"].([]any)
+	if len(logs) != 3 || logs[0].(map[string]any)["action"] != "kb_upload" {
+		t.Fatalf("logs = %v", logs)
+	}
+}

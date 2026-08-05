@@ -57,12 +57,21 @@ func TestUsers(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		CreateUser(db, &User{Username: "u" + string(rune('a'+i)), Source: "local"})
 	}
-	users, total, err := ListUsers(db, 0, 3)
+	users, total, err := ListUsers(db, 0, 3, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(users) != 3 || total != 6 {
 		t.Fatalf("list: len=%d total=%d", len(users), total)
+	}
+
+	// search filter
+	users, total, err = ListUsers(db, 0, 20, "ali")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || users[0].Username != "alice" {
+		t.Fatalf("search: total=%d users=%+v", total, users)
 	}
 }
 

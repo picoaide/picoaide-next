@@ -75,17 +75,19 @@ export default function Knowledge() {
     }
   }, [])
 
-  const loadDocs = useCallback(async () => {
+  const loadDocs = useCallback(async (p: number, folderId: number) => {
     try {
-      const data = await request(`/api/admin/kb/documents?folder_id=${selected}`)
+      const data = await request(`/api/admin/kb/documents?folder_id=${folderId}&page=${p}&size=20`)
       setDocs(data.documents)
+      setDocTotal(data.total)
+      setDocPage(p)
     } catch (err: any) {
       setError(err.message)
     }
-  }, [selected])
+  }, [])
 
   useEffect(() => { loadFolders() }, [loadFolders])
-  useEffect(() => { loadDocs() }, [loadDocs])
+  useEffect(() => { loadDocs(1, selected) }, [loadDocs, selected])
 
   const searching = query.trim() !== ''
 
@@ -122,7 +124,7 @@ export default function Knowledge() {
       setFile(null)
       setTitle('')
       if (searching) doSearch()
-      loadDocs()
+      loadDocs(docPage, selected)
     } catch (err: any) {
       setError(err.message)
     }
@@ -133,7 +135,7 @@ export default function Knowledge() {
     try {
       await request(`/api/admin/kb/documents/${id}`, { method: 'DELETE' })
       if (searching) doSearch()
-      loadDocs()
+      loadDocs(docPage, selected)
     } catch (err: any) {
       setError(err.message)
     }
@@ -199,7 +201,7 @@ export default function Knowledge() {
       })
       setEditDialog(false)
       if (searching) doSearch()
-      loadDocs()
+      loadDocs(docPage, selected)
     } catch (err: any) {
       setError(err.message)
     }
@@ -318,6 +320,13 @@ export default function Knowledge() {
                 )}
               </TableBody>
             </Table>
+            {!searching && (
+              <div className="mt-2 flex items-center gap-2">
+                <Button size="sm" variant="outline" disabled={docPage <= 1} onClick={() => loadDocs(docPage - 1, selected)}>上一页</Button>
+                <span className="text-sm text-muted-foreground">第 {docPage}/{Math.max(1, Math.ceil(docTotal / 20))} 页 · 共 {docTotal} 篇</span>
+                <Button size="sm" variant="outline" disabled={docPage >= Math.max(1, Math.ceil(docTotal / 20))} onClick={() => loadDocs(docPage + 1, selected)}>下一页</Button>
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>

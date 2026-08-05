@@ -199,4 +199,44 @@ func TestKBAuditLog(t *testing.T) {
 	if logs[0].Username != "alice" || logs[0].Action != "kb_upload" || logs[0].Detail != "folder=1 title=x" {
 		t.Fatalf("log = %+v", logs[0])
 	}
+	for i := 0; i < 5; i++ {
+		if err := AuditLog(db, "bob", "kb_delete", "doc#"+string(rune('a'+i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paged, total, err := ListAuditLogsPaged(db, 1, 3)
+	if err != nil || total != 6 || len(paged) != 3 {
+		t.Fatalf("paged: len=%d total=%d err=%v", len(paged), total, err)
+	}
+	if paged[0].Username != "bob" || paged[0].Action != "kb_delete" {
+		t.Fatalf("paged[0] = %+v", paged[0])
+	}
+}
+
+func TestKBDocumentsPaged(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := CreateKBDocument(db, 1, "doc"+string(rune('a'+i)), "content", "text", 0, "webadmin", "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	docs, total, err := ListKBDocumentsPaged(db, 1, 1, 2)
+	if err != nil || total != 5 || len(docs) != 2 {
+		t.Fatalf("paged: len=%d total=%d err=%v", len(docs), total, err)
+	}
+	if docs[0].Title != "docd" {
+		t.Fatalf("newest first with offset: %+v", docs[0])
+	}
+	first, _, err := ListKBDocumentsPaged(db, 1, 0, 2)
+	if err != nil || first[0].Title != "doce" {
+		t.Fatalf("newest first: %+v %v", first, err)
+	}
+	all, err := ListKBDocuments(db, 1)
+	if err != nil || len(all) != 5 {
+		t.Fatalf("unpaged: %v %d", err, len(all))
+	}
 }
