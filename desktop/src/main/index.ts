@@ -31,6 +31,7 @@ import { getAllowedDirsFromSettings, resolveAllowedDirs, resolveWorkspace } from
 import { initOperationLog, logOperation } from './tools/operation-log'
 import { login, saveSession, loadSession, clearSession, gatewayFetch } from './gateway/auth'
 import { generateTitle, fallbackTitle } from './agent/title'
+import { buildSystemPrompt } from './agent/prompt'
 import { getBootstrap } from './gateway/bootstrap'
 import { createHealthPoller } from './gateway/health'
 import type { Session } from './gateway/config'
@@ -392,17 +393,8 @@ app.whenReady().then(async () => {
     ...buildAgentHandlers({
       store,
       sysPrompt: async () => {
-        const base =
-          '你是 PicoAide,企业办公智能体助手。回答简洁准确;需要操作本机文件、终端、浏览器、屏幕时,使用可用工具。' +
-          '浏览器操作(打开/导航/点击/输入)必须调用 browser_* 工具;若工具返回"浏览器插件未连接",必须明确告知用户浏览器插件未就绪(需在 Chrome/Edge 安装 PicoAide 扩展),不得虚构操作结果。' +
-          '保持行动直到任务完成:工具或命令失败时先读错误信息、修正后重试,并尝试替代方案继续推进,不要因单次失败就停止或把任务推回给用户;' +
-          '穷尽合理尝试之后仍受阻,才说明原因并给出可行建议。'
-        try {
-          const extra = await loadInstalledSkillInstruction()
-          return extra ? base + extra : base
-        } catch {
-          return base
-        }
+        const extra = await loadInstalledSkillInstruction()
+        return buildSystemPrompt(extra || undefined)
       },
       createModel: () => {
         const session = getCurrentSession()
