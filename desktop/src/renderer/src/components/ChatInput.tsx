@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
-import { Clock, FileText, Send, Square, Sparkles } from 'lucide-react'
+import { Clock, FileText, Send, Square, Sparkles, X } from 'lucide-react'
 import { Button } from './ui/button'
 import { Textarea } from './ui/textarea'
 import { Tabs, TabsList, TabsTrigger } from './ui/tabs'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip'
 import { cn, basename } from '../lib/utils'
 import { useChatStore, type Mode } from '../stores/chat'
+import { toast } from 'sonner'
+import { MAX_FILE_BYTES, validateImage } from '../../../shared/attachments'
+import type { AttachmentInput, AttachmentKind } from '../../../shared/attachments'
 
 import { parseCommandLine, parseMentionLine, type ChatboxLine } from '../lib/chatbox'
 
@@ -37,6 +40,8 @@ export default function ChatInput() {
   const consumeQuote = useChatStore((s) => s.consumeQuote)
   const [files, setFiles] = useState<string[]>([])
   const [installedSkills, setInstalledSkills] = useState<string[]>([])
+  // 粘贴图片/拖拽附件的待发送内容(发送时经 chat:attach 落盘后以路径引用并入消息)
+  const [attachments, setAttachments] = useState<AttachmentInput[]>([])
   const activeStatus = activeId === null ? null : (conversations.find((c) => c.id === activeId)?.status ?? null)
   const planning = activeStatus === 'planning' && !streaming
 
@@ -94,10 +99,51 @@ export default function ChatInput() {
     textareaRef.current?.focus()
   }
 
+  // 附件读取:FileReader → dataUrl(图片预览 / 发送时经 chat:attach 落盘);校验失败 toast 提示
+  const addAttachment = (file: File, kind: AttachmentKind) => {
+    if (kind === 'image') {
+      const err = validateImage(file.type, file.size)
+      if (err) {
+        toast(err)
+        return
+      }
+    } else if (file.size > MAX_FILE_BYTES) {
+      toast('附带文件超过 100MB 大小限制')
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = () => {
+      const dataUrl = reader.result
+      if (typeof dataUrl === 'string') {
+        setAttachments((a) => [...a, { kind, name: file.name, dataUrl }])
+      }
+    }
+    reader.onerror = () => toast('读取文件失败')
+    reader.readAsDataURL(file)
+  }
+
+  // 粘贴:剪贴板含图片 → 转为附件预览(textarea 不会插入图片,无需阻止默认文本粘贴)
+  const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = Array.from(e.clipboardData?.items ?? [])
+    const img = items.find((i) => i.type.startsWith('image/'))
+    const file = img?.getAsFile()
+    if (file) addAttachment(file, 'image')
+  }
+
+  // 拖拽:文件落下 → 图片走预览,其他文件标记为附带文件;纯文本拖拽不拦截
+  const onDrop = (e: React.DragEvent) => {
+    const dropped = Array.from(e.dataTransfer?.files ?? [])
+    if (dropped.length === 0) return
+    e.preventDefault()
+    for (const f of dropped) {
+      addAttachment(f, f.type.startsWith('image/') ? 'image' : 'file')
+    }
+  }
+
   const send = async () => {
     const text = value.trim()
-    if (!text) return
-    const ok = await sendMessage(text)
+    if (!text && attachments.length === 0) return
+    const ok = await sendMessage(text, attachments)
     // 发送/排队失败:回填输入框,不静默丢用户输入
     if (!ok) {
       setValue(text)
@@ -107,6 +153,7 @@ export default function ChatInput() {
     setHistory((h) => [...h, text].slice(-20))
     setHistoryIdx(-1)
     setValue('')
+    setAttachments([])
   }
 
   const onApprove = async (ok: boolean) => {
@@ -200,7 +247,7 @@ export default function ChatInput() {
             </Button>
           </div>
         ) : (
-          <div className="relative">
+          <div className="relative" onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
             {showMenu && (
               <div className="absolute bottom-full left-0 z-10 mb-1 max-h-48 w-full overflow-y-auto rounded-md border bg-popover shadow-md">
                 {suggestions.length > 0 ? (
@@ -233,13 +280,14 @@ export default function ChatInput() {
                   autoResize(e.target)
                 }}
                 onKeyDown={onKeyDown}
+                onPaste={onPaste}
               />
               {streaming ? (
                 <>
                   <Button
                     type="button"
                     size="icon"
-                    disabled={!value.trim()}
+                    disabled={!value.trim() && attachments.length === 0}
                     className="h-8 w-8 rounded-full"
                     title="正在回复中,发送将排队,当前步骤完成后自动处理"
                     onClick={send}
@@ -251,11 +299,37 @@ export default function ChatInput() {
                   </Button>
                 </>
               ) : (
-                <Button type="button" size="icon" className="h-8 w-8 rounded-full" disabled={!value.trim()} onClick={send} title="发送">
+                <Button type="button" size="icon" className="h-8 w-8 rounded-full" disabled={!value.trim() && attachments.length === 0} onClick={send} title="发送">
                   <Send className={cn('h-3.5 w-3.5')} />
                 </Button>
               )}
             </div>
+            {attachments.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                {attachments.map((a, i) => (
+                  <div key={`${a.kind}-${i}`} className="group relative">
+                    {a.kind === 'image' ? (
+                      <img src={a.dataUrl} alt={a.name} className="h-12 w-12 rounded border object-cover" />
+                    ) : (
+                      <div className="flex max-w-52 items-center gap-1 rounded-md border bg-muted/50 px-2 py-1.5 text-xs text-muted-foreground">
+                        <FileText className="h-3.5 w-3.5 shrink-0" />
+                        <span className="truncate">{a.name}</span>
+                      </div>
+                    )}
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="absolute -right-1.5 -top-1.5 h-4 w-4 rounded-full opacity-0 group-hover:opacity-100"
+                      title="移除附件"
+                      onClick={() => setAttachments((x) => x.filter((_, j) => j !== i))}
+                    >
+                      <X className="h-3 w-3" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>

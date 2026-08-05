@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { tool } from 'ai'
+import { streamText } from 'ai'
 import { z } from 'zod'
 import type { LanguageModel, ModelMessage, Tool } from 'ai'
 import { AgentEngine, createKbTools, fromModelMessage, historyMessages, sanitizeMessages, toModelMessage } from './engine'
@@ -1526,5 +1527,122 @@ describe('AgentEngine LLM 摘要压缩', () => {
     const mainPrompt = mock.prompts[1] as Array<{ role: string; content: unknown }>
     expect(promptText(mainPrompt, 1)).toContain('以下是更早对话的摘要')
     expect(eventsOf(events, 'done')).toHaveLength(1)
+  })
+})
+
+describe('user message attachments (multimodal)', () => {
+  function makePng(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'engine-attach-'))
+    const path = join(dir, 'shot.png')
+    writeFileSync(path, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]))
+    return path
+  }
+
+  function lastUserContent(prompt: Array<{ role: string; content: unknown }>): unknown {
+    for (let i = prompt.length - 1; i >= 0; i--) {
+      if (prompt[i].role === 'user') return prompt[i].content
+    }
+    throw new Error('no user message in prompt')
+  }
+
+  it('ask sends an image part (dataUrl) when content references a pasted image', async () => {
+    const path = makePng()
+    try {
+      const { mock, engine, store } = makeEngine('text')
+      await engine.ask({ conversationId: 1, content: `[图片: ${path}]\n\n描述这个截图` })
+      // SDK 把 image part 转成 v4 协议 file part(mediaType=image/png,data=Uint8Array)传给 provider
+      const content = lastUserContent(mock.prompts[0] as Array<{ role: string; content: unknown }>) as Array<{
+        type: string
+        text?: string
+        mediaType?: string
+        data: { type: string; data: string }
+      }>
+      expect(Array.isArray(content)).toBe(true)
+      expect(content[0]).toMatchObject({ type: 'text', text: '描述这个截图' })
+      expect(content[1].type).toBe('file')
+      expect(content[1].mediaType).toBe('image/png')
+      expect(content[1].data).toMatchObject({ type: 'data' })
+      expect(content[1].data.data).toMatch(/^iVBOR/)
+      // DB 只存路径引用,不存 base64
+      expect(store.listMessages(1).map((m) => m.role)).toEqual(['user', 'assistant'])
+    } finally {
+      rmSync(join(path, '..'), { recursive: true, force: true })
+    }
+  })
+
+  it('replays a stored text reference back into an image part', () => {
+    const path = makePng()
+    try {
+      const msg = toModelMessage({ role: 'user', content: `[图片: ${path}]\n\n历史问题` })
+      const content = msg.content as Array<{ type: string; text?: string; image?: string }>
+      expect(Array.isArray(content)).toBe(true)
+      expect(content[0]).toMatchObject({ type: 'text', text: '历史问题' })
+      expect(content[1].type).toBe('image')
+      expect(content[1].image).toMatch(/^data:image\/png;base64,/)
+    } finally {
+      rmSync(join(path, '..'), { recursive: true, force: true })
+    }
+  })
+
+  it('continue re-runs with the stored image reference restored as an image part', async () => {
+    const path = makePng()
+    try {
+      const store = makeStore()
+      store.appendMessage({ conversationId: 1, role: 'user', content: `[图片: ${path}]\n\n继续` })
+      store.updateConversationStatus(1, 'failed')
+      const { mock, engine } = makeEngine('text', {}, store)
+      await engine.continueConversation({ conversationId: 1, tools: {}, highRiskTools: new Set() })
+      const content = lastUserContent(mock.prompts[0] as Array<{ role: string; content: unknown }>) as Array<{
+        type: string
+        mediaType?: string
+      }>
+      expect(content.some((p) => p.type === 'file' && p.mediaType === 'image/png')).toBe(true)
+    } finally {
+      rmSync(join(path, '..'), { recursive: true, force: true })
+    }
+  })
+})
+
+describe('gateway multimodal serialization', () => {
+  it('openai-compatible gateway converts image parts into image_url content', async () => {
+    const requests: Array<{ url: string; body: { messages: Array<{ content: unknown }> } }> = []
+    const origFetch = globalThis.fetch
+    globalThis.fetch = (async (input: any, init: any) => {
+      requests.push({ url: String(input), body: JSON.parse(String(init?.body ?? '{}')) })
+      const chunk = {
+        id: 'c1',
+        object: 'chat.completion.chunk',
+        created: 1,
+        model: 'm',
+        choices: [{ index: 0, delta: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+      }
+      const sse = `data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`
+      return new Response(sse, { headers: { 'content-type': 'text/event-stream' } })
+    }) as typeof fetch
+    try {
+      const model = createGatewayModel('https://gw.example.com', 'tok-1', 'deepseek-chat')
+      const result = streamText({
+        model,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: '看图' },
+              { type: 'image', image: 'data:image/png;base64,AAAA' },
+            ],
+          },
+        ],
+      })
+      for await (const _part of result.fullStream) {
+        // drain
+      }
+      expect(requests).toHaveLength(1)
+      expect(requests[0].url).toBe('https://gw.example.com/v1/chat/completions')
+      const content = requests[0].body.messages[0].content as Array<Record<string, unknown>>
+      expect(content[0]).toEqual({ type: 'text', text: '看图' })
+      expect(content[1]).toEqual({ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } })
+    } finally {
+      globalThis.fetch = origFetch
+    }
   })
 })

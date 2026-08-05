@@ -3,6 +3,7 @@ import type { Session, BootstrapConfig } from '../main/gateway/config'
 import type { AgentEvent } from '../main/agent/events'
 import type { ArtifactRow, ConversationRow, MessageRow, ProjectRow } from '../main/ipc'
 import type { McpInstalledRecord, McpListResult, McpRiskInfo, SettingsInfo, SkillRiskInfo, SkillsListResult, InstalledSkillRecord } from '../main/plugin_ipc'
+import type { AttachmentInput, AttachResult } from '../shared/attachments'
 
 type Unsub = () => void
 
@@ -38,6 +39,8 @@ const api = {
   pickDirectory: (): Promise<string[]> => ipcRenderer.invoke('dialog:pickDirectory'),
   chatAsk: (conversationId: number, content: string, mode?: string): Promise<void> =>
     ipcRenderer.invoke('chat:ask', { conversationId, content, mode }),
+  chatAttach: (conversationId: number, files: AttachmentInput[]): Promise<AttachResult[]> =>
+    ipcRenderer.invoke('chat:attach', { conversationId, files }),
   chatQueue: (conversationId: number, content: string): Promise<boolean> =>
     ipcRenderer.invoke('chat:queue', { conversationId, content }),
   chatContinue: (conversationId: number): Promise<void> =>

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { tool } from 'ai'
@@ -12,6 +12,7 @@ import { AuthError } from './gateway/auth'
 import type { Session } from './gateway/config'
 import { clearCaches, getBootstrapCache, getCurrentSession } from './session_cache'
 import { registerIpcHandlers } from './ipc'
+import { setDataDirOverride } from './paths'
 
 // AI SDK v7 在模型 doStream 抛错(测试故意制造的上游故障)时,内部 streamStep 的
 // promise 链会泄漏一次 unhandled rejection(与引擎消费无关)。这里仅吞掉
@@ -770,5 +771,89 @@ describe('registerIpcHandlers event stripping', () => {
       fakeIpc as any,
     )
     expect(received).toEqual([{ serverURL: 'https://srv', username: 'a', password: 'b' }])
+  })
+})
+
+describe('chat:attach', () => {
+  const pngDataUrl = (bytes: number[]): string => `data:image/png;base64,${Buffer.from(bytes).toString('base64')}`
+
+  it('writes image files into the conversation workspace attachments dir', async () => {
+    const { deps, store } = makeDeps()
+    const handlers = buildAgentHandlers(deps)
+    const dir = mkdtempSync(join(tmpdir(), 'picoaide-ipc-attach-'))
+    try {
+      const pid = handlers['project:create']({ name: 'p', path: dir })
+      const id = handlers['chat:new']({ projectId: pid })
+      const out = await handlers['chat:attach']({
+        conversationId: id,
+        files: [{ kind: 'image', name: 'shot.png', dataUrl: pngDataUrl([0x89, 0x50, 0x4e, 0x47]) }],
+      })
+      expect(out).toHaveLength(1)
+      expect(out[0].kind).toBe('image')
+      expect(out[0].name).toBe('shot.png')
+      const base = store.getConversation(id)!.workspace
+      expect(out[0].path).toMatch(new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/attachments/attach-.*\\.png$`))
+      expect(readFileSync(out[0].path).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]))).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('falls back to the global workspace for conversations without a project', async () => {
+    const { deps } = makeDeps()
+    const handlers = buildAgentHandlers(deps)
+    const tmp = mkdtempSync(join(tmpdir(), 'picoaide-ipc-global-'))
+    setDataDirOverride(tmp)
+    try {
+      const id = handlers['chat:new']({})
+      const out = await handlers['chat:attach']({
+        conversationId: id,
+        files: [{ kind: 'image', name: 'a.png', dataUrl: pngDataUrl([1, 2, 3]) }],
+      })
+      expect(out[0].path.startsWith(join(tmp, 'workspaces', 'attachments'))).toBe(true)
+      expect(existsSync(out[0].path)).toBe(true)
+    } finally {
+      setDataDirOverride(null)
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects unsupported image formats', async () => {
+    const { deps } = makeDeps()
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({})
+    await expect(
+      handlers['chat:attach']({ conversationId: id, files: [{ kind: 'image', name: 'a.gif', dataUrl: 'data:image/gif;base64,AAAA' }] }),
+    ).rejects.toThrow('不支持')
+  })
+
+  it('rejects images over 5MB', async () => {
+    const { deps } = makeDeps()
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({})
+    const big = Buffer.alloc(5 * 1024 * 1024 + 100)
+    await expect(
+      handlers['chat:attach']({ conversationId: id, files: [{ kind: 'image', name: 'big.png', dataUrl: `data:image/png;base64,${big.toString('base64')}` }] }),
+    ).rejects.toThrow('5MB')
+  })
+
+  it('sanitizes file names so paths stay inside attachments dir', async () => {
+    const { deps } = makeDeps()
+    const handlers = buildAgentHandlers(deps)
+    const tmp = mkdtempSync(join(tmpdir(), 'picoaide-ipc-name-'))
+    setDataDirOverride(tmp)
+    try {
+      const id = handlers['chat:new']({})
+      const out = await handlers['chat:attach']({
+        conversationId: id,
+        files: [{ kind: 'file', name: '../../escape.csv', dataUrl: 'data:text/csv;base64,YQo=' }],
+      })
+      expect(out[0].path.startsWith(join(tmp, 'workspaces', 'attachments'))).toBe(true)
+      expect(existsSync(out[0].path)).toBe(true)
+      expect(readFileSync(out[0].path, 'utf8')).toBe('a\n')
+    } finally {
+      setDataDirOverride(null)
+      rmSync(tmp, { recursive: true, force: true })
+    }
   })
 })

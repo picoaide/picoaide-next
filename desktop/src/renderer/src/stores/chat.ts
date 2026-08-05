@@ -5,6 +5,8 @@ import type { AgentEvent } from '../../../main/agent/events'
 import type { ArtifactRow, ConversationRow, MessageRow, ProjectRow } from '../../../main/ipc'
 import { useApprovalsStore } from './approvals'
 import { useConnectionStore } from './connection'
+import { composeUserContent } from '../../../shared/attachments'
+import type { AttachmentInput } from '../../../shared/attachments'
 
 export type Mode = 'plan' | 'craft'
 
@@ -59,7 +61,7 @@ interface ChatState {
   loadConversations: () => Promise<void>
   selectConversation: (id: number) => Promise<void>
   deleteConversation: (id: number) => Promise<void>
-  sendMessage: (content: string) => Promise<boolean>
+  sendMessage: (content: string, attachments?: AttachmentInput[]) => Promise<boolean>
   continueConversation: (id: number) => Promise<void>
   approvePlan: (id: number, ok: boolean) => Promise<void>
   cancel: () => Promise<void>
@@ -243,14 +245,30 @@ export const useChatStore = create<ChatState>((set, get) => {
     }
   },
 
-  sendMessage: async (content): Promise<boolean> => {
+  sendMessage: async (content, attachments = []): Promise<boolean> => {
     const text = content.trim()
-    if (!text) return false
+    if (!text && attachments.length === 0) return false
+    // 附带文件先落盘(会话 workspace,返回路径引用),路径引用并入内容(DB 只存引用,不存 base64)
+    const compose = async (id: number): Promise<string> => {
+      if (attachments.length === 0) return text
+      const refs = await picoaide().chatAttach(id, attachments)
+      return composeUserContent(text, {
+        images: refs.filter((r) => r.kind === 'image').map((r) => r.path),
+        files: refs.filter((r) => r.kind === 'file').map((r) => r.path),
+      })
+    }
     if (get().streaming) {
       // 回复中发新消息 → 排队到当前步骤后(引擎多步队列,不打断);消息立即落库并刷新列表
       const id = get().activeId
       if (id === null) return false
-      const ok = await picoaide().chatQueue(id, text)
+      let final: string
+      try {
+        final = await compose(id)
+      } catch (e) {
+        set({ localError: e instanceof Error && e.message ? e.message : '附件处理失败' })
+        return false
+      }
+      const ok = await picoaide().chatQueue(id, final)
       if (ok) {
         toast('已排队,当前步骤完成后自动处理')
         void reloadMessages()
@@ -272,14 +290,15 @@ export const useChatStore = create<ChatState>((set, get) => {
         // 首条消息创建会话后必须选中,否则后续消息每次都新建会话
         set({ activeId })
       }
+      const final = await compose(activeId)
       // 乐观追加用户消息;assistant 内容以流式增量呈现,结束后从 DB 重载
       set((s) => ({
         messages: [
           ...s.messages,
-          { id: Date.now(), conversation_id: activeId, role: 'user', content: text, is_error: 0, tool_name: '', reasoning: '', tool_calls: '', tool_call_id: '', created_at: '' },
+          { id: Date.now(), conversation_id: activeId, role: 'user', content: final, is_error: 0, tool_name: '', reasoning: '', tool_calls: '', tool_call_id: '', created_at: '' },
         ],
       }))
-      await picoaide().chatAsk(activeId, text, get().mode)
+      await picoaide().chatAsk(activeId, final, get().mode)
       // 期间用户切走/新建会话:丢弃本次结果,不覆盖新会话视图
       if (useChatStore.getState().activeId !== activeId) return false
       const messages = await picoaide().chatMessages(activeId)

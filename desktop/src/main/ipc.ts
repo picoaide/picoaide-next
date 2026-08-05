@@ -1,5 +1,5 @@
 import { dialog, ipcMain, nativeTheme, shell } from 'electron'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { AgentEngine } from './agent/engine'
 import type { GatedTool, StoreLike as EngineStore } from './agent/engine'
@@ -11,6 +11,10 @@ import { establishSession, validateServerURL, clearCaches, setBootstrapCache, ge
 import { workspaceFor } from './store/projects'
 import { listFilesRecursive } from './store/files'
 import { updateMessageContent, deleteMessagesAfter } from './store/messages'
+import { dataUrlBytes, imageExt, validateImage, MAX_FILE_BYTES } from '../shared/attachments'
+import type { AttachmentInput, AttachResult } from '../shared/attachments'
+import { workspaceDir } from './paths'
+import { resolveWorkspace } from './tools/paths'
 
 // 与 src/main/store/conversations.ts ConversationRow 结构一致(自包含,不 import store)
 export interface ConversationRow {
@@ -131,6 +135,7 @@ export interface IpcHandlers {
   'theme:get': () => 'dark' | 'light'
   'chat:new': (input?: { title?: string; mode?: string; projectId?: number | null }) => number
   'chat:ask': (input: { conversationId: number; content: string; mode?: string }) => Promise<void>
+  'chat:attach': (input: { conversationId: number; files: AttachmentInput[] }) => Promise<AttachResult[]>
   'chat:queue': (input: { conversationId: number; content: string }) => Promise<boolean>
   'chat:continue': (input: { conversationId: number }) => Promise<void>
   'chat:approvePlan': (input: { conversationId: number; ok: boolean }) => Promise<void>
@@ -239,6 +244,36 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
     'project:create': ({ name, path }) => deps.store.createProject({ name, path }),
     'project:delete': ({ id }) => deps.store.deleteProject(id),
     'conversation:moveProject': ({ conversationId, projectId }) => deps.store.setConversationProject(conversationId, projectId),
+    // 附带文件落盘:粘贴图片/拖拽文件 → 会话 workspace 的 attachments/ 目录(无项目回退全局工作目录)。
+    // 只落盘,不改消息;renderer 把返回路径以 [图片:]/[附带文件:] 引用并入 user 消息内容(DB 不存 base64)
+    'chat:attach': async ({ conversationId, files }) => {
+      const conv = deps.store.getConversation(conversationId)
+      if (!conv) throw new Error('会话不存在')
+      const base = resolveWorkspace(conv.workspace, workspaceDir())
+      const dir = join(base, 'attachments')
+      mkdirSync(dir, { recursive: true })
+      const out: AttachResult[] = []
+      files.forEach((f, i) => {
+        if (f.kind !== 'image' && f.kind !== 'file') throw new Error(`未知的附件类型:${String(f.kind)}`)
+        const mime = f.dataUrl.slice(5, f.dataUrl.indexOf(';'))
+        const bytes = dataUrlBytes(f.dataUrl)
+        if (f.kind === 'image') {
+          const err = validateImage(mime, bytes)
+          if (err) throw new Error(err)
+        } else if (bytes > MAX_FILE_BYTES) {
+          throw new Error('附带文件超过 100MB 大小限制')
+        }
+        const buf = Buffer.from(f.dataUrl.slice(f.dataUrl.indexOf(',') + 1), 'base64')
+        const storedName =
+          f.kind === 'image'
+            ? `attach-${Date.now()}-${i}.${imageExt(mime)}`
+            : `${Date.now()}-${i}-${sanitizeFileName(f.name)}`
+        const path = join(dir, storedName)
+        writeFileSync(path, buf)
+        out.push({ kind: f.kind, name: f.name, path })
+      })
+      return out
+    },
     'workspace:listFiles': () => {
       // 安全边界:只枚举主进程组装的目录(全部项目目录 + 可访问目录),renderer 不可指定任意路径
       const projectDirs = deps.listProjectPaths?.() ?? []
@@ -456,6 +491,12 @@ export function buildAuthHandlers(deps: AuthIpcDeps): Pick<IpcHandlers, 'auth:lo
 }
 
 export type IpcMainLike = { handle(channel: string, listener: (...args: any[]) => unknown): void }
+
+// 附件文件名清洗:去掉路径分隔符/控制字符/前导点(防目录穿越与异常名),空名兜底
+function sanitizeFileName(name: string): string {
+  const cleaned = name.replace(/[\\/:*?"<>|\u0000-\u001f\s]+/g, '_').replace(/^\.+/, '')
+  return cleaned.length > 0 ? cleaned.slice(0, 120) : 'file'
+}
 
 // registerIpcHandlers wires all handlers onto ipcMain (ipc 可注入,便于测试/隔离).
 // 注意:ipcMain.handle 的回调签名是 (event, ...args)——必须剥离事件对象,

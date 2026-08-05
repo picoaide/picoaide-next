@@ -24,6 +24,7 @@ import { kbRead, kbSearch, kbList, kbUpload } from '../gateway/remote_mcp'
 import { isBoundaryError } from '../tools/paths'
 import type { Session } from '../gateway/config'
 import { compactMessages, DEFAULT_CONTEXT_WINDOW, DEFAULT_STREAM_TIMEOUT } from './compact'
+import { userContentParts } from './attachments'
 
 export { DEFAULT_CONTEXT_WINDOW, DEFAULT_STREAM_TIMEOUT }
 
@@ -227,7 +228,7 @@ export class AgentEngine {
     // 上下文窗口:超预算时对更早历史做 LLM 摘要压缩(摘要失败回退最近 50 条硬截断)
     const history = historyMessages(store.listMessages(conversationId))
     store.appendMessage({ conversationId, role: 'user', content })
-    const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content }]
+    const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content: userContentParts(content) }]
     const tools = readOnlyTools(input.tools ?? {}) as Record<string, GatedTool>
     const system = `${input.sysPrompt ?? this.cfg.sysPrompt}
 
@@ -288,7 +289,7 @@ ${PLAN_SYSTEM_NOTICE}`
     // 上下文窗口:超预算时对更早历史做 LLM 摘要压缩(摘要失败回退最近 50 条硬截断)
     const history = historyMessages(store.listMessages(conversationId))
     store.appendMessage({ conversationId, role: 'user', content })
-    const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content }]
+    const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content: userContentParts(content) }]
 
     let fullText = ''
     let usage: { prompt_tokens: number; completion_tokens: number } = { prompt_tokens: 0, completion_tokens: 0 }
@@ -389,7 +390,7 @@ ${PLAN_SYSTEM_NOTICE}`
     // 上下文窗口:超预算时对更早历史做 LLM 摘要压缩(摘要失败回退最近 50 条硬截断)
     const history = historyMessages(store.listMessages(conversationId))
     store.appendMessage({ conversationId, role: 'user', content })
-    const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content }]
+    const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content: userContentParts(content) }]
     await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps, 'done', input.sysPrompt ?? this.cfg.sysPrompt, abort)
   }
 
@@ -654,7 +655,7 @@ ${PLAN_SYSTEM_NOTICE}`
         // 排队消息:当前步骤完成后处理(用户回复中发的新消息,不打断当前轮)
         const queued = this.dequeueMessage(conversationId)
         if (queued !== undefined) {
-          messages.push({ role: 'user', content: queued })
+          messages.push({ role: 'user', content: userContentParts(queued) })
           continue
         }
         // 无审批:本轮有工具调用 → 结果已随 response.messages 回传 → 续跑让模型继续;否则完成
@@ -1074,7 +1075,7 @@ export function historyMessages(rows: DBMessage[]): ModelMessage[] {
 }
 
 export function toModelMessage(row: DBMessage): ModelMessage {
-  if (row.role === 'user') return { role: 'user', content: row.content }
+  if (row.role === 'user') return { role: 'user', content: userContentParts(row.content) }
   if (row.role === 'tool') {
     const output = row.is_error ? `${ERROR_PREFIX}${row.content}` : row.content
     return {

@@ -7,6 +7,7 @@ interface FakePicoaide {
   chatNew: ReturnType<typeof vi.fn>
   chatList: ReturnType<typeof vi.fn>
   chatAsk: ReturnType<typeof vi.fn>
+  chatAttach: ReturnType<typeof vi.fn>
   chatQueue: ReturnType<typeof vi.fn>
   chatContinue: ReturnType<typeof vi.fn>
   approvePlan: ReturnType<typeof vi.fn>
@@ -39,6 +40,9 @@ function makeFake() {
       messages.push({ id: nextId++, conversation_id: cid, role: 'user', content, reasoning: '', tool_calls: '', tool_call_id: '', tool_name: '', is_error: 0, created_at: '' })
       messages.push({ id: nextId++, conversation_id: cid, role: 'assistant', content: 'answer', reasoning: '', tool_calls: '', tool_call_id: '', tool_name: '', is_error: 0, created_at: '' })
     }),
+    chatAttach: vi.fn(async (_cid: number, files: Array<{ kind: string; name: string }>) =>
+      files.map((f, i) => ({ kind: f.kind, name: f.name, path: `/ws/attachments/${i}.${f.kind === 'image' ? 'png' : f.name}` })),
+    ),
     chatContinue: vi.fn(async () => undefined),
     chatQueue: vi.fn(async () => true),
     approvePlan: vi.fn(async () => undefined),
@@ -281,5 +285,51 @@ describe('chat store', () => {
     expect(useChatStore.getState().interrupted.map((c) => c.id)).toEqual([1])
     useChatStore.getState().clearInterrupted()
     expect(useChatStore.getState().interrupted).toEqual([])
+  })
+})
+
+describe('chat store attachments', () => {
+  it('sendMessage attaches files first, then sends content with refs', async () => {
+    useChatStore.setState({ activeId: 1, messages: [] })
+    const ok = await useChatStore.getState().sendMessage('看看这张图', [
+      { kind: 'image', name: 'shot.png', dataUrl: 'data:image/png;base64,AAAA' },
+      { kind: 'file', name: 'data.csv', dataUrl: 'data:text/csv;base64,YQo=' },
+    ])
+    expect(fake.api.chatAttach).toHaveBeenCalledWith(1, [
+      { kind: 'image', name: 'shot.png', dataUrl: 'data:image/png;base64,AAAA' },
+      { kind: 'file', name: 'data.csv', dataUrl: 'data:text/csv;base64,YQo=' },
+    ])
+    expect(fake.api.chatAsk).toHaveBeenCalledWith(1, '[图片: /ws/attachments/0.png]\n[附带文件: /ws/attachments/1.data.csv]\n\n看看这张图', 'craft')
+    expect(ok).toBe(true)
+  })
+
+  it('sendMessage queues attachments during streaming with refs', async () => {
+    useChatStore.setState({ streaming: true, activeId: 1 })
+    await useChatStore.getState().sendMessage('补充', [
+      { kind: 'image', name: 'a.png', dataUrl: 'data:image/png;base64,AA==' },
+    ])
+    expect(fake.api.chatAttach).toHaveBeenCalledWith(1, [{ kind: 'image', name: 'a.png', dataUrl: 'data:image/png;base64,AA==' }])
+    expect(fake.api.chatQueue).toHaveBeenCalledWith(1, '[图片: /ws/attachments/0.png]\n\n补充')
+    expect(fake.api.chatAsk).not.toHaveBeenCalled()
+  })
+
+  it('sendMessage allows attachments without text', async () => {
+    useChatStore.setState({ activeId: 1, messages: [] })
+    const ok = await useChatStore.getState().sendMessage('', [
+      { kind: 'image', name: 'a.png', dataUrl: 'data:image/png;base64,AA==' },
+    ])
+    expect(fake.api.chatAsk).toHaveBeenCalledWith(1, '[图片: /ws/attachments/0.png]', 'craft')
+    expect(ok).toBe(true)
+  })
+
+  it('sendMessage surfaces attach errors without sending', async () => {
+    fake.api.chatAttach.mockRejectedValue(new Error('图片超过 5MB 大小限制'))
+    useChatStore.setState({ activeId: 1 })
+    const ok = await useChatStore.getState().sendMessage('x', [
+      { kind: 'image', name: 'big.png', dataUrl: 'data:image/png;base64,AA==' },
+    ])
+    expect(ok).toBe(false)
+    expect(fake.api.chatAsk).not.toHaveBeenCalled()
+    expect(useChatStore.getState().localError).toContain('5MB')
   })
 })
