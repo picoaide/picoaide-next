@@ -427,6 +427,23 @@ describe('AgentEngine ask mode', () => {
     expect(mock.callCount).toBe(1)
   })
 
+  it('craft accepts a per-call sysPrompt override', async () => {
+    const { engine, mock } = makeEngine('text')
+    await engine.craft({ conversationId: 1, content: 'hello', tools: {}, highRiskTools: new Set(), sysPrompt: 'sys-override' })
+    const system = mock.prompts.at(-1) as Array<{ role: string; content: string }>
+    expect(system[0].role).toBe('system')
+    expect(system[0].content).toBe('sys-override')
+  })
+
+  it('approvePlan passes a sysPrompt override into the execution round', async () => {
+    const { engine, mock } = makeEngine('text')
+    await engine.plan({ conversationId: 1, content: '写一份周报' })
+    await engine.approvePlan({ conversationId: 1, ok: true, tools: {}, highRiskTools: new Set(), sysPrompt: 'exec-override' })
+    const system = mock.prompts.at(-1) as Array<{ role: string; content: string }>
+    expect(system[0].role).toBe('system')
+    expect(system[0].content).toContain('exec-override')
+  })
+
   it('queueMessage rejects during ask (single-step has no dequeue point)', async () => {
     const { engine, store } = makeEngine('text')
     const run = engine.ask({ conversationId: 1, content: 'hello' })

@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { tool } from 'ai'
 import { z } from 'zod'
 import type { LanguageModel, Tool } from 'ai'
-import { buildAgentHandlers, buildAuthHandlers } from './ipc'
+import { buildAgentHandlers, buildAuthHandlers, loadProjectInstructions } from './ipc'
 import type { AgentIpcDeps, AuthIpcDeps, StoreLike } from './ipc'
 import type { AppendMessageInput } from './agent/engine'
 import { AuthError } from './gateway/auth'
@@ -39,6 +39,7 @@ class FakeProvider {
   modelId = 'fake-model'
 
   script: 'text' | 'throw' | 'hang' | 'tool-call'
+  systems: string[] = []
 
   constructor(script: 'text' | 'throw' | 'hang' | 'tool-call' = 'text') {
     this.script = script
@@ -70,6 +71,7 @@ class FakeProvider {
   }
 
   async doStream(options: any) {
+    this.systems.push(String((options.prompt?.[0] as { content?: unknown })?.content ?? ''))
     if (this.script === 'throw') throw new Error('upstream 502 bad gateway')
     if (this.script === 'hang') {
       return {
@@ -471,6 +473,82 @@ describe('craft via ipc', () => {
 
 afterEach(() => {
   ipcDeleted.length = 0
+})
+
+describe('workspace AGENTS.md injection', () => {
+  it('loadProjectInstructions reads AGENTS.md under a header', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'picoaide-ipc-agents-'))
+    try {
+      writeFileSync(join(dir, 'AGENTS.md'), '项目规则:先读 README')
+      expect(loadProjectInstructions(dir)).toBe('\n\n## 项目指令(AGENTS.md)\n项目规则:先读 README')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('loadProjectInstructions skips when workspace is unknown or file missing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'picoaide-ipc-agents-'))
+    try {
+      expect(loadProjectInstructions(undefined)).toBe('')
+      expect(loadProjectInstructions('')).toBe('')
+      expect(loadProjectInstructions(dir)).toBe('')
+      expect(loadProjectInstructions(join(dir, 'missing'))).toBe('')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('loadProjectInstructions truncates content beyond 4096 chars', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'picoaide-ipc-agents-'))
+    try {
+      writeFileSync(join(dir, 'AGENTS.md'), 'x'.repeat(5000))
+      const out = loadProjectInstructions(dir)
+      expect(out.length).toBeLessThan(5000)
+      expect(out).toContain('截断')
+      expect(out.indexOf('截断')).toBeGreaterThan(4000)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('craft via ipc injects the workspace AGENTS.md into the model system prompt', async () => {
+    const { deps, store, model } = makeDeps('text')
+    const dir = mkdtempSync(join(tmpdir(), 'picoaide-ipc-agents-'))
+    try {
+      writeFileSync(join(dir, 'AGENTS.md'), '本项目禁止删除文件')
+      const handlers = buildAgentHandlers(deps)
+      const id = handlers['chat:new']({ mode: 'craft' })
+      store.setConversationWorkspace(id, dir)
+      await handlers['chat:ask']({ conversationId: id, content: 'hi' })
+      expect(model.systems.at(-1)).toContain('## 项目指令(AGENTS.md)')
+      expect(model.systems.at(-1)).toContain('本项目禁止删除文件')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('craft via ipc without AGENTS.md keeps the base system prompt', async () => {
+    const { deps, model } = makeDeps('text')
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({ mode: 'craft' })
+    await handlers['chat:ask']({ conversationId: id, content: 'hi' })
+    expect(model.systems.at(-1)).toBe('sys')
+  })
+
+  it('plan via ipc injects the workspace AGENTS.md too', async () => {
+    const { deps, store, model } = makeDeps('text')
+    const dir = mkdtempSync(join(tmpdir(), 'picoaide-ipc-agents-'))
+    try {
+      writeFileSync(join(dir, 'AGENTS.md'), '计划需包含风险说明')
+      const handlers = buildAgentHandlers(deps)
+      const id = handlers['chat:new']({ mode: 'plan' })
+      store.setConversationWorkspace(id, dir)
+      await handlers['chat:ask']({ conversationId: id, content: 'plan it' })
+      expect(model.systems.at(-1)).toContain('计划需包含风险说明')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('chat:continue / chat:approvePlan / chat:listRunning / artifacts', () => {

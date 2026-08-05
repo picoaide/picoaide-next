@@ -93,6 +93,8 @@ export interface CraftInput {
   tools?: Record<string, GatedTool>
   highRiskTools?: Set<string>
   maxSteps?: number
+  // 每次运行可覆盖系统提示(ipc 层注入会话 workspace 的 AGENTS.md 指令);缺省用引擎配置
+  sysPrompt?: string
 }
 
 // 重跑恢复输入(架构设计 §3.3.1a):截断到最后一条 user 消息重新多步循环
@@ -103,6 +105,7 @@ export interface ContinueInput {
   maxSteps?: number
   // 恢复时的初始状态:continue 用 running,Plan 批准执行用 executing
   status?: 'running' | 'executing'
+  sysPrompt?: string
 }
 
 // Plan 模式(架构设计 §3.3.4):首轮无工具出计划(plan)→ 用户确认(approvePlan)→ 第二轮带 tools 执行
@@ -112,6 +115,7 @@ export interface PlanInput {
   tools?: Record<string, GatedTool>
   highRiskTools?: Set<string>
   maxSteps?: number
+  sysPrompt?: string
 }
 
 export interface ApprovePlanInput {
@@ -120,6 +124,7 @@ export interface ApprovePlanInput {
   tools?: Record<string, GatedTool>
   highRiskTools?: Set<string>
   maxSteps?: number
+  sysPrompt?: string
 }
 
 // 与 src/main/store/messages.ts MessageRow 结构一致(引擎自包含,不 import store)
@@ -219,7 +224,7 @@ export class AgentEngine {
     store.appendMessage({ conversationId, role: 'user', content })
     const messages: ModelMessage[] = [...lastN(history, DEFAULT_CONTEXT_WINDOW), { role: 'user', content }]
     const tools = readOnlyTools(input.tools ?? {}) as Record<string, GatedTool>
-    const system = `${this.cfg.sysPrompt}
+    const system = `${input.sysPrompt ?? this.cfg.sysPrompt}
 
 ${PLAN_SYSTEM_NOTICE}`
     await this.runCraftLoop(
@@ -380,7 +385,7 @@ ${PLAN_SYSTEM_NOTICE}`
     const history = historyMessages(store.listMessages(conversationId))
     store.appendMessage({ conversationId, role: 'user', content })
     const messages: ModelMessage[] = [...lastN(history, DEFAULT_CONTEXT_WINDOW), { role: 'user', content }]
-    await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps, 'done', this.cfg.sysPrompt, abort)
+    await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps, 'done', input.sysPrompt ?? this.cfg.sysPrompt, abort)
   }
 
   // 重跑恢复(架构设计 §3.3.1a):截断到最后一条 user 消息(其后的 assistant/tool 行不进入上下文)重新多步循环
@@ -411,7 +416,7 @@ ${PLAN_SYSTEM_NOTICE}`
     const history = historyMessages(rows.slice(0, idx + 1))
     const messages = lastN(history, DEFAULT_CONTEXT_WINDOW)
     const maxSteps = input.maxSteps ?? this.cfg.maxSteps ?? DEFAULT_MAX_STEPS
-    await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps, 'done', this.cfg.sysPrompt, abort)
+    await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps, 'done', input.sysPrompt ?? this.cfg.sysPrompt, abort)
   }
 
   // Plan 确认(架构设计 §3.3.4):ok → 第二轮带 tools 执行(截断到最后一条 user 消息);!ok → rejected
@@ -435,6 +440,7 @@ ${PLAN_SYSTEM_NOTICE}`
       highRiskTools: input.highRiskTools,
       maxSteps: input.maxSteps,
       status: 'executing',
+      sysPrompt: input.sysPrompt,
     })
   }
 

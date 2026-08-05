@@ -1,5 +1,6 @@
 import { dialog, ipcMain, nativeTheme, shell } from 'electron'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { AgentEngine } from './agent/engine'
 import type { GatedTool, StoreLike as EngineStore } from './agent/engine'
 import type { AgentEvent } from './agent/events'
@@ -85,6 +86,25 @@ export interface ArtifactRow {
   created_at: string
 }
 
+// AGENTS.md 注入上限:单文件最长 4096 字符(防超大指令文件撑爆上下文)
+const MAX_PROJECT_INSTRUCTION_CHARS = 4096
+
+// 会话 workspace 的 AGENTS.md 注入系统提示(每次 craft/plan 调用重新读取,工作区文件可能变化);
+// workspace 为空(无项目会话,无法确定目录)时跳过,不误读全局目录之外的指令文件
+export function loadProjectInstructions(workspace: string | undefined): string {
+  if (!workspace || workspace.trim().length === 0) return ''
+  let content: string
+  try {
+    content = readFileSync(join(workspace, 'AGENTS.md'), 'utf8')
+  } catch {
+    return ''
+  }
+  if (content.length > MAX_PROJECT_INSTRUCTION_CHARS) {
+    content = content.slice(0, MAX_PROJECT_INSTRUCTION_CHARS) + '\n…(截断:AGENTS.md 超过 4096 字符)'
+  }
+  return '\n\n## 项目指令(AGENTS.md)\n' + content
+}
+
 export interface AgentIpcDeps {
   store: StoreLike
   createModel: () => LanguageModel
@@ -164,6 +184,9 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
     engine = null
   }
   deps.registerEngineReset?.(resetEngine)
+  // 基础系统提示(默认提示 + 技能指令),craft/plan 每次运行重新解析后追加 AGENTS.md
+  const basePrompt = async (): Promise<string> =>
+    typeof deps.sysPrompt === 'function' ? await deps.sysPrompt() : deps.sysPrompt
   const getEngine = async (): Promise<AgentEngine> => {
     if (!engine) {
       const sysPrompt = typeof deps.sysPrompt === 'function' ? await deps.sysPrompt() : deps.sysPrompt
@@ -229,19 +252,22 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
       return result.canceled ? [] : result.filePaths
     },
     'chat:ask': async ({ conversationId, content, mode: modeHint }) => {
+      const conv = deps.store.getConversation(conversationId)
       // 分派用"本次发送时按钮选择的模式"(modeHint);按钮只是 UI 状态,会话创建时定的 mode
       // 会误导用户(在 ask 会话点"执行"仍走 ask 无工具)。缺省回退会话 mode。
-      const mode = modeHint ?? deps.store.getConversation(conversationId)?.mode ?? 'craft'
+      const mode = modeHint ?? conv?.mode ?? 'craft'
       if (mode === 'ask') {
         // ask 会话(旧 UI/历史):纯聊天无工具单步(契约:ask = 无工具),不误配全量工具
         await (await getEngine()).ask({ conversationId, content })
       } else {
-        const { tools, highRiskTools } = await deps.getTools(deps.store.getConversation(conversationId)?.workspace)
+        const { tools, highRiskTools } = await deps.getTools(conv?.workspace)
+        // 每次运行重新组装:基础提示(默认+技能指令)+ 会话 workspace 的 AGENTS.md(文件可能中途变化)
+        const sysPrompt = (await basePrompt()) + loadProjectInstructions(conv?.workspace)
         if (mode === 'plan') {
           // 计划(只读):引擎内部过滤为只读工具集,多步调研出计划
-          await (await getEngine()).plan({ conversationId, content, tools, highRiskTools })
+          await (await getEngine()).plan({ conversationId, content, tools, highRiskTools, sysPrompt })
         } else {
-          await (await getEngine()).craft({ conversationId, content, tools, highRiskTools })
+          await (await getEngine()).craft({ conversationId, content, tools, highRiskTools, sysPrompt })
         }
       }
       // 自动标题:后台生成,不阻塞对话完成;内部处理兜底与去重
@@ -251,19 +277,23 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
     'chat:queue': async ({ conversationId, content }) => (await getEngine()).queueMessage(conversationId, content),
     // 重跑恢复(架构设计 §3.3.1a):ask 会话无工具重跑;craft/plan 带全量工具
     'chat:continue': async ({ conversationId }) => {
-      const mode = deps.store.getConversation(conversationId)?.mode ?? 'ask'
+      const conv = deps.store.getConversation(conversationId)
+      const mode = conv?.mode ?? 'ask'
       if (mode === 'ask') {
         await (await getEngine()).continueConversation({ conversationId })
       } else {
-        const { tools, highRiskTools } = await deps.getTools(deps.store.getConversation(conversationId)?.workspace)
-        await (await getEngine()).continueConversation({ conversationId, tools, highRiskTools })
+        const { tools, highRiskTools } = await deps.getTools(conv?.workspace)
+        const sysPrompt = (await basePrompt()) + loadProjectInstructions(conv?.workspace)
+        await (await getEngine()).continueConversation({ conversationId, tools, highRiskTools, sysPrompt })
       }
     },
     // Plan 确认(架构设计 §3.3.4):ok → 同会话第二轮带 tools 执行;!ok → rejected
     'chat:approvePlan': async ({ conversationId, ok }) => {
       if (ok) {
-        const { tools, highRiskTools } = await deps.getTools(deps.store.getConversation(conversationId)?.workspace)
-        await (await getEngine()).approvePlan({ conversationId, ok, tools, highRiskTools })
+        const conv = deps.store.getConversation(conversationId)
+        const { tools, highRiskTools } = await deps.getTools(conv?.workspace)
+        const sysPrompt = (await basePrompt()) + loadProjectInstructions(conv?.workspace)
+        await (await getEngine()).approvePlan({ conversationId, ok, tools, highRiskTools, sysPrompt })
       } else {
         await (await getEngine()).approvePlan({ conversationId, ok })
       }
@@ -277,7 +307,8 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
     'chat:messages': ({ conversationId }) => deps.store.listMessages(conversationId),
     // 消息编辑(chatbox 语义):改 user 消息内容 + 截断其后消息 + 重跑(模式决定是否带工具)
     'chat:editAndRerun': async ({ conversationId, messageId, content }) => {
-      const mode = deps.store.getConversation(conversationId)?.mode ?? 'ask'
+      const conv = deps.store.getConversation(conversationId)
+      const mode = conv?.mode ?? 'ask'
       deps.store.updateMessageContent(messageId, content)
       deps.store.deleteMessagesAfter(conversationId, messageId)
       // 引擎仅允许 running/executing/planning/failed 状态重跑,编辑场景先把 done 置为 failed
@@ -285,8 +316,9 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
       if (mode === 'ask') {
         await (await getEngine()).continueConversation({ conversationId })
       } else {
-        const { tools, highRiskTools } = await deps.getTools(deps.store.getConversation(conversationId)?.workspace)
-        await (await getEngine()).continueConversation({ conversationId, tools, highRiskTools })
+        const { tools, highRiskTools } = await deps.getTools(conv?.workspace)
+        const sysPrompt = (await basePrompt()) + loadProjectInstructions(conv?.workspace)
+        await (await getEngine()).continueConversation({ conversationId, tools, highRiskTools, sysPrompt })
       }
       if (deps.autoTitle) void deps.autoTitle({ conversationId })
     },
