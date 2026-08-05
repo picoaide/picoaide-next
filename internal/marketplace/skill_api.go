@@ -1,9 +1,12 @@
 package marketplace
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -113,10 +116,37 @@ func (a *API) downloadArchive(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "技能打包失败")
 		return
 	}
+	// SHA-256 of the built archive: persisted once into the skills row and
+	// served to clients so they can reject tampered/corrupt downloads.
+	sum, err := fileSHA256(pkg)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "技能校验失败")
+		return
+	}
+	if s.Checksum != sum {
+		s.Checksum = sum
+		// best effort: the header is authoritative for the bytes served;
+		// the row is re-synced on the next download if this write fails.
+		_ = serverstore.UpdateSkill(a.DB, s)
+	}
 	c.Header("Content-Type", "application/gzip")
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", s.Name+"-"+s.Version+".tar.gz"))
 	c.Header("X-Skill-Version", s.Version)
+	c.Header("X-Skill-Checksum", sum)
 	c.File(pkg)
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func skillJSON(s serverstore.Skill) gin.H {

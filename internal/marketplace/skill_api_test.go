@@ -4,7 +4,9 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -132,14 +134,30 @@ func TestSkillAPI(t *testing.T) {
 	if v := w.Header().Get("X-Skill-Version"); v != "1.0.0" {
 		t.Fatalf("X-Skill-Version = %q", v)
 	}
+	// checksum: sha256 of the served body, persisted to the skills row
+	sum := sha256.Sum256(w.Body.Bytes())
+	want := hex.EncodeToString(sum[:])
+	if cs := w.Header().Get("X-Skill-Checksum"); cs != want {
+		t.Fatalf("X-Skill-Checksum = %q, want %q", cs, want)
+	}
+	got, err := serverstore.GetSkill(db, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Checksum != want {
+		t.Fatalf("persisted checksum = %q, want %q", got.Checksum, want)
+	}
 	names := tarNames(t, w.Body.Bytes())
 	if !names["metadata.yaml"] || !names["SKILL.md"] {
 		t.Fatalf("archive entries = %v", names)
 	}
-	// second request: cache hit, still serves
+	// second request: cache hit, same checksum
 	w = doReq(r, "GET", "/api/marketplace/skills/demo/archive", token)
 	if w.Code != http.StatusOK {
 		t.Fatalf("archive cache status = %d", w.Code)
+	}
+	if cs := w.Header().Get("X-Skill-Checksum"); cs != want {
+		t.Fatalf("cache checksum = %q, want %q", cs, want)
 	}
 
 	// no token -> 401 on every endpoint
