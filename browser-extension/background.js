@@ -102,16 +102,6 @@ async function attach(tabId) {
   attachedTabId = tabId
 }
 
-async function detachIfAttached() {
-  if (attachedTabId === null) return
-  try {
-    await chrome.debugger.detach({ tabId: attachedTabId })
-  } catch {
-    // 忽略
-  }
-  attachedTabId = null
-}
-
 // 发送 CDP 命令:attach 失败(如 chrome:// 等内部页面)时给出明确错误
 async function cdp(command, params) {
   const tab = await activeTab()
