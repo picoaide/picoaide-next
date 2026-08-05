@@ -182,7 +182,7 @@ func (a *API) provisionUser(ui UserInfo) (*serverstore.User, error) {
 			Username:    ui.Username,
 			DisplayName: ui.DisplayName,
 			Email:       ui.Email,
-			Source:      sourceOf(ui.Source),
+			Source:      ui.Source,
 			Status:      1,
 		})
 		if err != nil {
@@ -207,14 +207,6 @@ func (a *API) provisionUser(ui UserInfo) (*serverstore.User, error) {
 		}
 	}
 	return u, nil
-}
-
-// sourceOf maps a provider identity source to the users.Source column value.
-func sourceOf(s string) string {
-	if s == "external" {
-		return "external"
-	}
-	return "local"
 }
 
 func (a *API) handleLogout(c *gin.Context) {

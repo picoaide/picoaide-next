@@ -240,7 +240,7 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 		u.Email = *req.Email
 	}
 	if req.Password != nil && *req.Password != "" {
-		hash, err := utilHash(*req.Password)
+		hash, err := util.HashPassword(*req.Password)
 		if err != nil {
 			writeError(c, http.StatusInternalServerError, "INTERNAL", "密码处理失败")
 			return
@@ -327,6 +327,3 @@ func currentAdmin(c *gin.Context) *serverstore.User {
 	u, _ := v.(*serverstore.User)
 	return u
 }
-
-// utilHash wraps util.HashPassword (kept here to avoid import churn in tests).
-func utilHash(pw string) (string, error) { return util.HashPassword(pw) }

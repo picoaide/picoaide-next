@@ -154,7 +154,7 @@ type mcpReq struct {
 }
 
 // encryptMCPValues encrypts sensitive env/headers values in place.
-func encryptMCPValues(db *sql.DB, req *mcpReq) error {
+func encryptMCPValues(req *mcpReq) error {
 	key, err := util.GetMasterKey()
 	if err != nil {
 		return err
@@ -177,7 +177,7 @@ func createMCPAdmin(c *gin.Context, db *sql.DB) {
 	if req.Transport == "" {
 		req.Transport = "stdio"
 	}
-	if err := encryptMCPValues(db, &req); err != nil {
+	if err := encryptMCPValues(&req); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "凭证加密失败")
 		return
 	}
@@ -229,14 +229,14 @@ func updateMCPAdmin(c *gin.Context, db *sql.DB) {
 		m.URL = req.URL
 	}
 	if req.Env != nil {
-		if err := encryptMCPValues(db, &req); err != nil {
+		if err := encryptMCPValues(&req); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "凭证加密失败")
 			return
 		}
 		m.Env = req.Env
 	}
 	if req.Headers != nil {
-		if err := encryptMCPValues(db, &req); err != nil {
+		if err := encryptMCPValues(&req); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "凭证加密失败")
 			return
 		}

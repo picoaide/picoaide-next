@@ -45,13 +45,6 @@ type OIDCProvider struct {
 	flows    map[string]*oidcFlow
 }
 
-// NewOIDCProvider creates a provider from settings and performs issuer
-// discovery.
-func NewOIDCProvider(cfg map[string]string) (*OIDCProvider, error) {
-	p := &OIDCProvider{}
-	return p, p.Configure(cfg)
-}
-
 func (p *OIDCProvider) Name() string { return "oidc" }
 
 func (p *OIDCProvider) Configure(cfg map[string]string) error {

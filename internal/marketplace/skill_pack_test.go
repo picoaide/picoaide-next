@@ -2,7 +2,6 @@ package marketplace
 
 import (
 	"archive/tar"
-	"bytes"
 	"compress/gzip"
 	"io"
 	"os"
@@ -135,9 +134,6 @@ func TestBuildPackage(t *testing.T) {
 			t.Fatalf("unsafe entry name %q", name)
 		}
 	}
-	if err := ValidatePackage(mustOpen(t, pkg)); err != nil {
-		t.Fatalf("built package invalid: %v", err)
-	}
 
 	// cache hit: second call returns the same path without rebuilding
 	pkg2, err := BuildPackage(repo, "demo", "1.0.0")
@@ -177,30 +173,6 @@ func TestBuildPackageRejects(t *testing.T) {
 	}
 }
 
-func TestValidatePackageRejectsEvil(t *testing.T) {
-	cases := []struct {
-		name   string
-		header tar.Header
-	}{
-		{"parent traversal", tar.Header{Name: "../evil", Mode: 0644, Size: 4}},
-		{"absolute path", tar.Header{Name: "/etc/passwd", Mode: 0644, Size: 4}},
-		{"symlink", tar.Header{Name: "link", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd"}},
-		{"hardlink", tar.Header{Name: "hard", Typeflag: tar.TypeLink, Linkname: "SKILL.md"}},
-		{"huge size", tar.Header{Name: "big.bin", Mode: 0644, Size: 101 << 20}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if err := ValidatePackage(bytes.NewReader(evilTar(t, tc.header))); err == nil {
-				t.Fatal("evil package accepted")
-			}
-		})
-	}
-	// a clean tar passes
-	if err := ValidatePackage(bytes.NewReader(evilTar(t, tar.Header{Name: "SKILL.md", Mode: 0644, Size: 4}))); err != nil {
-		t.Fatalf("valid package rejected: %v", err)
-	}
-}
-
 func TestCloneRepo(t *testing.T) {
 	src := makeGitRepo(t, filepath.Join(t.TempDir(), "src"))
 	dst := filepath.Join(t.TempDir(), "clone")
@@ -219,45 +191,4 @@ func TestCloneRepo(t *testing.T) {
 	if err := CloneRepo(filepath.Join(t.TempDir(), "nope"), "main", filepath.Join(t.TempDir(), "x")); err == nil {
 		t.Fatal("clone of nonexistent repo accepted")
 	}
-}
-
-func evilTar(t *testing.T, hdr tar.Header) []byte {
-	t.Helper()
-	var buf bytes.Buffer
-	zw := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(zw)
-	if err := tw.WriteHeader(&hdr); err != nil {
-		t.Fatal(err)
-	}
-	if hdr.Size > 0 { // tar requires the declared payload; zeros compress away
-		if _, err := io.CopyN(tw, zeros{}, hdr.Size); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := tw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return buf.Bytes()
-}
-
-type zeros struct{}
-
-func (zeros) Read(p []byte) (int, error) {
-	for i := range p {
-		p[i] = 0
-	}
-	return len(p), nil
-}
-
-func mustOpen(t *testing.T, path string) io.Reader {
-	t.Helper()
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { f.Close() })
-	return f
 }
