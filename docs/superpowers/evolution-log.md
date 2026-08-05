@@ -139,17 +139,30 @@
 - 意外收获:SIGTERM → 优雅退出日志 "shutting down…"(Round 7 功能真实生效)
 - 踩坑:pkill -f 匹配 bash 自身命令行自杀(第 3 次,改用精确进程名);api_key 明文被 DecryptSecret 拒绝(安全设计有效)
 
-## Round 9 计划(待执行)
+## Round 9(2026-08-06):密码策略 + 验签 + 异步上传
 
-剩余低优先项(做完全部即收尾):
-- 密码策略:admin 建用户强制最小长度(差距 #4)
-- 技能包 checksum 验签落地(差距 #5)
-- 知识库上传异步化(差距 #7:大文件同步阻塞;扫描版 PDF OCR 后置)
-- 文档技能包评估(pdf 表格/xlsx;沙盒 python 依赖评估,不合适则 JS 方案或放弃并记录理由)
-- 最终评估"完善标准"结论 + 收尾
+**实施**:
+1. `34430b7` feat: password policy and skill checksum verification
+   - minPasswordLength=10:createUser/updateUser 改密校验(utf8.RuneCount);登录限流不动
+   - skills.checksum 列早已存在但从未写入(存而不验)→ downloadArchive 打包后算 SHA-256 回写 + X-Skill-Checksum 响应头;客户端 marketplace downloadArchive 校验包 sha256 与头一致,不匹配拒绝(fail-closed),plugin_ipc 加 CHECKSUM_MISMATCH
+   - 测试:Go 2 组 + TS 3 例;508 passed
+2. `b44f674` feat: async knowledge upload queue
+   - 迁移 0012:kb_documents 加 status/error 列;队列=DB(StartUploadQueue 2 worker,ClaimPendingKBDocument 最老 pending → 提取 → ready/error);pending 行跨重启存活、崩溃自愈、幂等
+   - 上传 multipart:同步校验(扩展名/≤16MB)→ 落盘 + pending → 202 立即返回;JSON 文本路径保持同步
+   - 搜索/列表只查 ready;错误保留原文件(OCR 后置,需 tesseract 服务端依赖,记录理由);POST /documents/:id/retry 重新入队
+   - 测试:TestKBPendingDocLifecycle + 重写 3 个 multipart 用例
+
+**验证**:make check EXIT 0;508 passed | 2 skipped;已 push
+
+## 完善标准评估(2026-08-06)
+
+**客户端可用性**:✅ 多步 agent 循环(审批门控/计划模式/重试/超时/故障转移)、上下文管理(摘要压缩/工具落盘/AGENTS.md 注入/健康指示)、多模态(图片粘贴/文件拖拽)、浏览器语义操作(fill/select/waitFor/dialog/语义快照)、产物(预览/回灌)、可视化(步骤轨迹)、健壮性(断链/半开/重连)
+**客户端易用性**:✅ 零配置登录、技能建议安装、上下文指示、artifact 面板、步骤卡、图片输入
+**服务端**:✅ 认证(local/LDAP/OIDC/token 管理)、网关(限流/计量/故障转移/流式超时/审计)、商城(技能/凭证/验签/限流+审计)、知识库(可写/授权撤销/异步上传/FTS)、运维(优雅退出/healthz/version)、webadmin(搜索/分页/确认/审计页)
+**收尾**:剩余可选优化(文档技能包 python 环境评估、扫描 PDF OCR、本地密码过期)——依赖外部环境或低价值,记录在案,达到"完善"标准。
 
 ## 验证基线(每轮后更新)
 
 - make check(服务端 go test + 客户端 vitest + typecheck)EXIT 0
-- 客户端:505 passed | 2 skipped(507)(各轮递增)
+- 客户端:508 passed | 2 skipped(510)(各轮递增)
 - 构建:cd desktop && npm run build 成功
