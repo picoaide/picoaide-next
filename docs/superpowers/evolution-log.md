@@ -100,14 +100,28 @@
 
 **验证**:make check EXIT 0;505 passed | 2 skipped;已 push
 
-## Round 6 计划(待执行)
+## Round 6(2026-08-06):网关容灾 + token 管理
 
-服务端高价值项实施(调研清单最值得先做 5 件):
-- ① 网关故障转移(provider 重试:超时/5xx 换下一个)+ 流式读空闲超时
-- ② api_tokens 管理页(Users 页 token 列表:名称/最后使用/撤销)
-- ③ 知识库 revoke+编辑接口
-- ④ webadmin 危险操作确认+用户搜索
-- ⑤ 优雅退出+healthz 升级+版本号
+**实施**:
+1. `0a21fee` feat: gateway failover and stream idle timeout
+   - MatchModels(同模型全部候选)→ 逐个 forward:连接错误/5xx/首字节超时转下一个,4xx 原样不转;单 provider 不重试(防重复计费)
+   - STREAM_IDLE_TIMEOUT=90s(测试可注入):readLineWithIdle,超时写 SSE 错误 UPSTREAM_IDLE_TIMEOUT 终止;首字节 ResponseHeaderTimeout 120s
+   - 流开始后不转移;usage 语义不变(失败不计费)
+   - failover_test.go 7 用例
+2. `621ae4b` feat: admin api token management
+   - api_tokens 表已有 name/last_used_at/revoked(零迁移);ListTokensByUser(清空 TokenHash)/RevokeTokenByID(幂等)/TouchTokenLastUsed(VerifyToken 内自动更新)
+   - GET /api/admin/users/:id/tokens + POST /api/admin/tokens/:id/revoke(AdminAuth+CSRF)
+   - webadmin Users 页令牌对话框(名称/创建/过期/最后使用/状态 Badge+撤销 confirm)
+   - 测试:serverstore 3 + serverauth AdminTokens 全场景
+
+**验证**:make check EXIT 0;505 passed | 2 skipped;已 push
+
+## Round 7 计划(待执行)
+
+服务端剩余项:
+- ③ 知识库 revoke+编辑接口(高)
+- ④ webadmin 危险操作确认+用户搜索(中)
+- ⑤ 优雅退出+healthz DB Ping+版本号(低)
 
 ## 验证基线(每轮后更新)
 
