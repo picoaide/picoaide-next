@@ -190,8 +190,8 @@ func TestAdminChannelProviderUpdateKeepsSyncedModels(t *testing.T) {
 	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/providers/%d", id), `{"name":"deepseek-v2"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("update channel provider: %d %s", w.Code, w.Body.String())
 	}
-	models, _ := serverstore.ListModels(db)
-	if len(models) != 1 || models[0].Name != "deepseek-v4-flash" {
+	models, _ := ListModels(db)
+	if len(models) != 1 || models[0].ID != "deepseek-v4-flash" {
 		t.Fatalf("synced model wiped by update: %+v", models)
 	}
 }

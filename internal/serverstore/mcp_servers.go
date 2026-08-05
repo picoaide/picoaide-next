@@ -24,14 +24,6 @@ type MCPServer struct {
 	UpdatedAt   time.Time
 }
 
-// MCPConfigDownload is one row of the credential-fetch audit trail.
-type MCPConfigDownload struct {
-	ID        int64
-	UserID    int64
-	MCPID     int64
-	CreatedAt time.Time
-}
-
 func scanMCPServer(row interface{ Scan(...any) error }) (*MCPServer, error) {
 	var m MCPServer
 	var args, env, headers, createdAt, updatedAt string
@@ -88,19 +80,6 @@ func UpdateMCPServer(db *sql.DB, m *MCPServer) error {
 	return nil
 }
 
-// DeleteMCPServer removes the row; returns ErrNotFound if absent.
-func DeleteMCPServer(db *sql.DB, id int64) error {
-	res, err := db.Exec("DELETE FROM mcp_servers WHERE id = ?", id)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
 // ListMCPServers returns all plugins, filtered to enabled ones when enabledOnly.
 func ListMCPServers(db *sql.DB, enabledOnly bool) ([]MCPServer, error) {
 	q := `SELECT ` + mcpColumns + ` FROM mcp_servers`
@@ -128,28 +107,6 @@ func ListMCPServers(db *sql.DB, enabledOnly bool) ([]MCPServer, error) {
 func RecordDownload(db *sql.DB, userID, mcpID int64) error {
 	_, err := db.Exec("INSERT INTO mcp_config_downloads (user_id, mcp_id) VALUES (?, ?)", userID, mcpID)
 	return err
-}
-
-// ListDownloads returns audit rows for a user within [since, until].
-func ListDownloads(db *sql.DB, userID int64, since, until time.Time) ([]MCPConfigDownload, error) {
-	rows, err := db.Query(`SELECT id, user_id, mcp_id, created_at FROM mcp_config_downloads
-		WHERE user_id = ? AND created_at >= ? AND created_at <= ? ORDER BY id DESC`,
-		userID, since.Format(sqlTimeFormat), until.Format(sqlTimeFormat))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []MCPConfigDownload
-	for rows.Next() {
-		var d MCPConfigDownload
-		var createdAt string
-		if err := rows.Scan(&d.ID, &d.UserID, &d.MCPID, &createdAt); err != nil {
-			return nil, err
-		}
-		d.CreatedAt = parseSQLTime(createdAt)
-		out = append(out, d)
-	}
-	return out, rows.Err()
 }
 
 func marshalJSON(v any) string {
