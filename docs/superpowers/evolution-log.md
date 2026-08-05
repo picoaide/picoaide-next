@@ -79,13 +79,35 @@
 
 **验证**:make check EXIT 0;503 passed | 2 skipped;已 push
 
-## Round 5 计划(待执行)
+## Round 5(2026-08-06):服务端全功能审视 + 上下文健康显示
 
-剩余项(按价值):
-- 中高:文档技能包(pdf 表格/xlsx;沙盒 python 依赖需评估,可选 JS 方案)
-- 中:上下文健康显示(占用进度条,低)
-- 中:跨会话记忆(自动记忆提取性价比低,暂缓)
-- 服务端侧审视:网关/商城/知识库/webadmin 与客户端能力对齐(用户要求"服务端所有功能完善",下一轮派服务端调研:用量页、商城上架流程、知识库权限、LDAP/OIDC 体验)
+**服务端调研差距清单**(9 项,已入此日志备查):
+1. 高:网关无多模型故障转移(同模型多 provider 不能容灾)+ 无流式读空闲超时
+2. 中:网关审计缺失(usage 表无 latency/status)
+3. 高:api_tokens 黑盒(管理员不可见/不可撤销)
+4. 中:本地密码无策略(最小长度)
+5. 低:技能包无签名/checksum 存而不验
+6. 高:知识库只读不可改、授权不可撤销(无 revoke/编辑)
+7. 中:知识库上传同步阻塞、扫描版 PDF 失败
+8. 中:webadmin 无用户搜索/知识库分页/删除确认/审计页
+9. 低:无优雅退出/healthz 不查 DB/无版本号
+
+**实施**:
+- `75b3f04` feat: context usage indicator
+  - 新事件 context_usage {chars,budget};估算复用 compact.ts messageLength(与摘要触发同源);runCraftLoop/runAskLoop 每轮一次
+  - ContextUsage.tsx(与 RunSteps 同区):12.4k/40k 字符 + 百分比;≥80% amber 提醒自动摘要;结束后清除
+  - 505 passed
+
+**验证**:make check EXIT 0;505 passed | 2 skipped;已 push
+
+## Round 6 计划(待执行)
+
+服务端高价值项实施(调研清单最值得先做 5 件):
+- ① 网关故障转移(provider 重试:超时/5xx 换下一个)+ 流式读空闲超时
+- ② api_tokens 管理页(Users 页 token 列表:名称/最后使用/撤销)
+- ③ 知识库 revoke+编辑接口
+- ④ webadmin 危险操作确认+用户搜索
+- ⑤ 优雅退出+healthz 升级+版本号
 
 ## 验证基线(每轮后更新)
 
