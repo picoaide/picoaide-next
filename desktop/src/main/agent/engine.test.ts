@@ -344,7 +344,6 @@ const tools = { file_read: fileRead, file_delete: fileDelete, file_wipe: fileWip
 afterEach(() => {
   vi.useRealTimers()
   vi.restoreAllMocks()
-  delete process.env['PICOAI_TEST_AUTO_APPROVE']
   deletedPaths.length = 0
   wipedPaths.length = 0
 })
@@ -354,15 +353,6 @@ describe('provider', () => {
     const model = createGatewayModel('https://gw.example.com', 'tok-123', 'deepseek-chat')
     expect(model.modelId).toBe('deepseek-chat')
     expect(model.provider).toBe('gateway.chat')
-  })
-})
-
-describe('AgentEngine gateway fetch injection', () => {
-  it('holds the configured fetch (session.defaultSession.fetch) for gateway calls', async () => {
-    const injected = vi.fn() as unknown as typeof fetch
-    const { engine } = makeEngine('text', { fetch: injected })
-    expect(engine.injectedFetch).toBe(injected)
-    await engine.ask({ conversationId: 1, content: 'hello' })
   })
 })
 
@@ -472,9 +462,9 @@ describe('AgentEngine ask mode', () => {
 describe('AgentEngine craft loop', () => {
   it('runs tool calls, feeds results back, and finishes', async () => {
     const { mock, events, engine } = makeEngine('tool-call')
-    const run = engine.run({
+    const run = engine.craft({
+      conversationId: 1,
       content: 'delete the file',
-      mode: 'craft',
       tools,
       highRiskTools: new Set(['file_delete']),
     })
@@ -492,10 +482,11 @@ describe('AgentEngine craft loop', () => {
 
   it('stops the loop when maxSteps is reached without feeding tool results back', async () => {
     const { mock, events, engine } = makeEngine('tool-call', { maxSteps: 1 })
-    const run = engine.run({
+    const run = engine.craft({
+      conversationId: 1,
       content: 'delete the file',
-      mode: 'craft',
       tools,
+      highRiskTools: new Set(),
     })
     await run
     expect(eventsOf(events, 'tool_end')).toHaveLength(1)
@@ -698,30 +689,15 @@ describe('AgentEngine craft (store-backed)', () => {
     expect(eventsOf(events, 'artifact')).toHaveLength(0)
   })
 
-  it('PICOAI_TEST_AUTO_APPROVE=1 auto-approves without emitting confirm_required', async () => {
-    process.env['PICOAI_TEST_AUTO_APPROVE'] = '1'
-    const { events, engine } = makeEngine('tool-call')
-    await engine.craft({ conversationId: 1, content: 'delete it', tools, highRiskTools: new Set(['file_delete']) })
-    expect(eventsOf(events, 'confirm_required')).toHaveLength(0)
-    expect(deletedPaths).toEqual(['/home/u/x.doc'])
-    expect(eventsOf(events, 'tool_end')).toHaveLength(1)
-  })
-
-  it('PICOAI_TEST_AUTO_APPROVE=0 auto-rejects without emitting confirm_required', async () => {
-    process.env['PICOAI_TEST_AUTO_APPROVE'] = '0'
-    const { events, engine } = makeEngine('tool-call')
-    await engine.craft({ conversationId: 1, content: 'delete it', tools, highRiskTools: new Set(['file_delete']) })
-    expect(eventsOf(events, 'confirm_required')).toHaveLength(0)
-    expect(deletedPaths).toEqual([])
-    expect(eventsOf(events, 'done')).toHaveLength(1)
-  })
-
   it('approval execution round followed by a new tool call never throws MissingToolResultsError', async () => {
     // 回归:审批批准后,执行轮模型继续调用免审批工具 → 结果跨轮回传。
     // 历史曾在此抛 MissingToolResultsError(SDK convert 要求 tool-call 后紧跟配对结果)。
-    process.env['PICOAI_TEST_AUTO_APPROVE'] = '1'
     const { events, engine, store, mock } = makeEngine('approval-chain')
-    await engine.craft({ conversationId: 1, content: 'delete then read', tools, highRiskTools: new Set(['file_delete']) })
+    const run = engine.craft({ conversationId: 1, content: 'delete then read', tools, highRiskTools: new Set(['file_delete']) })
+    await waitFor(() => eventsOf(events, 'confirm_required').length === 1)
+    const req = eventsOf(events, 'confirm_required')[0] as { data: { request_id: string } }
+    engine.confirm(req.data.request_id, true)
+    await run
     expect(eventsOf(events, 'error')).toHaveLength(0)
     expect(eventsOf(events, 'done')).toHaveLength(1)
     expect(deletedPaths).toEqual(['/home/u/x.doc'])
@@ -1050,9 +1026,9 @@ describe('knowledge base tools', () => {
 describe('approval gate', () => {
   it('blocks execution until confirm(requestId, true)', async () => {
     const { events, engine } = makeEngine('tool-call')
-    const run = engine.run({
+    const run = engine.craft({
+      conversationId: 1,
       content: 'delete it',
-      mode: 'craft',
       tools,
       highRiskTools: new Set(['file_delete']),
     })
@@ -1094,9 +1070,9 @@ describe('approval gate', () => {
 
   it('deny rejects the tool (SDK tool-output-denied) and feeds denial back to the model', async () => {
     const { mock, events, engine } = makeEngine('tool-call')
-    const run = engine.run({
+    const run = engine.craft({
+      conversationId: 1,
       content: 'delete it',
-      mode: 'craft',
       tools,
       highRiskTools: new Set(['file_delete']),
     })
@@ -1116,9 +1092,9 @@ describe('approval gate', () => {
   it('auto-denies after approvalTimeoutMs (no SDK tool timeout cuts the window)', async () => {
     vi.useFakeTimers()
     const { events, engine } = makeEngine('tool-call', { approvalTimeoutMs: 1000 })
-    const run = engine.run({
+    const run = engine.craft({
+      conversationId: 1,
       content: 'delete it',
-      mode: 'craft',
       tools,
       highRiskTools: new Set(['file_delete']),
     })
@@ -1137,9 +1113,9 @@ describe('approval gate', () => {
 
   it('serializes confirmations when a step contains multiple high-risk tools', async () => {
     const { events, engine } = makeEngine('two-tool-calls')
-    const run = engine.run({
+    const run = engine.craft({
+      conversationId: 1,
       content: 'delete everything',
-      mode: 'craft',
       tools,
       highRiskTools: new Set(['file_delete', 'file_wipe']),
     })
@@ -1163,10 +1139,10 @@ describe('approval gate', () => {
   })
 
   it('cancel rejects pending approvals and emits canceled, leaving no leaks', async () => {
-    const { events, engine } = makeEngine('tool-call')
-    const run = engine.run({
+    const { mock, events, engine } = makeEngine('tool-call')
+    const run = engine.craft({
+      conversationId: 1,
       content: 'delete it',
-      mode: 'craft',
       tools,
       highRiskTools: new Set(['file_delete']),
     })
@@ -1174,26 +1150,18 @@ describe('approval gate', () => {
     engine.cancel()
     await run
     expect(eventsOf(events, 'canceled')).toEqual([{ type: 'canceled', data: { reason: 'user_canceled' } }])
-    expect(engine.pendingApprovalCount).toBe(0)
     expect(deletedPaths).toEqual([])
-    const again = engine.run({
-      content: 'still there?',
-      mode: 'craft',
-      tools,
-      highRiskTools: new Set(['file_delete']),
-    })
-    await waitFor(() => eventsOf(events, 'confirm_required').length === 2)
-    const req1 = eventsOf(events, 'confirm_required')[1] as { data: { request_id: string } }
-    engine.confirm(req1.data.request_id, true)
-    await again
-    expect(engine.pendingApprovalCount).toBe(0)
+    // 同引擎未卡死:取消后仍可继续运行(挂起审批已结清、运行槽已释放)
+    mock.script = 'text'
+    await engine.craft({ conversationId: 1, content: 'still there?', tools, highRiskTools: new Set() })
+    expect(eventsOf(events, 'done')).toHaveLength(1)
   })
 
   it('confirm() for an already-settled request is a no-op', async () => {
     const { events, engine } = makeEngine('tool-call')
-    const run = engine.run({
+    const run = engine.craft({
+      conversationId: 1,
       content: 'delete it',
-      mode: 'craft',
       tools,
       highRiskTools: new Set(['file_delete']),
     })
@@ -1276,49 +1244,46 @@ describe('message conversion round trip', () => {
 
 describe('越界引导(boundary guide)', () => {
   it('工具越界 → confirm_required(allow_dir) → 确认后加入目录并自动重试', async () => {
-    const events: AgentEvent[] = []
+    const { mock, events, store } = makeEngine('tool-call', {}, makeStore(), 'file_read')
     const addedDirs: string[] = []
     const engine = new AgentEngine(
-      { model: {} as LanguageModel, sysPrompt: 'x', approvalTimeoutMs: 5000 },
-      {
-        emit: (ev) => events.push(ev),
-        addAllowedDir: (dir) => addedDirs.push(dir),
-      },
+      { model: mock as unknown as LanguageModel, sysPrompt: 'x', approvalTimeoutMs: 5000 },
+      { emit: (ev) => events.push(ev), store, addAllowedDir: (dir) => addedDirs.push(dir) },
     )
     const inner = vi.fn().mockRejectedValueOnce(new ToolError('路径不在允许目录内: /home/u/desktop'))
       .mockResolvedValueOnce('ok-after-retry')
     const t: GatedTool = { ...tool({ description: 't', inputSchema: z.object({}), execute: inner }), execute: inner }
-    const wrapped = engine.wrapToolForTest('file_read', t)
-    const run = (wrapped as any).execute({}, { toolCallId: 'call-1' })
-    await new Promise((r) => setTimeout(r, 10))
+    const run = engine.craft({ conversationId: 1, content: 'x', tools: { file_read: t }, highRiskTools: new Set() })
+    await waitFor(() => eventsOf(events, 'confirm_required').length === 1)
     const confirm = eventsOf(events, 'confirm_required')[0]
     expect(confirm).toBeDefined()
     const d = (confirm as any).data
     expect(d.op).toBe('allow_dir')
     expect(d.target).toBe('/home/u/desktop')
     expect(d.reason).toContain('加入可访问目录')
-    engine.confirm('call-1', true)
-    const out = await run
-    expect(out).toBe('ok-after-retry')
+    engine.confirm(d.request_id, true)
+    await run
     expect(addedDirs).toEqual(['/home/u/desktop'])
     expect(inner).toHaveBeenCalledTimes(2)
   })
 
   it('拒绝 → 不加入目录,错误回传模型', async () => {
-    const events: AgentEvent[] = []
+    const { mock, events, store } = makeEngine('tool-call', {}, makeStore(), 'file_read')
     const addedDirs: string[] = []
     const engine = new AgentEngine(
-      { model: {} as LanguageModel, sysPrompt: 'x', approvalTimeoutMs: 5000 },
-      { emit: (ev) => events.push(ev), addAllowedDir: (dir) => addedDirs.push(dir) },
+      { model: mock as unknown as LanguageModel, sysPrompt: 'x', approvalTimeoutMs: 5000 },
+      { emit: (ev) => events.push(ev), store, addAllowedDir: (dir) => addedDirs.push(dir) },
     )
     const inner = vi.fn().mockRejectedValue(new ToolError('路径不在允许目录内: /etc/passwd'))
     const t: GatedTool = { ...tool({ description: 't', inputSchema: z.object({}), execute: inner }), execute: inner }
-    const wrapped = engine.wrapToolForTest('file_read', t)
-    const run = (wrapped as any).execute({}, { toolCallId: 'call-2' })
-    await new Promise((r) => setTimeout(r, 10))
-    engine.confirm('call-2', false)
-    await expect(run).rejects.toThrow()
+    const run = engine.craft({ conversationId: 1, content: 'x', tools: { file_read: t }, highRiskTools: new Set() })
+    await waitFor(() => eventsOf(events, 'confirm_required').length === 1)
+    const req = eventsOf(events, 'confirm_required')[0] as { data: { request_id: string } }
+    engine.confirm(req.data.request_id, false)
+    await run
     expect(addedDirs).toEqual([])
+    // 错误回传模型(拒绝不授权,也不吞掉越界错误)
+    expect(eventsOf(events, 'tool_error')).toHaveLength(1)
   })
 })
 
@@ -1340,9 +1305,9 @@ describe('browser bridge end-to-end', () => {
       const { createBrowserTools } = await import('../tools/browser')
       const btools = createBrowserTools({ port })
       const { events, engine } = makeEngine('tool-call', {}, makeStore(), 'browser_navigate', { url: 'https://www.google.com' })
-      const run = engine.run({
+      const run = engine.craft({
+        conversationId: 1,
         content: '用浏览器打开谷歌',
-        mode: 'craft',
         tools: { browser_navigate: btools.browser_navigate as GatedTool },
         highRiskTools: new Set(['browser_navigate']),
       })

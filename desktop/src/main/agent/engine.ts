@@ -16,7 +16,6 @@ import {
 import { z } from 'zod'
 import { isAbsolute } from 'node:path'
 import type { AgentEvent } from './events'
-import { buildRunConfig, type Mode } from './modes'
 import { readOnlyTools, PLAN_MAX_STEPS } from './modes'
 import { PLAN_SYSTEM_NOTICE } from './prompt'
 import { artifactType } from './artifacts'
@@ -123,14 +122,6 @@ export interface ApprovePlanInput {
   maxSteps?: number
 }
 
-export interface RunOptions {
-  content: string
-  history?: ModelMessage[]
-  mode?: Mode
-  tools?: Record<string, Tool>
-  highRiskTools?: Set<string>
-}
-
 // 与 src/main/store/messages.ts MessageRow 结构一致(引擎自包含,不 import store)
 export interface DBMessage {
   role: string
@@ -159,9 +150,6 @@ export class AgentEngine {
   // 队列消费开关:仅多步循环(craft/continue/plan)开放。ask 单步无轮末消费点,
   // 入队消息会永远滞留(已落库但不处理) → ask 期间 chat:queue 直接拒绝
   private queueEnabled = false
-  // 测试钩子:1=自动允许 0=自动拒绝,仅 env 显式设置时生效。
-  // ponytail: 打包剔除靠 electron-vite/electron-builder 构建不含该 env;如需硬剔除可在 CI 构建脚本 `export -n PICOAI_TEST_AUTO_APPROVE`
-  private testAutoApprove: boolean | undefined
 
   constructor(cfg: EngineConfig, deps: EngineDeps) {
     this.cfg = {
@@ -172,18 +160,12 @@ export class AgentEngine {
       ...cfg,
     }
     this.deps = deps
-    const auto = process.env['PICOAI_TEST_AUTO_APPROVE']
-    this.testAutoApprove = auto === '1' ? true : auto === '0' ? false : undefined
   }
 
   // 事件自动附加运行会话 id(renderer 按 activeId 过滤,旧 run 迟到事件不污染新会话 UI);
   // 未运行(探针/断言错误)时用 0,renderer 侧忽略
   private emitEvent(ev: Omit<AgentEvent, 'conversationId'>): void {
     this.deps.emit({ ...ev, conversationId: this.runningConversationId ?? 0 } as AgentEvent)
-  }
-
-  get pendingApprovalCount(): number {
-    return this.pendingApprovals.size
   }
 
   // 当前运行任务所属会话(ipc 删除会话/登出时判断是否需先中止)
@@ -208,11 +190,6 @@ export class AgentEngine {
     const idx = this.pendingQueue.findIndex((q) => q.conversationId === conversationId)
     if (idx === -1) return undefined
     return this.pendingQueue.splice(idx, 1)[0].content
-  }
-
-  // 测试钩子:注入的 session.fetch(TOFU 生效);ipc 层断言接线正确
-  get injectedFetch(): typeof fetch | undefined {
-    return this.cfg.fetch
   }
 
   // Ask 模式:纯聊天、无工具、单步、持久化到 store(架构设计 §3.3.4)
@@ -708,89 +685,6 @@ ${PLAN_SYSTEM_NOTICE}`
     ])
   }
 
-  async run(opts: RunOptions): Promise<void> {
-    const mode = opts.mode ?? 'craft'
-    const maxSteps = this.cfg.maxSteps ?? DEFAULT_MAX_STEPS
-    const { tools } = buildRunConfig(mode, opts.tools ?? {}, maxSteps)
-    const messages: ModelMessage[] = [...(opts.history ?? [])]
-    if (opts.content) messages.push({ role: 'user', content: opts.content })
-
-    const abort = new AbortController()
-    this.currentAbort = abort
-    const approvalParts: Array<{ approvalId: string; toolCall: { toolCallId: string; toolName: string; input: unknown }; isAutomatic?: boolean }> = []
-    let usage = { prompt_tokens: 0, completion_tokens: 0 }
-    let hadToolCall = false
-    let rounds = 0
-    try {
-      // 外层循环 + SDK 原生审批:审批请求轮结束后等回执,回传 tool-approval-response 续跑;
-      // 模型调用工具 → 结果回传后续跑;无工具调用/无审批 → 完成;轮数超 maxSteps → 报错
-      for (;;) {
-        // maxSteps 检查用上一轮 hadToolCall(本轮尚未执行)
-        if (rounds >= maxSteps) {
-          if (hadToolCall) {
-            this.emitEvent({ type: 'error', data: '达到最大步骤数' })
-            return
-          }
-          break
-        }
-        rounds++
-        hadToolCall = false
-        const result = streamText({
-          model: this.cfg.model,
-          system: this.cfg.sysPrompt,
-          messages: sanitizeMessages(messages),
-          tools: this.wrapTools(tools) as ToolSet,
-          toolApproval: this.buildToolApproval(tools, opts.highRiskTools ?? new Set()),
-          stopWhen: isStepCount(1),
-          abortSignal: abort.signal,
-          maxRetries: 0, // 快速失败,由上层循环/用户决定重试;避免模型错误时指数退避拖死 UI
-          timeout: DEFAULT_STREAM_TIMEOUT,
-          maxOutputTokens: this.cfg.maxOutputTokens,
-        })
-        for await (const part of result.fullStream) {
-          if (part.type === 'text-delta') {
-            this.emitEvent({ type: 'text_delta', data: part.text })
-          } else if (part.type === 'reasoning-delta') {
-            this.emitEvent({ type: 'reasoning_delta', data: part.text })
-          } else if (part.type === 'tool-approval-request') {
-            if (!part.isAutomatic) approvalParts.push(part)
-          } else if (part.type === 'tool-call') {
-            hadToolCall = true
-          } else if (part.type === 'finish') {
-            usage.prompt_tokens += part.totalUsage?.inputTokens ?? 0
-            usage.completion_tokens += part.totalUsage?.outputTokens ?? 0
-          } else if (part.type === 'error') {
-            // 抛给外层 catch 统一 emit error + rethrow(避免重复事件)
-            throw part.error instanceof Error ? part.error : new Error(String(part.error))
-          } else if (part.type === 'abort') {
-            this.emitEvent({ type: 'canceled', data: { reason: 'user_canceled' } })
-            return
-          }
-        }
-        // 推进上下文(审批 response 匹配 tool-call 依赖完整消息历史)
-        messages.push(...(await result.response).messages)
-        if (approvalParts.length > 0) {
-          await this.handleApprovalParts(undefined, approvalParts, messages)
-          approvalParts.length = 0
-          continue
-        }
-        if (hadToolCall) continue
-        break
-      }
-      this.emitEvent({ type: 'done', data: { usage } })
-    } catch (err) {
-      if (abort.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
-        this.emitEvent({ type: 'canceled', data: { reason: 'user_canceled' } })
-      } else {
-        const message = err instanceof Error ? err.message : String(err)
-        this.emitEvent({ type: 'error', data: message })
-        throw err
-      }
-    } finally {
-      this.currentAbort = null
-    }
-  }
-
   // SDK 审批回执:resolve 挂起的审批请求(SDK 机制,60s 超时由 awaitApproval 自管)
   confirm(requestId: string, ok: boolean): void {
     this.pendingApprovals.get(requestId)?.resolve(ok)
@@ -811,11 +705,6 @@ ${PLAN_SYSTEM_NOTICE}`
     const out: Record<string, Tool> = {}
     for (const [name, t] of Object.entries(tools)) out[name] = this.wrapTool(name, t, conversationId)
     return out
-  }
-
-  // 测试钩子:包装单个工具(越界引导单测用;审批走 SDK toolApproval,不入 wrapTool)
-  wrapToolForTest(name: string, t: GatedTool): Tool {
-    return this.wrapTool(name, t)
   }
 
   private wrapTool(name: string, t: GatedTool, conversationId?: number): Tool {
@@ -875,11 +764,8 @@ ${PLAN_SYSTEM_NOTICE}`
     }
   }
 
-  // 审批请求挂起:60s 超时自动拒绝;confirm() 回执结清。测试钩子 PICOAI_TEST_AUTO_APPROVE 直通
+  // 审批请求挂起:60s 超时自动拒绝;confirm() 回执结清
   private awaitApproval(requestId: string): Promise<boolean> {
-    if (this.testAutoApprove !== undefined) {
-      return Promise.resolve(this.testAutoApprove)
-    }
     return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
         this.pendingApprovals.delete(requestId)
@@ -899,19 +785,16 @@ ${PLAN_SYSTEM_NOTICE}`
   private async handleApprovalParts(conversationId: number | undefined, parts: Array<{ approvalId: string; toolCall: { toolCallId: string; toolName: string; input: unknown }; isAutomatic?: boolean }>, messages: ModelMessage[]): Promise<void> {
     const responses: ToolApprovalResponse[] = []
     for (const part of parts) {
-      // 测试钩子(PICOAI_TEST_AUTO_APPROVE)直接结清,不发 confirm_required(与旧门控语义一致)
-      if (this.testAutoApprove === undefined) {
-        this.emitEvent({
-          type: 'confirm_required',
-          data: {
-            request_id: part.approvalId,
-            tool_call_id: part.approvalId,
-            op: part.toolCall.toolName,
-            target: approvalTarget(part.toolCall.toolName, part.toolCall.input),
-            reason: `执行 ${part.toolCall.toolName} 需要确认`,
-          },
-        })
-      }
+      this.emitEvent({
+        type: 'confirm_required',
+        data: {
+          request_id: part.approvalId,
+          tool_call_id: part.approvalId,
+          op: part.toolCall.toolName,
+          target: approvalTarget(part.toolCall.toolName, part.toolCall.input),
+          reason: `执行 ${part.toolCall.toolName} 需要确认`,
+        },
+      })
       const ok = await this.awaitApproval(part.approvalId)
       responses.push({
         type: 'tool-approval-response',
