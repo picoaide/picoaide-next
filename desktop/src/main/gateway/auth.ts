@@ -87,8 +87,12 @@ export async function login(serverURL: string, username: string, password: strin
 export async function fetchJSON(
   serverURL: string,
   path: string,
-  opts: { token?: string; method?: string; body?: unknown } = {},
+  opts: { token?: string; method?: string; body?: unknown; timeoutMs?: number } = {},
 ): Promise<any> {
+  // 统一超时(默认 15s):半开连接/黑洞路由下网关请求永不 settle 会卡死
+  // 启动(loadSession→bootstrap)、健康轮询(inFlight 冻结)、kb 工具与商城拉取
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 15000)
   let res: Response
   try {
     res = await gatewayFetch(`${serverURL}${path}`, {
@@ -98,16 +102,21 @@ export async function fetchJSON(
         ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}),
       },
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      signal: controller.signal,
     })
   } catch (e) {
+    if (controller.signal.aborted) throw new AuthError('network', 'timeout')
     throw new AuthError('network', e instanceof Error ? e.message : 'network error')
+  } finally {
+    clearTimeout(timer)
   }
 
   let data: any = null
+  let parseFailed = false
   try {
     data = await res.json()
   } catch {
-    data = null
+    parseFailed = true
   }
 
   if (!res.ok) {
@@ -119,6 +128,10 @@ export async function fetchJSON(
     }
     throw new ApiError(code, message)
   }
+  // 200 但 body 不是 JSON(网关异常/反代回 HTML):静默返回 null 会让调用方
+  // (kb 工具链)把 undefined 当成功结果 → 落库前 TypeError 整会话 failed;
+  // 204 No Content 是合法空响应,放行
+  if (parseFailed && res.status !== 204) throw new ApiError('UPSTREAM', '网关响应不是合法 JSON')
   return data
 }
 

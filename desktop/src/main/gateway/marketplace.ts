@@ -60,8 +60,11 @@ export async function downloadArchive(session: Session, name: string): Promise<{
   try {
     res = await gatewayFetch(`${session.serverURL}/api/marketplace/skills/${encodeURIComponent(name)}/archive`, {
       headers: { Authorization: `Bearer ${session.token}` },
+      // 下载超时:半开连接挂起会卡死安装流程
+      signal: AbortSignal.timeout(30000),
     })
-  } catch {
+  } catch (e) {
+    if (e instanceof Error && e.name === 'TimeoutError') throw new MarketplaceError('network', '下载超时')
     throw new MarketplaceError('network')
   }
   if (res.status === 401) throw new MarketplaceError('auth_expired')
@@ -74,7 +77,15 @@ export async function downloadArchive(session: Session, name: string): Promise<{
   }
   const version = res.headers.get('x-skill-version')
   if (!version) throw new MarketplaceError('server_error', 'missing X-Skill-Version header')
-  return { buffer: Buffer.from(await res.arrayBuffer()), version }
+  // 大小上限:恶意/异常大包直接吃满内存;Content-Length 缺省(分块传输)时靠读流累计
+  const MAX_ARCHIVE_BYTES = 50 * 1024 * 1024
+  const declared = Number(res.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > MAX_ARCHIVE_BYTES) {
+    throw new MarketplaceError('server_error', 'archive too large')
+  }
+  const buf = Buffer.from(await res.arrayBuffer())
+  if (buf.length > MAX_ARCHIVE_BYTES) throw new MarketplaceError('server_error', 'archive too large')
+  return { buffer: buf, version }
 }
 
 export async function listMcp(session: Session): Promise<MaskedMcp[]> {

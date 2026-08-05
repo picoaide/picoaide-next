@@ -70,6 +70,14 @@ describe('kb tools', () => {
     await expect(kbSearch(session, 'q', 1, 10)).rejects.toMatchObject({ message: 'method not found' })
     expect(KbError).toBeDefined()
   })
+
+  it('throws KbError when the gateway response lacks result (undefined success)', async () => {
+    // 200 + 缺 result:此前 rpc 返回 undefined,工具"成功"返回 undefined → 落库前 TypeError 整会话 failed
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ jsonrpc: '2.0', id: 1 }) }))
+    const { kbSearch } = await loadRemoteMcp()
+
+    await expect(kbSearch(session, 'q', 1, 10)).rejects.toMatchObject({ message: /缺少 result/ })
+  })
 })
 
 describe('toolsList', () => {

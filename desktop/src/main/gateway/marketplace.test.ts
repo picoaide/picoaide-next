@@ -46,6 +46,24 @@ describe('downloadArchive', () => {
     expect(init.headers.Authorization).toBe('Bearer tok')
   })
 
+  it('rejects archives larger than 50MB', async () => {
+    const big = new Uint8Array(50 * 1024 * 1024 + 1)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'Content-Type': 'application/gzip', 'X-Skill-Version': '1.0.0' }),
+        arrayBuffer: async () => big.buffer,
+      }),
+    )
+    const { downloadArchive, MarketplaceError } = await loadMarketplace()
+
+    const err = await downloadArchive(session, 'docx').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(MarketplaceError)
+    expect((err as { kind?: string }).kind).toBe('server_error')
+  })
+
   it('rejects non-gzip content-type', async () => {
     vi.stubGlobal(
       'fetch',

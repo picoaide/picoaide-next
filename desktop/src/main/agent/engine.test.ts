@@ -418,6 +418,35 @@ describe('AgentEngine ask mode', () => {
     expect(mock.callCount).toBe(1)
   })
 
+  it('craft retries a step whose stream failed before producing any output', async () => {
+    const { mock, events, engine, store } = makeEngine('throw-once', { retryCount: 1 })
+    await engine.craft({ conversationId: 1, content: 'hello', tools: {}, highRiskTools: new Set() })
+    // 首次调用上游抛错(流未开始)→ 重试 1 次成功
+    expect(mock.callCount).toBe(2)
+    expect(eventsOf(events, 'error')).toHaveLength(0)
+    expect(eventsOf(events, 'done')).toHaveLength(1)
+    expect(store.listMessages(1).map((m) => m.role)).toEqual(['user', 'assistant'])
+  })
+
+  it('craft does not retry a step that already executed tools (side effects)', async () => {
+    const { mock, engine } = makeEngine('throw-local', { retryCount: 5 })
+    await expect(
+      engine.craft({ conversationId: 1, content: 'delete it', tools: { file_delete: fileDelete }, highRiskTools: new Set() }),
+    ).rejects.toThrow('local fs error')
+    // 工具执行期间失败:重试会重复副作用,必须直接失败
+    expect(mock.callCount).toBe(1)
+  })
+
+  it('queueMessage rejects during ask (single-step has no dequeue point)', async () => {
+    const { engine, store } = makeEngine('text')
+    const run = engine.ask({ conversationId: 1, content: 'hello' })
+    // 等 ask 进入运行态(落库 user 行)
+    await waitFor(() => store.listMessages(1).length > 0)
+    expect(engine.queueMessage(1, 'queued?')).toBe(false)
+    await run
+    expect(store.listMessages(1).map((m) => m.role)).toEqual(['user', 'assistant'])
+  })
+
   it('skips DB writes and stays graceful when the conversation is deleted mid-run', async () => {
     const store = makeStore()
     store.updateConversationStatus = (id, status) => {

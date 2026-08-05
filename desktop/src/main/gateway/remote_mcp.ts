@@ -33,6 +33,7 @@ async function rpc(session: Session, method: string, params: Record<string, unkn
   })
   if (data?.error) throw new KbError(data.error.message ?? 'json-rpc error')
   const result = data?.result
+  if (result === undefined) throw new KbError('网关响应缺少 result')
   if (result?.isError) throw new KbError(textOf(result))
   return result
 }

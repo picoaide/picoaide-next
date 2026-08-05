@@ -26,10 +26,15 @@ interface Pending {
   id: number
 }
 
-export function startCdpServer(opts: { port?: number; handler?: CdpHandler; onExtensionChange?: (connected: boolean) => void } = {}): Promise<CdpServer> {
+export function startCdpServer(opts: { port?: number; handler?: CdpHandler; onExtensionChange?: (connected: boolean) => void; adoptDelayMs?: number } = {}): Promise<CdpServer> {
   const port = opts.port ?? DEFAULT_CDP_PORT
   const handler: CdpHandler = opts.handler ?? {}
   const onExtensionChange = opts.onExtensionChange
+  // 稳定连接门槛:纯协议无法区分"插件常连"与"Agent 的瞬时 sendCdp 短连接",
+  // 连接存活 ≥ adoptDelayMs(默认 1s)才允许成为 extension —— Agent 短连接毫秒级
+  // 永不满足,插件必满足;否则插件断开瞬间 Agent 连接被误设为 extension,
+  // 插件重连时被拒,转发楔住到 Agent 关闭为止(甚至永久白连)
+  const adoptDelayMs = opts.adoptDelayMs ?? 1000
   return new Promise<CdpServer>((resolve, reject) => {
     const wss = new WebSocketServer({ port, host: '127.0.0.1' })
     const clients = new Set<WebSocket>()
@@ -40,6 +45,15 @@ export function startCdpServer(opts: { port?: number; handler?: CdpHandler; onEx
     const setExtension = (ws: WebSocket | null) => {
       extension = ws
       onExtensionChange?.(ws !== null)
+    }
+
+    // 延迟接管:1s 后该连接仍存活且当前无有效 extension 时才接管
+    const adopt = (ws: WebSocket): void => {
+      setTimeout(() => {
+        if (!clients.has(ws) || ws.readyState !== WebSocket.OPEN) return
+        if (extension && extension !== ws && extension.readyState === WebSocket.OPEN) return
+        setExtension(ws)
+      }, adoptDelayMs)
     }
 
     const fail = (err: Error) => {
@@ -116,7 +130,7 @@ export function startCdpServer(opts: { port?: number; handler?: CdpHandler; onEx
 
     wss.on('connection', (ws) => {
       clients.add(ws)
-      if (!extension) setExtension(ws) // 第一个连入 = 插件(代理目标)
+      adopt(ws)
       ws.on('message', (raw: Buffer) => handleMessage(ws, raw))
       ws.on('close', () => {
         clients.delete(ws)
@@ -126,6 +140,13 @@ export function startCdpServer(opts: { port?: number; handler?: CdpHandler; onEx
             safeSend(p.ws, JSON.stringify({ id: p.id, error: { code: -32000, message: '浏览器插件未连接' } }))
           }
           pending.clear()
+          // 重新接管现存的最老存活连接(同样走稳定连接门槛,防误接管 Agent 短连接)
+          for (const c of clients) {
+            if (c.readyState === WebSocket.OPEN) {
+              adopt(c)
+              break
+            }
+          }
         } else {
           for (const [id, p] of pending) if (p.ws === ws) pending.delete(id)
         }
@@ -154,8 +175,11 @@ export async function sendCdp(
       fn()
     }
     const timer = setTimeout(() => {
+      const wasConnecting = ws.readyState === 0 // ws.CONNECTING
       ws.close()
-      finish(() => reject(new ToolError('浏览器插件未连接')))
+      // 区分"未连上"与"连上了但没响应"(插件连着但页面卡死/大页面慢):
+      // 前者报未连接,后者报超时,避免误导模型与用户
+      finish(() => reject(new ToolError(wasConnecting ? '浏览器插件未连接' : '浏览器操作超时,插件未响应')))
     }, opts.timeoutMs ?? 5000)
     ws.on('open', () => ws.send(JSON.stringify({ id, method, params })))
     ws.on('message', (data: Buffer) => {

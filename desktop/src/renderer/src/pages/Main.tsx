@@ -22,6 +22,7 @@ import ChatInput from '../components/ChatInput'
 import ConfirmDialog from '../components/ConfirmDialog'
 import ConfirmModal from '../components/ConfirmModal'
 import Messages from '../components/Messages'
+import { picoaide } from '../api/picoaide'
 import SearchDialog from '../components/SearchDialog'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore, type ProjectView } from '../stores/chat'
@@ -90,8 +91,22 @@ export default function Main({ onOpenSettings }: { onOpenSettings: (section?: 'm
     void useChatStore.getState().checkInterrupted()
     const off = window.picoaide.onInterrupted((list) => useChatStore.getState().onInterrupted(list))
     // 浏览器插件桥状态:启动拉取一次 + 订阅实时变化
-    void window.picoaide.cdpStatus().then((s) => useConnectionStore.getState().setBrowserConnected(s.extension))
+    void window.picoaide.cdpStatus().then((s) => {
+      useConnectionStore.getState().setBrowserConnected(s.extension)
+      // 端口被占用/CDP 桥启动失败:明确提示(否则用户只见"浏览器未连接"误以为是插件问题)
+      if (!s.running && s.error) toast(s.error)
+    })
     const offExt = window.picoaide.onCdpExtension(({ connected }) => useConnectionStore.getState().setBrowserConnected(connected))
+    // renderer 刷新/重启后:引擎可能仍在后台运行,自动选中运行中的会话让事件流恢复;
+    // 否则 done 事件被 conversationId 过滤,用户看到"发了消息没反应"
+    const { activeId, selectConversation } = useChatStore.getState()
+    if (activeId === null) {
+      void picoaide().listRunningConversations().then((running) => {
+        if (running.length > 0 && useChatStore.getState().activeId === null) {
+          void selectConversation(running[0].id)
+        }
+      })
+    }
     return () => {
       off()
       offExt()

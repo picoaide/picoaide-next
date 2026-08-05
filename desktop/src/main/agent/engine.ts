@@ -33,6 +33,11 @@ export const DEFAULT_MAX_STEPS = 20
 export const DEFAULT_APPROVAL_TIMEOUT_MS = 60_000
 export const DEFAULT_CONTEXT_WINDOW = 50
 export const DEFAULT_RETRY_COUNT = 1
+// 单轮输出上限(模型侧截断,防异常网关无限流撑爆内存/单行 DB)
+export const DEFAULT_MAX_OUTPUT_TOKENS = 16384
+// 流式超时(网络健壮性):网关半开(收连接不回数据/流中停)时任务不再永久挂起;
+// firstChunkMs = 首块 60s 内无响应判失败,chunkMs = 块间隔 60s 判失败
+export const DEFAULT_STREAM_TIMEOUT = { firstChunkMs: 60_000, chunkMs: 60_000 }
 const ERROR_PREFIX = 'Error: '
 
 // 注册表工具可附带按调用参数动态判定的审批谓词(如 command_exec 的白名单策略,架构设计 §3.4)。
@@ -46,6 +51,8 @@ export interface EngineConfig {
   approvalTimeoutMs?: number
   // 上游 5xx/网络错误时的重试次数(默认 1,engine 自管,不用 SDK 指数退避)
   retryCount?: number
+  // 单轮输出 token 上限(默认 16384,模型侧截断)
+  maxOutputTokens?: number
   // 注入 session.fetch(证书校验/TOFU 生效,架构设计 §3.3.7)
   fetch?: typeof fetch
 }
@@ -153,6 +160,9 @@ export class AgentEngine {
   private pendingQueue: Array<{ conversationId: number; content: string }> = []
   // 当前运行任务所属会话(队列仅对运行会话开放)
   private runningConversationId: number | null = null
+  // 队列消费开关:仅多步循环(craft/continue/plan)开放。ask 单步无轮末消费点,
+  // 入队消息会永远滞留(已落库但不处理) → ask 期间 chat:queue 直接拒绝
+  private queueEnabled = false
   // 测试钩子:1=自动允许 0=自动拒绝,仅 env 显式设置时生效。
   // ponytail: 打包剔除靠 electron-vite/electron-builder 构建不含该 env;如需硬剔除可在 CI 构建脚本 `export -n PICOAI_TEST_AUTO_APPROVE`
   private testAutoApprove: boolean | undefined
@@ -162,6 +172,7 @@ export class AgentEngine {
       maxSteps: DEFAULT_MAX_STEPS,
       approvalTimeoutMs: DEFAULT_APPROVAL_TIMEOUT_MS,
       retryCount: DEFAULT_RETRY_COUNT,
+      maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
       ...cfg,
     }
     this.deps = deps
@@ -188,7 +199,7 @@ export class AgentEngine {
   // 仅对正在运行的多步任务(craft/continue)开放;消息立即落库 user 行,
   // 中断/步数超限后 continue 截断重跑会自然从这条消息继续。
   queueMessage(conversationId: number, content: string): boolean {
-    if (!this.currentAbort) return false
+    if (!this.currentAbort || !this.queueEnabled) return false
     if (this.runningConversationId !== conversationId) return false
     const store = this.deps.store
     if (!store?.getConversation(conversationId)) return false
@@ -308,6 +319,8 @@ ${PLAN_SYSTEM_NOTICE}`
         stopWhen: isStepCount(1),
         abortSignal: abort.signal,
         maxRetries: 0, // 引擎自管重试(5xx 重试 1 次),避免指数退避拖死 UI
+        timeout: DEFAULT_STREAM_TIMEOUT,
+        maxOutputTokens: this.cfg.maxOutputTokens,
         ...(this.cfg.fetch ? { fetch: this.cfg.fetch } : {}),
       })
       let outcome: 'done' | 'canceled' = 'done'
@@ -467,6 +480,7 @@ ${PLAN_SYSTEM_NOTICE}`
     // 入口已 acquireRun(写 DB 前占槽)时复用;直接调用(测试)自行占槽
     const abort = acquiredAbort ?? this.acquireRun(conversationId)
     const wrapped = this.wrapTools(tools, conversationId) as ToolSet
+    this.queueEnabled = true // 多步循环轮末消费排队消息(ask 单步不置位)
 
     let canceled = false
     let steps = 0
@@ -559,69 +573,90 @@ ${PLAN_SYSTEM_NOTICE}`
     // 外层手动循环:每轮 streamText(1 步),轮末若有审批请求则挂起等用户回执再续跑。
     try {
       while (steps < maxSteps) {
+        // 每轮可重试:仅当本轮"流尚未开始"就失败(网络拒绝/5xx/首块超时)时重试——
+        // 无任何部分输出、无落库、无工具副作用,重试安全;流中途断(已有输出/已执行
+        // 工具)不重试,避免副作用重复与落库重复,走 failed + 用户继续恢复
+        const stepsBefore = steps
         try {
-          const result = streamText({
-            model: this.cfg.model,
-            system,
-            messages: sanitizeMessages(messages),
-            tools: wrapped,
-            toolApproval: this.buildToolApproval(tools, highRisk),
-            stopWhen: isStepCount(1),
-            abortSignal: abort.signal,
-            maxRetries: 0, // 快速失败,由上层/用户决定重试
-            ...(this.cfg.fetch ? { fetch: this.cfg.fetch } : {}),
-          })
-          const iter = (async (): Promise<void> => {
-            for await (const part of result.fullStream) {
-              switch (part.type) {
-                case 'text-delta':
-                  stepText += part.text
-                  this.emitEvent({ type: 'text_delta', data: part.text })
-                  break
-                case 'reasoning-delta':
-                  stepReasoning += part.text
-                  this.emitEvent({ type: 'reasoning_delta', data: part.text })
-                  break
-                case 'tool-call':
-                  stepToolCalls.push(part)
-                  break
-                case 'tool-result':
-                case 'tool-error':
-                  stepToolResults.push(part)
-                  break
-                case 'tool-approval-request':
-                  // SDK 审批请求:工具未执行;本轮结束后等用户回执
-                  if (!part.isAutomatic) approvalParts.push(part)
-                  break
-                case 'finish-step':
-                  flushStep()
-                  break
-                case 'finish':
-                  // 跨轮累加(外层循环每轮独立 streamText,SDK totalUsage 为单轮值)
-                  usage.prompt_tokens += part.totalUsage?.inputTokens ?? 0
-                  usage.completion_tokens += part.totalUsage?.outputTokens ?? 0
-                  break
-                case 'error':
-                  throw part.error instanceof Error ? part.error : new Error(String(part.error))
-                case 'abort':
-                  canceled = true
-                  return
+          for (let attempt = 0; ; attempt++) {
+            stepText = ''
+            stepReasoning = ''
+            stepToolCalls.length = 0
+            stepToolResults.length = 0
+            approvalParts.length = 0
+            try {
+              const result = streamText({
+                model: this.cfg.model,
+                system,
+                messages: sanitizeMessages(messages),
+                tools: wrapped,
+                toolApproval: this.buildToolApproval(tools, highRisk),
+                stopWhen: isStepCount(1),
+                abortSignal: abort.signal,
+                maxRetries: 0, // 快速失败,由上层/用户决定重试
+                timeout: DEFAULT_STREAM_TIMEOUT,
+                maxOutputTokens: this.cfg.maxOutputTokens,
+                ...(this.cfg.fetch ? { fetch: this.cfg.fetch } : {}),
+              })
+              const iter = (async (): Promise<void> => {
+                for await (const part of result.fullStream) {
+                  switch (part.type) {
+                    case 'text-delta':
+                      stepText += part.text
+                      this.emitEvent({ type: 'text_delta', data: part.text })
+                      break
+                    case 'reasoning-delta':
+                      stepReasoning += part.text
+                      this.emitEvent({ type: 'reasoning_delta', data: part.text })
+                      break
+                    case 'tool-call':
+                      stepToolCalls.push(part)
+                      break
+                    case 'tool-result':
+                    case 'tool-error':
+                      stepToolResults.push(part)
+                      break
+                    case 'tool-approval-request':
+                      // SDK 审批请求:工具未执行;本轮结束后等用户回执
+                      if (!part.isAutomatic) approvalParts.push(part)
+                      break
+                    case 'finish-step':
+                      flushStep()
+                      break
+                    case 'finish':
+                      // 跨轮累加(外层循环每轮独立 streamText,SDK totalUsage 为单轮值)
+                      usage.prompt_tokens += part.totalUsage?.inputTokens ?? 0
+                      usage.completion_tokens += part.totalUsage?.outputTokens ?? 0
+                      break
+                    case 'error':
+                      throw part.error instanceof Error ? part.error : new Error(String(part.error))
+                    case 'abort':
+                      canceled = true
+                      return
+                  }
+                }
+              })()
+              await this.consumeWithAbort(iter, abort)
+              // 推进上下文:每轮模型调用结果(含 tool-call/tool-result/审批请求)追加到 messages,
+              // 审批 response 才能匹配对应 tool-call(SDK 自动执行已批准工具)
+              messages.push(...(await result.response).messages)
+              break
+            } catch (err) {
+              if (abort.signal.aborted || isAbortError(err)) {
+                canceled = true
+                break
               }
+              const hasSideEffects =
+                steps !== stepsBefore || stepToolCalls.length > 0 || stepToolResults.length > 0 || approvalParts.length > 0
+              if (!hasSideEffects && attempt < (this.cfg.retryCount ?? 0) && isRetryable(err)) continue
+              throw err
             }
-          })()
-          await this.consumeWithAbort(iter, abort)
-          // 推进上下文:每轮模型调用结果(含 tool-call/tool-result/审批请求)追加到 messages,
-          // 审批 response 才能匹配对应 tool-call(SDK 自动执行已批准工具)
-          messages.push(...(await result.response).messages)
-        } catch (err) {
-          if (abort.signal.aborted || isAbortError(err)) {
-            canceled = true
-          } else {
-            this.markFailed(store, conversationId)
-            const message = err instanceof Error ? err.message : String(err)
-            this.emitEvent({ type: 'error', data: message })
-            throw err
           }
+        } catch (err) {
+          this.markFailed(store, conversationId)
+          const message = err instanceof Error ? err.message : String(err)
+          this.emitEvent({ type: 'error', data: message })
+          throw err
         }
         if (canceled) break
 
@@ -658,6 +693,7 @@ ${PLAN_SYSTEM_NOTICE}`
       if (store.getConversation(conversationId)) store.updateConversationStatus(conversationId, finalStatus)
       this.emitEvent({ type: 'done', data: { usage } })
     } finally {
+      this.queueEnabled = false
       if (this.runningConversationId === conversationId) this.runningConversationId = null
       this.currentAbort = null
     }
@@ -712,6 +748,8 @@ ${PLAN_SYSTEM_NOTICE}`
           stopWhen: isStepCount(1),
           abortSignal: abort.signal,
           maxRetries: 0, // 快速失败,由上层循环/用户决定重试;避免模型错误时指数退避拖死 UI
+          timeout: DEFAULT_STREAM_TIMEOUT,
+          maxOutputTokens: this.cfg.maxOutputTokens,
         })
         for await (const part of result.fullStream) {
           if (part.type === 'text-delta') {
@@ -1196,8 +1234,10 @@ function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === 'AbortError'
 }
 
-// 5xx / 上游 / 网络错误才重试;业务错误(审批拒绝等)不重试
-const RETRYABLE_RE = /5\d\d|502|503|504|upstream|network|ECONN|ETIMEDOUT|fetch failed/i
+// 5xx / 上游 / 网络错误才重试;业务错误(审批拒绝等)不重试。
+// timeout 覆盖 SDK 流超时消息("timeout of Xms exceeded",TimeoutError);
+// JSON 截断(SSE 半途断流 SDK 直抛原文)与 SocketError/terminated 也是抖动典型形态
+const RETRYABLE_RE = /5\d\d|502|503|504|upstream|network|ECONN|ETIMEDOUT|timeout|Unexpected end of JSON input|terminated|SocketError|fetch failed/i
 
 function isRetryable(err: unknown): boolean {
   return err instanceof Error && RETRYABLE_RE.test(err.message)

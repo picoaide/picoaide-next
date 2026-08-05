@@ -43,13 +43,15 @@ describe('browser tool execution', () => {
   })
 
   it('returns the plugin result on success', async () => {
-    const srv = await startCdpServer({ port: 0 })
+    // 插件连接需经过稳定连接门槛(1s)才被接管为 extension,测试起服时缩短门槛
+    const srv = await startCdpServer({ port: 0, adoptDelayMs: 50 })
     servers.push(srv)
     const ws = await new Promise<WebSocket>((resolve, reject) => {
       const w = new WebSocket(`ws://127.0.0.1:${srv.port}`)
       w.on('open', () => resolve(w))
       w.on('error', reject)
     })
+    await new Promise((r) => setTimeout(r, 80)) // 等接管
     ws.on('message', (data: Buffer) => {
       const msg = JSON.parse(data.toString()) as { id: number; method: string }
       if (msg.method === 'browser.tabInfo') ws.send(JSON.stringify({ id: msg.id, result: { url: 'u', title: 't' } }))

@@ -56,6 +56,22 @@ describe('getBootstrap', () => {
       kind: 'auth_expired',
     })
   })
+
+  it('falls back to an empty config on garbage (truthy) bootstrap body', async () => {
+    // {} 这类 truthy 垃圾此前原样进缓存,createModel 的 models.find 直接 TypeError
+    const { validateBootstrap } = await loadBootstrap()
+    const { config, fellBack } = validateBootstrap({} as never)
+    expect(fellBack).toBe(true)
+    expect(config.models).toEqual([])
+    expect(config.default_model).toBe('')
+  })
+
+  it('falls back to an empty config on null bootstrap body', async () => {
+    const { validateBootstrap } = await loadBootstrap()
+    const { config, fellBack } = validateBootstrap(null)
+    expect(fellBack).toBe(true)
+    expect(config.models).toEqual([])
+  })
 })
 
 describe('validateBootstrap', () => {

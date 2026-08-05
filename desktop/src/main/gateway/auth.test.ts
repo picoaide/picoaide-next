@@ -108,6 +108,37 @@ describe('fetchJSON', () => {
 
     await expect(fetchJSON('https://gw.example.com', '/x', { token: 't' })).rejects.toMatchObject({ kind: 'network' })
   })
+
+  it('throws ApiError UPSTREAM on 200 with non-JSON body', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token') } }))
+    const { fetchJSON, ApiError } = await loadAuth()
+
+    const err = await fetchJSON('https://gw.example.com', '/x', { token: 't' }).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as { code?: string }).code).toBe('UPSTREAM')
+  })
+
+  it('wires an AbortSignal timeout on fetchJSON requests', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ ok: 1 }) }))
+    const { fetchJSON } = await loadAuth()
+
+    await fetchJSON('https://gw.example.com', '/x', { token: 't' })
+
+    const init = vi.mocked(fetch).mock.calls[0][1] as RequestInit
+    expect(init.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('throws AuthError network timeout when the request hangs', async () => {
+    // 模拟半开连接:fetch 只响应 abort,不返回(黑洞路由挂起)
+    vi.stubGlobal('fetch', vi.fn((_url: string, init?: RequestInit) => new Promise((_res, rej) => {
+      init?.signal?.addEventListener('abort', () => rej(new DOMException('aborted', 'AbortError')))
+    })))
+    const { fetchJSON } = await loadAuth()
+
+    await expect(fetchJSON('https://gw.example.com', '/x', { token: 't', timeoutMs: 20 })).rejects.toMatchObject({
+      kind: 'network',
+    })
+  })
 })
 
 describe('session persistence', () => {

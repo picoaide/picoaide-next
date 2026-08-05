@@ -377,7 +377,7 @@ app.whenReady().then(async () => {
 
   registerIpcHandlers({
     ...buildHandlers(),
-    'cdp:status': () => ({ running: cdpServer !== null, port: cdpPort, extension: cdpExtension }),
+    'cdp:status': () => ({ running: cdpServer !== null, port: cdpPort, extension: cdpExtension, error: cdpServer === null ? 'CDP 桥启动失败(端口可能被占用)' : null }),
     ...buildAuthHandlers(authDeps),
     ...buildPluginHandlers({
       store: { getSetting: (k) => getSetting(db, k), setSetting: (k, v) => setSetting(db, k, v) },
@@ -436,6 +436,7 @@ app.whenReady().then(async () => {
             title = await generateTitle(
               makeGatewayModel(session.serverURL, session.token, model.id),
               firstUser.content,
+              { fetch: gatewayFetch },
             )
           } catch {
             // 网关失败兜底:截取首条用户消息

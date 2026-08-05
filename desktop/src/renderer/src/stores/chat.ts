@@ -140,7 +140,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     creatingConversation = true
     try {
       // 流式运行中新建:先停当前任务,否则旧 run 事件串到新会话且引擎单槽被占
-      if (get().streaming) await picoaide().chatCancel()
+      if (get().streaming) await get().cancel()
       const id = await picoaide().chatNew({ mode: get().mode, projectId: get().activeProjectId })
       const [conversations, projects] = await Promise.all([picoaide().chatList(), picoaide().projectList()])
       pendingDelta = ''
@@ -194,7 +194,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   selectConversation: async (id) => {
     // 流中切换会话:先停掉当前运行,否则流式增量/toolCalls 会串台显示到新会话
     if (get().activeId !== id && get().streaming) {
-      await picoaide().chatCancel()
+      await get().cancel()
     }
     const [all, artifacts] = await Promise.all([picoaide().chatMessages(id), picoaide().chatArtifacts(id)])
     const page = mapMessages(all.slice(-PAGE_SIZE))
@@ -285,15 +285,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ messages, streaming: false, streamingText: '', streamingReasoning: '' })
       await get().loadConversations()
       return true
-    } catch {
-      set((s) => ({ streaming: false, streamingText: '', streamingReasoning: '', localError: s.localError ?? '发送失败,请重试' }))
+    } catch (e) {
+      set((s) => ({ streaming: false, streamingText: '', streamingReasoning: '', localError: s.localError ?? (e instanceof Error && e.message ? e.message : '发送失败,请重试') }))
       return false
     }
   },
 
   // 重跑恢复(架构设计 §3.3.1a):选中会话 → 截断到最后一条 user 消息重跑;UI 保留历史显示
   continueConversation: async (id) => {
-    if (get().streaming) await picoaide().chatCancel()
+    if (get().streaming) await get().cancel()
     const messages = mapMessages(await picoaide().chatMessages(id))
     const artifacts = await picoaide().chatArtifacts(id)
     pendingDelta = ''
@@ -303,14 +303,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await picoaide().chatContinue(id)
       if (useChatStore.getState().activeId !== id) return
       await get().loadConversations()
-    } catch {
-      set((s) => ({ streaming: false, localError: s.localError ?? '继续失败,请重试' }))
+    } catch (e) {
+      set((s) => ({ streaming: false, localError: s.localError ?? (e instanceof Error && e.message ? e.message : '继续失败,请重试') }))
     }
   },
 
   // Plan 确认(架构设计 §3.3.4):ok → 第二轮带 tools 执行;!ok → rejected
   approvePlan: async (id, ok) => {
-    if (get().streaming) await picoaide().chatCancel()
+    if (get().streaming) await get().cancel()
     pendingDelta = ''
     runToken++
     set({ streaming: true, localError: null })
@@ -319,8 +319,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (useChatStore.getState().activeId !== id) return
       set({ streaming: false })
       await get().loadConversations()
-    } catch {
-      set((s) => ({ streaming: false, localError: s.localError ?? '操作失败,请重试' }))
+    } catch (e) {
+      set((s) => ({ streaming: false, localError: s.localError ?? (e instanceof Error && e.message ? e.message : '操作失败,请重试') }))
     }
   },
 
@@ -346,7 +346,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { activeId } = get()
     if (activeId === null) return
     // 流式中编辑:先停当前任务,避免与引擎单运行守卫冲突(否则报"已有任务在运行"且旧 run 继续跑)
-    if (get().streaming) await picoaide().chatCancel()
+    if (get().streaming) await get().cancel()
     pendingDelta = ''
     runToken++
     set({ streaming: true, streamingText: '', streamingReasoning: '', localError: null })
@@ -357,8 +357,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const messages = mapMessages(await picoaide().chatMessages(activeId))
       set({ messages, streaming: false, streamingText: '' })
       await get().loadConversations()
-    } catch {
-      set((s) => ({ streaming: false, streamingText: '', localError: s.localError ?? '编辑失败,请重试' }))
+    } catch (e) {
+      set((s) => ({ streaming: false, streamingText: '', localError: s.localError ?? (e instanceof Error && e.message ? e.message : '编辑失败,请重试') }))
     }
   },
 

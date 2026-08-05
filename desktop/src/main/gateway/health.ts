@@ -24,7 +24,10 @@ export function createHealthPoller(session: Session, opts: { intervalMs: number 
         if (inFlight || stopped) return // 上一轮 ping 未返回:跳过;已停止:不再回调(登出后不闪现旧状态)
         inFlight = true
         try {
-          cb(await ping(session.serverURL, session.token))
+          const status = await ping(session.serverURL, session.token)
+          // 挂起期间可能已 stop(登出/过期):迟到结果不再回调
+          if (stopped) return
+          cb(status)
         } finally {
           inFlight = false
         }
