@@ -94,9 +94,9 @@ type providerReq struct {
 	Channel string   `json:"channel"`
 }
 
-func providerJSON(p serverstore.GatewayProvider, maskKey bool) gin.H {
+func providerJSON(p serverstore.GatewayProvider) gin.H {
 	key := p.APIKeyEnc
-	if maskKey && key != "" {
+	if key != "" {
 		key = "***"
 	}
 	return gin.H{
@@ -118,7 +118,7 @@ func listProviders(c *gin.Context, db *sql.DB) {
 	}
 	out := make([]gin.H, 0, len(list))
 	for _, p := range list {
-		out = append(out, providerJSON(p, true))
+		out = append(out, providerJSON(p))
 	}
 	c.JSON(http.StatusOK, gin.H{"providers": out})
 }
@@ -160,7 +160,7 @@ func createProvider(c *gin.Context, db *sql.DB) {
 			return
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(*p, true)})
+	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(*p)})
 }
 
 func updateProvider(c *gin.Context, db *sql.DB) {
@@ -220,7 +220,7 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 			return
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(*p, true)})
+	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(*p)})
 }
 
 func deleteProvider(c *gin.Context, db *sql.DB) {
@@ -401,10 +401,5 @@ func modelEnabledByDB(db *sql.DB, name string) bool {
 	if err != nil {
 		return false
 	}
-	for _, m := range models {
-		if m.ID == name {
-			return true
-		}
-	}
-	return false
+	return ModelEnabled(models, name)
 }

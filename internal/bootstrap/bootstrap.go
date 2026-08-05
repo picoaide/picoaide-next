@@ -63,9 +63,6 @@ func Build(db *sql.DB) (*Response, error) {
 	for _, sk := range skills {
 		skillItems = append(skillItems, SkillItem{Name: sk.Name, Version: sk.Version, Description: sk.Description})
 	}
-	if err != nil {
-		return nil, err
-	}
 	mcp, err := marketplace.SuggestedMCP(db)
 	if err != nil {
 		return nil, err
@@ -75,7 +72,7 @@ func Build(db *sql.DB) (*Response, error) {
 		return nil, err
 	}
 	defaultModel := settings["gateway.default_model"]
-	if !modelEnabled(models, defaultModel) {
+	if !llmgateway.ModelEnabled(models, defaultModel) {
 		log.Printf("bootstrap: default_model %q not in enabled models, falling back", defaultModel)
 		if len(models) > 0 {
 			defaultModel = models[0].ID
@@ -96,18 +93,6 @@ func Build(db *sql.DB) (*Response, error) {
 		MCP:          mcp,
 		Web:          web,
 	}, nil
-}
-
-func modelEnabled(models []llmgateway.Model, id string) bool {
-	if id == "" {
-		return false
-	}
-	for _, m := range models {
-		if m.ID == id {
-			return true
-		}
-	}
-	return false
 }
 
 // SkillItem is the bootstrap skill suggestion shape.
