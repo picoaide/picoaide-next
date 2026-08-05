@@ -36,14 +36,28 @@
 
 **验证**:448 passed | 2 skipped,typecheck 0,make check EXIT 0
 
-## Round 2 计划(待执行)
+## Round 2(2026-08-06):长会话与多模态输入
 
-调研建议"最值得先做"剩余项:
-- 高:token 阈值触发 LLM 摘要压缩(替换 50 条硬截断;失败必须回退现状)
-- 高:粘贴图片/拖拽文件进对话(易用性)
+**实施**:
+1. `8f3baae` feat: LLM-summary compaction for long conversations
+   - 新 agent/compact.ts:CONTEXT_TOKEN_BUDGET=40000 字符;超预算从后往前保留(至少 20 条),更早 user/assistant 文本拼块→单轮 streamText 中文摘要→{role:'user'} 置顶;剪口孤儿 tool 行丢弃
+   - ask/plan/craft/continue 四处统一走 compactContext(注入 session.fetch+abort);摘要失败/超时→回退原截断;不落库
+   - 8 新测试;481 passed
+2. `312b1d4` feat: paste images and drag files into chat
+   - renderer 粘图/拖文件→dataUrl→新 IPC chat:attach(校验 png/jpeg/webp≤5MB、文件≤100MB、文件名清洗)→落盘 <workspace>/attachments/→content 存路径引用,base64 永不落 DB
+   - 引擎 userContentParts() 解析引用→AI SDK image part;重放/历史/continue 均恢复;读失败降级纯文本
+   - 关键发现:@ai-sdk/openai-compatible v3 序列化 image part 变 null,但 streamText 自动转 v4 file part→实际请求体 image_url,网关零改动
+   - 新 src/shared/attachments.ts(renderer/main 共享);37 新测试;485 passed
+
+**验证**:make check EXIT 0;485 passed | 2 skipped;build 成功;已 push
+
+## Round 3 计划(待执行)
+
+调研建议剩余项:
 - 高:文档表格技能包(pdfplumber/openpyxl,需技能运行时 python 环境)
 - 高:浏览器桥语义定位(fill/waitFor/dialog + 结构化快照,多端)
 - 中:任务步骤卡片 UI + artifact 预览/回灌
+- 中:跨会话记忆/上下文健康显示(低优先级)
 
 ## 验证基线(每轮后更新)
 
