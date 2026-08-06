@@ -13,6 +13,10 @@ let ws = null
 let retryDelay = 1000
 let retryTimer = null
 let attachedTabId = null
+// 本次操作序列固定的目标标签页:首个操作记录并复用(Agent 多步操作中用户切标签不串台)。
+// 手动切标签后的行为保持现状:targetTabId 为空时按当前活动标签;目标标签被关闭后
+// 后续操作报错(Agent 可见),由用户重新发起恢复 —— 设计权衡,注释说明
+let targetTabId = null
 
 function setBadge(connected) {
   chrome.action.setBadgeText({ text: connected ? 'on' : 'off' })
@@ -70,8 +74,12 @@ async function handleMessage(raw) {
     return
   }
   if (!msg || typeof msg.id === 'undefined' || typeof msg.method !== 'string') return
+  // 简单 promise 队列串行化 dispatch:并发请求(如 dialog 与后续操作、双 attach)会互踩
+  // 竞态(attach detach/重、pendingDialogAction 覆盖);单标签页场景串行足够
+  const run = dispatchQueue.then(() => dispatch(msg.method, msg.params || {}))
+  dispatchQueue = run.then(() => undefined, () => undefined)
   try {
-    const result = await dispatch(msg.method, msg.params || {})
+    const result = await run
     send({ id: msg.id, result: result === undefined ? null : result })
   } catch (err) {
     send({ id: msg.id, error: { code: -32000, message: err.message || String(err) } })
@@ -79,11 +87,21 @@ async function handleMessage(raw) {
 }
 
 // ---- CDP(chrome.debugger)模式 ----
+let dispatchQueue = Promise.resolve()
 
 async function activeTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
   if (!tab || tab.id === undefined) throw new Error('未找到活动标签页')
   return tab
+}
+
+// 首个操作固定目标标签页并复用(B-4);navigate 在目标标签内导航,目标不变
+async function ensureTargetTab() {
+  if (targetTabId !== null) return targetTabId
+  const tab = await activeTab()
+  if (tab.id === undefined) throw new Error('未找到活动标签页')
+  targetTabId = tab.id
+  return targetTabId
 }
 
 async function attach(tabId) {
@@ -102,13 +120,16 @@ async function attach(tabId) {
   attachedTabId = tabId
 }
 
-// 发送 CDP 命令:attach 失败(如 chrome:// 等内部页面)时给出明确错误
+// 发送 CDP 命令:attach 失败(如 chrome:// 等内部页面)时给出明确错误;
+// 统一 10s 超时(插件侧不无限挂起)。dialog 事件处理走 chrome.debugger.sendCommand
+// 直发,不经过此包装(弹窗阻塞页面时需立即处理,排队会与挂起命令互锁)
 async function cdp(command, params) {
-  const tab = await activeTab()
-  if (tab.id === undefined) throw new Error('未找到活动标签页')
-  await attach(tab.id)
+  const tabId = await ensureTargetTab()
+  await attach(tabId)
   return new Promise((resolve, reject) => {
-    chrome.debugger.sendCommand({ tabId: tab.id }, command, params || {}, (result) => {
+    const timer = setTimeout(() => reject(new Error('CDP 命令超时: ' + command)), 10000)
+    chrome.debugger.sendCommand({ tabId }, command, params || {}, (result) => {
+      clearTimeout(timer)
       if (chrome.runtime.lastError) reject(new Error(String(chrome.runtime.lastError.message)))
       else resolve(result)
     })
@@ -149,7 +170,8 @@ function semanticSnapshot() {
   let omitted = 0
   let scanned = 0
   const cap = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
-  const text = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim()
+  // textContent 而非 innerText:innerText 会触发 O(子树) 布局计算(快照级联放大),textContent 纯读
+  const text = (el) => (el.textContent || '').replace(/\s+/g, ' ').trim()
   const esc = (s) => s.replace(/"/g, '&quot;')
   const emit = (s) => {
     if (seen[s]) return
@@ -171,7 +193,8 @@ function semanticSnapshot() {
     } else if (tag === 'A') {
       let t = text(node)
       if (!t) {
-        const img = node.querySelector('img')
+        // 限制作用域:只找带 alt 的图(链接内图通常至多一个),避免整棵子树扫描
+        const img = node.querySelector('img[alt]')
         t = (img && img.getAttribute('alt')) || ''
       }
       let href = node.getAttribute('href') || ''
@@ -293,14 +316,17 @@ chrome.debugger.onEvent.addListener((source, method) => {
 async function dispatch(method, params) {
   switch (method) {
     case 'browser.tabInfo': {
-      const tab = await activeTab()
+      // 固定目标标签页的最新 URL/标题(navigate 后保持原目标,不跟手动切换)
+      const tabId = await ensureTargetTab()
+      const tab = await chrome.tabs.get(tabId)
       return { url: tab.url, title: tab.title }
     }
     case 'browser.getContent':
-      // 默认返回语义快照(结构化、省 token);mode:'text' 兼容旧行为返回原始 innerText
+      // 默认返回语义快照(结构化、省 token);mode:'text' 兼容旧行为返回原始文本
+      // (textContent 而非 innerText:避免大页面快照触发布局计算)
       return evaluate(
         params.mode === 'text'
-          ? "document.body ? document.body.innerText.slice(0, 200000) : ''"
+          ? "document.body ? document.body.textContent.slice(0, 200000) : ''"
           : `(() => { try { return (${semanticSnapshot.toString()})() } catch (e) { return '[snapshot error] ' + String((e && e.message) || e).slice(0, 100) } })()`,
       )
     case 'browser.click':
