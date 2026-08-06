@@ -23,6 +23,35 @@ export interface FileEntry {
 }
 
 const MAX_SEARCH_RESULTS = 200
+// 整文件读入上限(readTextFile 与 edit/append 共用):超限拒绝,防数 GB 文件 OOM 主进程
+const MAX_READ_BYTES = 20 * 1024 * 1024
+// 目录遍历深度上限(递归 list/search):过深树(如 node_modules)同步遍历会冻结主进程
+const MAX_LIST_DEPTH = 8
+
+// 统一文件操作错误:原始 ENOENT/EACCES 直传模型不友好,包中文说明并保留 errno code
+function wrapFsError(op: string, p: string, err: unknown): never {
+  if (err instanceof ToolError) throw err
+  const e = err as NodeJS.ErrnoException
+  const code = e?.code ?? ''
+  const msg =
+    {
+      ENOENT: `文件或目录不存在: ${p}`,
+      EACCES: `无权限访问: ${p}`,
+      EPERM: `无权限访问: ${p}`,
+      EISDIR: `目标是目录,请指定文件: ${p}`,
+      ENOTDIR: `路径中的目录不存在: ${p}`,
+      ENAMETOOLONG: `路径过长: ${p}`,
+    }[code] ?? `文件操作失败(${op}): ${p}`
+  throw new ToolError(`${msg}${code ? ` [${code}]` : ''}`)
+}
+
+function fsOp<T>(op: string, p: string, fn: () => T): T {
+  try {
+    return fn()
+  } catch (err) {
+    wrapFsError(op, p, err)
+  }
+}
 
 // 无法解析为文本的二进制扩展(其余未知扩展按文本探测处理)
 const BINARY_EXTS = new Set([
@@ -112,13 +141,11 @@ async function extractDocxText(buf: Buffer): Promise<string> {
 }
 
 async function readTextFile(absPath: string, forced?: string): Promise<string> {
-  // 大文件上限:整文件读入 + 编码探测,数 GB 日志会 OOM 主进程(分页承诺仅针对文本流)
-  const MAX_READ_BYTES = 20 * 1024 * 1024
-  const st = fs.statSync(absPath)
+  const st = fsOp('read', absPath, () => fs.statSync(absPath))
   if (st.size > MAX_READ_BYTES) {
     throw new ToolError(`文件过大(${(st.size / 1024 / 1024).toFixed(1)}MB),超过 ${MAX_READ_BYTES / 1024 / 1024}MB 读取上限`)
   }
-  const buf = fs.readFileSync(absPath)
+  const buf = fsOp('read', absPath, () => fs.readFileSync(absPath))
   const ext = path.extname(absPath).toLowerCase()
   if (ext === '.docx') return extractDocxText(buf)
   if (ext === '.pdf' || isPdfMagic(buf)) return extractPdfText(buf)
@@ -188,6 +215,12 @@ function decodePdfHex(hex: string): string {
   return bytes.toString('utf8')
 }
 
+// ReDoS 防护:嵌套量词((a+)+、(a{2,})* 等)在 1MB 内容上灾难性回溯会冻结主进程。
+// 同步主线程无法限时中断正则 → 检测到嵌套量词直接拒绝,让模型改用简单字面量/正则
+const NESTED_QUANTIFIER_RE = /\([^()]*[+*{][^()]*\)[+*{]/
+// 无正则元字符的 content → 纯字面量子串匹配,不经过 RegExp(彻底绕开回溯面)
+const REGEX_METACHAR_RE = /[.^$*+?\\[\]{}|]/
+
 export function createFileTools(ctx: FileToolContext): Record<string, Tool> {
   return {
     file_read: tool({
@@ -217,8 +250,8 @@ export function createFileTools(ctx: FileToolContext): Record<string, Tool> {
       execute: async ({ path: p, content }) => {
         const abs = resolvePath(ctx, p)
         // ponytail: 父目录自动创建(mkdir recursive),引擎层保证路径在允许目录内
-        fs.mkdirSync(path.dirname(abs), { recursive: true })
-        fs.writeFileSync(abs, content, 'utf8')
+        fsOp('write', abs, () => fs.mkdirSync(path.dirname(abs), { recursive: true }))
+        fsOp('write', abs, () => fs.writeFileSync(abs, content, 'utf8'))
         return `已写入 ${abs}`
       },
     }),
@@ -232,13 +265,18 @@ export function createFileTools(ctx: FileToolContext): Record<string, Tool> {
       }),
       execute: async ({ path: p, oldText, newText }) => {
         const abs = resolvePath(ctx, p)
-        const buf = fs.readFileSync(abs)
+        // 大文件上限与 file_read 同口径:整文件读入,数 GB 日志不能 OOM 主进程
+        const st = fsOp('edit', abs, () => fs.statSync(abs))
+        if (st.size > MAX_READ_BYTES) {
+          throw new ToolError(`文件过大(${(st.size / 1024 / 1024).toFixed(1)}MB),超过 ${MAX_READ_BYTES / 1024 / 1024}MB 编辑上限`)
+        }
+        const buf = fsOp('edit', abs, () => fs.readFileSync(abs))
         const enc = detectEncoding(buf)
         const text = decodeBuffer(buf)
         const idx = text.indexOf(oldText)
         if (idx === -1) throw new ToolError(`未找到要替换的内容: ${oldText.slice(0, 50)}`)
         const out = text.slice(0, idx) + newText + text.slice(idx + oldText.length)
-        fs.writeFileSync(abs, encodeForWrite(out, enc))
+        fsOp('edit', abs, () => fs.writeFileSync(abs, encodeForWrite(out, enc)))
         return `已替换 1 处`
       },
     }),
@@ -253,12 +291,18 @@ export function createFileTools(ctx: FileToolContext): Record<string, Tool> {
         const abs = resolvePath(ctx, p)
         let enc = 'utf8'
         try {
+          // 大文件上限同 file_read:编码探测需整文件读入,超限拒绝(超大日志请用终端)
+          const st = fs.statSync(abs)
+          if (st.size > MAX_READ_BYTES) {
+            throw new ToolError(`文件过大(${(st.size / 1024 / 1024).toFixed(1)}MB),超过 ${MAX_READ_BYTES / 1024 / 1024}MB 追加上限`)
+          }
           const detected = detectEncoding(fs.readFileSync(abs))
           enc = detected === 'utf8-bom' ? 'utf8' : detected // 追加不带 BOM 前缀
-        } catch {
+        } catch (err) {
+          if (err instanceof ToolError) throw err
           enc = 'utf8' // 文件不存在:按 UTF-8 创建
         }
-        fs.appendFileSync(abs, encodeForWrite(content, enc))
+        fsOp('append', abs, () => fs.appendFileSync(abs, encodeForWrite(content, enc)))
         return `已追加到 ${abs}`
       },
     }),
@@ -270,7 +314,7 @@ export function createFileTools(ctx: FileToolContext): Record<string, Tool> {
       }),
       execute: async ({ path: p }) => {
         const abs = resolvePath(ctx, p)
-        fs.unlinkSync(abs)
+        fsOp('delete', abs, () => fs.unlinkSync(abs))
         return `已删除 ${abs}`
       },
     }),
@@ -284,15 +328,30 @@ export function createFileTools(ctx: FileToolContext): Record<string, Tool> {
       execute: async ({ path: p, recursive }) => {
         const abs = resolvePath(ctx, p)
         const out: FileEntry[] = []
-        const stack: string[] = [abs]
+        // 深度带进栈:同步遍历过深树(node_modules)会冻结主进程,深度/条数双上限
+        const stack: Array<{ dir: string; depth: number }> = [{ dir: abs, depth: 0 }]
         while (stack.length > 0) {
-          const dir = stack.pop() as string
-          for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+          const { dir, depth } = stack.pop() as { dir: string; depth: number }
+          let entries
+          try {
+            entries = fs.readdirSync(dir, { withFileTypes: true })
+          } catch (err) {
+            if (dir === abs) wrapFsError('list', dir, err) // 起始目录缺失/无权限:报中文错误
+            continue // 子目录无权限/已删除:跳过,不影响其余条目
+          }
+          for (const ent of entries) {
+            if (out.length >= MAX_SEARCH_RESULTS) break
             const full = path.join(dir, ent.name)
             const isDir = ent.isDirectory()
-            if (isDir && recursive) stack.push(full)
+            if (isDir && recursive && depth < MAX_LIST_DEPTH - 1) stack.push({ dir: full, depth: depth + 1 })
             const entry: FileEntry = { name: ent.name, path: full, isDir }
-            if (!isDir) entry.size = fs.statSync(full).size
+            if (!isDir) {
+              try {
+                entry.size = fs.statSync(full).size
+              } catch {
+                continue // 损坏/悬空 symlink:跳过该条目
+              }
+            }
             out.push(entry)
           }
         }
@@ -312,32 +371,51 @@ export function createFileTools(ctx: FileToolContext): Record<string, Tool> {
         const abs = resolvePath(ctx, p ?? '')
         const q = (query ?? '').toLowerCase()
         let contentRe: RegExp | null = null
+        let literal: string | null = null
         if (content) {
           if (content.length > 200) throw new ToolError('content 正则过长(>200 字符),请缩短')
-          try {
-            // ReDoS 防护:LLM 提供的正则可能灾难性回溯((a+)+$),同步主进程会冻结 UI;
-            // Node 20+ 的 RegExp 默认受限?不,显式限长 + 线性字符串上限兜底
-            contentRe = new RegExp(content, 'i')
-          } catch {
-            throw new ToolError(`非法正则: ${content.slice(0, 50)}`)
+          if (NESTED_QUANTIFIER_RE.test(content)) {
+            // ReDoS 防护:LLM 提供的正则可能灾难性回溯((a+)+$),同步主进程会冻结 UI
+            throw new ToolError('content 含嵌套量词(如 (a+)+),有回溯攻击风险,请改用简单正则或字面量')
+          }
+          if (REGEX_METACHAR_RE.test(content)) {
+            try {
+              contentRe = new RegExp(content, 'i')
+            } catch {
+              throw new ToolError(`非法正则: ${content.slice(0, 50)}`)
+            }
+          } else {
+            literal = content.toLowerCase()
           }
         }
-        if (!q && !contentRe) throw new ToolError('请提供 query(文件名)或 content(内容)')
+        if (!q && !contentRe && !literal) throw new ToolError('请提供 query(文件名)或 content(内容)')
         const out: FileEntry[] = []
-        const stack: string[] = [abs]
+        const stack: Array<{ dir: string; depth: number }> = [{ dir: abs, depth: 0 }]
         const rec = recursive ?? true
         const MAX_FILE_BYTES = 1024 * 1024
         while (stack.length > 0 && out.length < MAX_SEARCH_RESULTS) {
-          const dir = stack.pop() as string
-          for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+          const { dir, depth } = stack.pop() as { dir: string; depth: number }
+          let entries
+          try {
+            entries = fs.readdirSync(dir, { withFileTypes: true })
+          } catch (err) {
+            if (dir === abs) wrapFsError('search', dir, err) // 起始目录缺失/无权限:报中文错误
+            continue // 子目录无权限/已删除:跳过
+          }
+          for (const ent of entries) {
             if (out.length >= MAX_SEARCH_RESULTS) break
             const full = path.join(dir, ent.name)
             const isDir = ent.isDirectory()
-            if (isDir && rec) stack.push(full)
+            if (isDir && rec && depth < MAX_LIST_DEPTH - 1) stack.push({ dir: full, depth: depth + 1 })
             if (isDir) continue
             if (q && !ent.name.toLowerCase().includes(q)) continue
-            if (contentRe) {
-              const st = fs.statSync(full)
+            if (contentRe || literal) {
+              let st
+              try {
+                st = fs.statSync(full)
+              } catch {
+                continue // 损坏/悬空 symlink:跳过
+              }
               if (st.size > MAX_FILE_BYTES) continue
               let text = ''
               try {
@@ -345,10 +423,15 @@ export function createFileTools(ctx: FileToolContext): Record<string, Tool> {
               } catch {
                 continue
               }
-              if (!contentRe.test(text)) continue
+              if (contentRe && !contentRe.test(text)) continue
+              if (literal && !text.toLowerCase().includes(literal)) continue
             }
             const entry: FileEntry = { name: ent.name, path: full, isDir }
-            entry.size = fs.statSync(full).size
+            try {
+              entry.size = fs.statSync(full).size
+            } catch {
+              continue
+            }
             out.push(entry)
           }
         }

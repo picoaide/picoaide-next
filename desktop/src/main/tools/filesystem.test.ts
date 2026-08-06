@@ -210,6 +210,12 @@ describe('file_read', () => {
     await expect(exec(tools.file_read, { path: '/etc/passwd' })).rejects.toThrow('路径不在允许目录内')
     await expect(exec(tools.file_read, { path: '../evil.txt' })).rejects.toThrow('路径不在允许目录内')
   })
+
+  it('reports a missing file in Chinese with the errno preserved', async () => {
+    const { ctx } = makeCtx()
+    const tools = createFileTools(ctx)
+    await expect(exec(tools.file_read, { path: 'missing.txt' })).rejects.toThrow(/不存在/)
+  })
 })
 
 describe('file_write', () => {
@@ -245,6 +251,13 @@ describe('file_edit', () => {
     )
   })
 
+  it('rejects editing a file larger than the read cap', async () => {
+    const { ctx, dir } = makeCtx()
+    fs.writeFileSync(path.join(dir, 'huge.txt'), Buffer.alloc(21 * 1024 * 1024, 0x61))
+    const tools = createFileTools(ctx)
+    await expect(exec(tools.file_edit, { path: 'huge.txt', oldText: 'a', newText: 'b' })).rejects.toThrow(/过大|上限/)
+  })
+
   it('writes back a GBK file in GBK (no mojibake corruption)', async () => {
     const { ctx, dir } = makeCtx()
     fs.writeFileSync(path.join(dir, 'gbk.txt'), iconv.encode('中文测试', 'gbk'))
@@ -272,6 +285,13 @@ describe('file_append', () => {
     const tools = createFileTools(ctx)
     await exec(tools.file_append, { path: 'a.txt', content: '+tail' })
     expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('head+tail')
+  })
+
+  it('rejects appending to a file larger than the read cap', async () => {
+    const { ctx, dir } = makeCtx()
+    fs.writeFileSync(path.join(dir, 'huge.log'), Buffer.alloc(21 * 1024 * 1024, 0x61))
+    const tools = createFileTools(ctx)
+    await expect(exec(tools.file_append, { path: 'huge.log', content: '+x' })).rejects.toThrow(/过大|上限/)
   })
 })
 
@@ -338,6 +358,36 @@ describe('file_list', () => {
     const tools = createFileTools(ctx)
     await expect(exec(tools.file_list, { path: '/etc', recursive: true })).rejects.toThrow('路径不在允许目录内')
   })
+
+  it('caps recursive listing at 200 entries', async () => {
+    const { ctx, dir } = makeCtx()
+    for (let i = 0; i < 250; i++) fs.writeFileSync(path.join(dir, `f${i}.txt`), 'x')
+    const tools = createFileTools(ctx)
+    const out = JSON.parse(String(await exec(tools.file_list, { path: '.', recursive: true }))) as Array<{ name: string }>
+    expect(out.length).toBeLessThanOrEqual(200)
+  })
+
+  it('bounds recursion depth at 8 levels', async () => {
+    const { ctx, dir } = makeCtx()
+    let d = dir
+    for (let i = 0; i < 12; i++) {
+      d = path.join(d, 'sub')
+      fs.mkdirSync(d)
+    }
+    fs.writeFileSync(path.join(d, 'deep.txt'), 'x')
+    const tools = createFileTools(ctx)
+    const out = JSON.parse(String(await exec(tools.file_list, { path: '.', recursive: true }))) as Array<{ name: string; path: string }>
+    expect(out.find((e) => e.name === 'deep.txt')).toBeUndefined()
+  })
+
+  it('skips broken entries instead of failing the whole listing', async () => {
+    const { ctx, dir } = makeCtx()
+    fs.writeFileSync(path.join(dir, 'ok.txt'), 'x')
+    fs.symlinkSync(path.join(dir, 'gone-target'), path.join(dir, 'broken-link'))
+    const tools = createFileTools(ctx)
+    const out = JSON.parse(String(await exec(tools.file_list, { path: '.', recursive: false }))) as Array<{ name: string }>
+    expect(out.map((e) => e.name).sort()).toEqual(['ok.txt'])
+  })
 })
 
 describe('file_search', () => {
@@ -368,6 +418,31 @@ describe('file_search', () => {
     const tools = createFileTools(ctx)
     const out = JSON.parse(String(await exec(tools.file_search, { content: 'world' }))) as Array<{ name: string }>
     expect(out.map((e) => e.name)).toEqual(['a.txt'])
+  })
+
+  it('refuses content regex with nested quantifiers (ReDoS guard)', async () => {
+    const { ctx, dir } = makeCtx()
+    fs.writeFileSync(path.join(dir, 'f.txt'), 'a'.repeat(100 * 1024))
+    const tools = createFileTools(ctx)
+    await expect(exec(tools.file_search, { content: '(a+)+$' })).rejects.toThrow(/嵌套量词|正则/)
+    // 非嵌套正则不受影响
+    const out = JSON.parse(String(await exec(tools.file_search, { content: 'aaa' }))) as Array<{ name: string }>
+    expect(out.map((e) => e.name)).toEqual(['f.txt'])
+  })
+
+  it('search skips broken entries instead of failing', async () => {
+    const { ctx, dir } = makeCtx()
+    fs.writeFileSync(path.join(dir, 'ok.txt'), 'x')
+    fs.symlinkSync(path.join(dir, 'gone-target'), path.join(dir, 'broken-link'))
+    const tools = createFileTools(ctx)
+    const out = JSON.parse(String(await exec(tools.file_search, { query: 'ok' }))) as Array<{ name: string }>
+    expect(out.map((e) => e.name)).toEqual(['ok.txt'])
+  })
+
+  it('reports a missing start dir in Chinese', async () => {
+    const { ctx } = makeCtx()
+    const tools = createFileTools(ctx)
+    await expect(exec(tools.file_search, { query: 'x', path: 'nope' })).rejects.toThrow(/不存在/)
   })
 
   it('rejects an out-of-boundary path', async () => {
