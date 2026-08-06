@@ -35,6 +35,30 @@ export const DEFAULT_RETRY_COUNT = 1
 export const DEFAULT_MAX_OUTPUT_TOKENS = 16384
 const ERROR_PREFIX = 'Error: '
 
+// ---- debug 日志(结构级:只打角色/part 类型/工具 id,不打消息正文与密钥;PICOAI_DEBUG=0 可关,测试环境静音) ----
+const DEBUG_ENABLED = process.env.PICOAI_DEBUG !== '0' && process.env.NODE_ENV !== 'test'
+function debugLog(...args: unknown[]): void {
+  if (DEBUG_ENABLED) console.log('[picoaide-debug]', ...args)
+}
+
+// 消息序列结构摘要:role[part:type:id, part:type:id] ...(用于排查
+// "assistant tool_calls 无配对 tool 消息"类问题,一行看清消息形状)
+export function summarizeMessages(messages: ModelMessage[]): string {
+  return messages
+    .map((m) => {
+      const parts = Array.isArray(m.content) ? (m.content as Array<Record<string, unknown>>) : [{ type: 'text' }]
+      const desc = parts
+        .map((p) => {
+          const t = String(p.type)
+          const id = (p.toolCallId ?? p.approvalId) as string | undefined
+          return id ? `${t}:${String(id).slice(0, 8)}` : t
+        })
+        .join(',')
+      return `${m.role}[${desc}]`
+    })
+    .join(' ')
+}
+
 // 注册表工具可附带按调用参数动态判定的审批谓词(如 command_exec 的白名单策略,架构设计 §3.4)。
 // v7 用法:requiresApproval 谓词经 buildToolApproval 转成 streamText 的 toolApproval(SDK 原生审批)
 export type GatedTool = Tool & { requiresApproval?: (input: unknown) => boolean }
@@ -200,7 +224,11 @@ export class AgentEngine {
   // 长会话上下文压缩:超预算时对更早历史生成 LLM 摘要置顶(摘要失败回退 lastN 50);
   // 不落库,仅影响发往模型的 messages;走 session.fetch 与取消信号,同主循环
   private async compactContext(history: ModelMessage[], abort: AbortController): Promise<ModelMessage[]> {
-    return compactMessages(history, this.cfg.model, { fetch: this.cfg.fetch, abortSignal: abort.signal })
+    const total = history.reduce((sum, m) => sum + messageLength(m), 0)
+    if (total > CONTEXT_TOKEN_BUDGET) debugLog('compact: over budget', { chars: total, budget: CONTEXT_TOKEN_BUDGET, history: history.length })
+    const out = await compactMessages(history, this.cfg.model, { fetch: this.cfg.fetch, abortSignal: abort.signal })
+    if (total > CONTEXT_TOKEN_BUDGET) debugLog('compact: result', { messages: out.length, summary: out[0]?.role === 'user' })
+    return out
   }
 
   // 回复中用户发新消息:入队,当前步骤(轮)完成后自动处理,不打断运行。
@@ -213,6 +241,7 @@ export class AgentEngine {
     if (!store?.getConversation(conversationId)) return false
     store.appendMessage({ conversationId, role: 'user', content })
     this.pendingQueue.push({ conversationId, content })
+    debugLog('queueMessage accepted', { conversationId })
     return true
   }
 
@@ -253,6 +282,7 @@ export class AgentEngine {
       const history = historyMessages(store.listMessages(conversationId), this.attachOpts(conversationId).workspace)
       store.appendMessage({ conversationId, role: 'user', content })
       const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content: userContentParts(content, this.attachOpts(conversationId)) }]
+      debugLog('plan begin', { conversationId, messages: summarizeMessages(messages) })
       const tools = readOnlyTools(input.tools ?? {}) as Record<string, GatedTool>
       const system = `${input.sysPrompt ?? this.cfg.sysPrompt}
 
@@ -329,6 +359,7 @@ ${PLAN_SYSTEM_NOTICE}`
     let usage: { prompt_tokens: number; completion_tokens: number } = { prompt_tokens: 0, completion_tokens: 0 }
 
     const runOnce = async (): Promise<'done' | 'canceled'> => {
+      debugLog('ask req', summarizeMessages(sanitizeMessages(messages)))
       const result = streamText({
         model: this.cfg.model,
         system: this.cfg.sysPrompt,
@@ -429,6 +460,7 @@ ${PLAN_SYSTEM_NOTICE}`
       const history = historyMessages(store.listMessages(conversationId), this.attachOpts(conversationId).workspace)
       store.appendMessage({ conversationId, role: 'user', content })
       const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content: userContentParts(content, this.attachOpts(conversationId)) }]
+      debugLog('craft begin', { conversationId, messages: summarizeMessages(messages) })
       await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps, 'done', input.sysPrompt ?? this.cfg.sysPrompt, abort)
     } finally {
       this.releaseRun(conversationId)
@@ -464,6 +496,7 @@ ${PLAN_SYSTEM_NOTICE}`
       const history = historyMessages(rows.slice(0, idx + 1), this.attachOpts(conversationId).workspace)
       const messages = await this.compactContext(history, abort)
       const maxSteps = input.maxSteps ?? this.cfg.maxSteps ?? DEFAULT_MAX_STEPS
+      debugLog('continue begin', { conversationId, status: input.status, truncatedTo: idx, messages: summarizeMessages(messages) })
       await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps, 'done', input.sysPrompt ?? this.cfg.sysPrompt, abort)
     } finally {
       this.releaseRun(conversationId)
@@ -610,6 +643,7 @@ ${PLAN_SYSTEM_NOTICE}`
       while (steps < maxSteps) {
         // 每轮推一次上下文占用(运行中实时;完成后 renderer 清除)
         this.emitContextUsage(messages)
+        debugLog('step', steps, 'req', summarizeMessages(sanitizeMessages(messages)))
         // 每轮可重试:仅当本轮"流尚未开始"就失败(网络拒绝/5xx/首块超时)时重试——
         // 无任何部分输出、无落库、无工具副作用,重试安全;流中途断(已有输出/已执行
         // 工具)不重试,避免副作用重复与落库重复,走 failed + 用户继续恢复
@@ -621,6 +655,7 @@ ${PLAN_SYSTEM_NOTICE}`
             stepToolCalls.length = 0
             stepToolResults.length = 0
             approvalParts.length = 0
+            if (attempt > 0) debugLog('step', steps, 'retry attempt', attempt)
             try {
               const result = streamText({
                 model: this.cfg.model,
@@ -677,9 +712,11 @@ ${PLAN_SYSTEM_NOTICE}`
               // 推进上下文:每轮模型调用结果(含 tool-call/tool-result/审批请求)追加到 messages,
               // 审批 response 才能匹配对应 tool-call(SDK 自动执行已批准工具)
               messages.push(...(await result.response).messages)
+              debugLog('step', steps, 'resp', summarizeMessages(messages), { calls: stepToolCalls.length, results: stepToolResults.length, approvals: approvalParts.length })
               break
             } catch (err) {
               if (abort.signal.aborted || isAbortError(err)) {
+                debugLog('step', steps, 'aborted')
                 canceled = true
                 break
               }
@@ -692,6 +729,7 @@ ${PLAN_SYSTEM_NOTICE}`
                 stepText.length > 0 ||
                 stepReasoning.length > 0
               if (!hasSideEffects && attempt < (this.cfg.retryCount ?? 0) && isRetryable(err)) continue
+              debugLog('step', steps, 'ERROR', err instanceof Error ? err.message : String(err), { hasSideEffects, messages: summarizeMessages(messages) })
               throw err
             }
           }
@@ -794,10 +832,12 @@ ${PLAN_SYSTEM_NOTICE}`
           // 都在此统一替换,避免上下文爆炸与 DB 膨胀
           const output = this.spillForContext(conversationId, id, raw)
           this.emitEvent({ type: 'tool_end', data: { id, name, output, duration_ms: Date.now() - startedAt } })
+          debugLog('tool end', { name, id: id?.slice(0, 8), duration_ms: Date.now() - startedAt })
           return output
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           this.emitEvent({ type: 'tool_error', data: { id, name, error: message } })
+          debugLog('tool ERROR', { name, id: id?.slice(0, 8), error: message })
           throw err // SDK 记为工具错误回传模型
         }
       },
@@ -832,6 +872,7 @@ ${PLAN_SYSTEM_NOTICE}`
       const ok = await this.awaitApproval(id)
       if (!ok) throw err // 拒绝/超时:按原越界错误回传模型
       this.deps.addAllowedDir(dir)
+      debugLog('boundary allow_dir approved', { dir })
       // 授权后自动重试一次
       return execute(input, options)
     }
@@ -870,7 +911,9 @@ ${PLAN_SYSTEM_NOTICE}`
           reason: `执行 ${part.toolCall.toolName} 需要确认`,
         },
       })
+      debugLog('approval request', { op: part.toolCall.toolName, approvalId: part.approvalId.slice(0, 8), toolCallId: part.toolCall.toolCallId.slice(0, 8) })
       const ok = await this.awaitApproval(part.approvalId)
+      debugLog('approval response', { op: part.toolCall.toolName, approvalId: part.approvalId.slice(0, 8), ok })
       responses.push({
         type: 'tool-approval-response',
         approvalId: part.approvalId,
@@ -1105,35 +1148,35 @@ export function sanitizeMessages(messages: ModelMessage[]): ModelMessage[] {
   // 位置镜像检查(SDK convert 语义):每条 assistant 的 tool-call 在其后到下一个 user 消息之前
   // 必须有配对 tool-result,否则剥离。与 SDK 检查完全对齐,兜底重排/拆分的任何遗漏;
   // 审批豁免逐条判定(有审批回执的 tool-call 由 SDK 续跑补结果,不剥离)。
-  const final: ModelMessage[] = []
-  for (let i = 0; i < reordered.length; i++) {
-    const m = reordered[i]
-    if (m.role !== 'assistant' || !Array.isArray(m.content)) {
-      final.push(m)
-      continue
-    }
-    const parts = m.content as (TextPart | ToolCallPart)[]
-    const calls = parts.filter((p) => p.type === 'tool-call')
-    if (calls.length === 0) {
-      final.push(m)
-      continue
-    }
-    const found = new Set<string>()
-    for (let k = i + 1; k < reordered.length; k++) {
-      const mm = reordered[k]
-      if (mm.role === 'user') break
-      if (mm.role === 'tool' && Array.isArray(mm.content)) {
-        for (const p of mm.content as ToolResultPart[]) {
-          if (p.type === 'tool-result') found.add(p.toolCallId)
+    const final: ModelMessage[] = []
+    for (let i = 0; i < reordered.length; i++) {
+      const m = reordered[i]
+      if (m.role !== 'assistant' || !Array.isArray(m.content)) {
+        final.push(m)
+        continue
+      }
+      const parts = m.content as (TextPart | ToolCallPart)[]
+      const calls = parts.filter((p) => p.type === 'tool-call')
+      if (calls.length === 0) {
+        final.push(m)
+        continue
+      }
+      const found = new Set<string>()
+      for (let k = i + 1; k < reordered.length; k++) {
+        const mm = reordered[k]
+        if (mm.role === 'user') break
+        if (mm.role === 'tool' && Array.isArray(mm.content)) {
+          for (const p of mm.content as ToolResultPart[]) {
+            if (p.type === 'tool-result') found.add(p.toolCallId)
+          }
         }
       }
+      const stripped = parts.filter((p) => p.type !== 'tool-call' || found.has(p.toolCallId) || shielded(p.toolCallId))
+      const strippedCount = calls.length - stripped.filter((p) => p.type === 'tool-call').length
+      if (strippedCount > 0) debugLog('sanitize: stripped orphan tool-calls', { count: strippedCount, ids: calls.map((c) => c.toolCallId.slice(0, 8)) })
+      final.push({ ...m, content: stripped })
     }
-    final.push({
-      ...m,
-      content: parts.filter((p) => p.type !== 'tool-call' || found.has(p.toolCallId) || shielded(p.toolCallId)),
-    })
-  }
-  return final
+    return final
 }
 
 export function historyMessages(rows: DBMessage[], workspace?: string): ModelMessage[] {

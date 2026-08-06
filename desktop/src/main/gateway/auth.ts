@@ -106,6 +106,11 @@ export async function fetchJSON(
     parseFailed = true
   }
 
+  // 结构级请求日志(不打正文/token;PICOAI_DEBUG=0 关,测试静音)
+  if (process.env.PICOAI_DEBUG !== '0' && process.env.NODE_ENV !== 'test') {
+    console.log('[picoaide-debug]', 'gateway', opts.method ?? 'GET', path, '->', res.status, parseFailed ? '(non-JSON body)' : '')
+  }
+
   if (!res.ok) {
     const env = data?.error
     const code = (env?.code as string) ?? `HTTP_${res.status}`
