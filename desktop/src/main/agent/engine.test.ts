@@ -275,6 +275,9 @@ function makeStore(opts: { workspace?: string } = {}) {
       artifacts.push(a)
       return artifacts.length
     },
+    transaction: (fn: () => void): void => {
+      fn()
+    },
   }
   store.createConversation()
   return store
@@ -1615,6 +1618,60 @@ describe('user message attachments (multimodal)', () => {
     } finally {
       rmSync(join(path, '..'), { recursive: true, force: true })
     }
+  })
+})
+
+describe('run slot lifecycle (审计3-H1)', () => {
+  it('releases the run slot when DB writes throw after acquireRun, next craft runs', async () => {
+    const store = makeStore()
+    const origAppend = store.appendMessage
+    let throws = true
+    store.appendMessage = (input: AppendMessageInput) => {
+      if (throws) {
+        throws = false
+        throw new Error('db full')
+      }
+      return origAppend(input)
+    }
+    const { engine } = makeEngine('text', {}, store)
+    await expect(engine.craft({ conversationId: 1, content: 'hi' })).rejects.toThrow('db full')
+    expect(engine.runningConversation).toBeNull()
+    await engine.craft({ conversationId: 1, content: 'hi' })
+    expect(store.getConversation(1)?.status).toBe('done')
+  })
+
+  it('releases the run slot when plan DB writes throw', async () => {
+    const store = makeStore()
+    const origUpdate = store.updateConversationStatus
+    store.updateConversationStatus = () => {
+      throw new Error('db corrupt')
+    }
+    const { engine } = makeEngine('text', {}, store)
+    await expect(engine.plan({ conversationId: 1, content: 'hi' })).rejects.toThrow('db corrupt')
+    expect(engine.runningConversation).toBeNull()
+    store.updateConversationStatus = origUpdate
+    await engine.plan({ conversationId: 1, content: 'hi' })
+    expect(store.getConversation(1)?.status).toBe('planning')
+  })
+
+  it('flushStep writes go through store.transaction when available (审计3-L5)', async () => {
+    const store = makeStore()
+    let txCalls = 0
+    store.transaction = (fn: () => void) => {
+      txCalls++
+      fn()
+    }
+    const { engine } = makeEngine('tool-call', {}, store)
+    await engine.craft({ conversationId: 1, content: 'hi', tools, highRiskTools: new Set() })
+    expect(txCalls).toBeGreaterThan(0)
+    expect(store.getConversation(1)?.status).toBe('done')
+  })
+
+  it('flushStep falls back to direct writes without store.transaction', async () => {
+    const { engine, store } = makeEngine('tool-call', {}, makeStore())
+    await engine.craft({ conversationId: 1, content: 'hi', tools, highRiskTools: new Set() })
+    expect(store.getConversation(1)?.status).toBe('done')
+    expect(store.listMessages(1).some((m) => m.role === 'tool')).toBe(true)
   })
 })
 

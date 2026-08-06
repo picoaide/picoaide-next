@@ -80,6 +80,9 @@ export interface StoreLike {
   listMessages(conversationId: number): DBMessage[]
   appendMessage(input: AppendMessageInput): number
   addArtifact?(input: { conversationId: number; path: string; type: string; size: number }): number
+  // 批量写事务(审计3-L5):宿主提供 better-sqlite3 transaction 时 flushStep 整批落库,
+  // 中途失败不留孤儿行;缺省(测试/内存 store)退回逐行写
+  transaction?(fn: () => void): void
 }
 
 export interface AskInput {
@@ -220,7 +223,11 @@ export class AgentEngine {
     this.assertConversation(conversationId)
     // 先占运行槽再写 DB
     const abort = this.acquireRun(conversationId)
-    await this.runAskLoop(conversationId, content, 'running', 'done', abort)
+    try {
+      await this.runAskLoop(conversationId, content, 'running', 'done', abort)
+    } finally {
+      this.releaseRun(conversationId)
+    }
   }
 
   // Plan 模式(对齐 opencode plan agent):只读工具多步调研出计划,不做任何修改;
@@ -233,27 +240,31 @@ export class AgentEngine {
     this.assertConversation(conversationId)
     // 先占运行槽再写 DB(单运行守卫失败不落库)
     const abort = this.acquireRun(conversationId)
-    store.updateConversationStatus(conversationId, 'planning')
-    // 上下文窗口:超预算时对更早历史做 LLM 摘要压缩(摘要失败回退最近 50 条硬截断)
-    const history = historyMessages(store.listMessages(conversationId))
-    store.appendMessage({ conversationId, role: 'user', content })
-    const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content: userContentParts(content) }]
-    const tools = readOnlyTools(input.tools ?? {}) as Record<string, GatedTool>
-    const system = `${input.sysPrompt ?? this.cfg.sysPrompt}
+    try {
+      store.updateConversationStatus(conversationId, 'planning')
+      // 上下文窗口:超预算时对更早历史做 LLM 摘要压缩(摘要失败回退最近 50 条硬截断)
+      const history = historyMessages(store.listMessages(conversationId))
+      store.appendMessage({ conversationId, role: 'user', content })
+      const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content: userContentParts(content) }]
+      const tools = readOnlyTools(input.tools ?? {}) as Record<string, GatedTool>
+      const system = `${input.sysPrompt ?? this.cfg.sysPrompt}
 
 ${PLAN_SYSTEM_NOTICE}`
-    await this.runCraftLoop(
-      conversationId,
-      messages,
-      tools,
-      // 计划(只读)模式也要保留高危审批:screen_capture/clipboard_read 已移出只读名单,
-      // 若工具集仍含它们(调用方传入)则需审批,不得静默免审批执行
-      input.highRiskTools ?? new Set(),
-      Math.min(maxSteps, PLAN_MAX_STEPS),
-      'planning',
-      system,
-      abort,
-    )
+      await this.runCraftLoop(
+        conversationId,
+        messages,
+        tools,
+        // 计划(只读)模式也要保留高危审批:screen_capture/clipboard_read 已移出只读名单,
+        // 若工具集仍含它们(调用方传入)则需审批,不得静默免审批执行
+        input.highRiskTools ?? new Set(),
+        Math.min(maxSteps, PLAN_MAX_STEPS),
+        'planning',
+        system,
+        abort,
+      )
+    } finally {
+      this.releaseRun(conversationId)
+    }
   }
 
   private assertConversation(conversationId: number): void {
@@ -281,6 +292,13 @@ ${PLAN_SYSTEM_NOTICE}`
     const abort = this.beginRun()
     this.runningConversationId = conversationId
     return abort
+  }
+
+  // 释放运行槽(审计3-H1):acquireRun 之后、受保护循环之前的 DB 写失败(损坏/磁盘满)
+  // 也必须释放,否则 currentAbort/runningConversationId 永久残留 → 所有对话操作"已有任务在运行"
+  private releaseRun(conversationId: number): void {
+    if (this.runningConversationId === conversationId) this.runningConversationId = null
+    this.currentAbort = null
   }
 
   // Ask 与 Plan 首轮共用的单步无工具循环(重试 1 次;cancel → failed)
@@ -396,12 +414,16 @@ ${PLAN_SYSTEM_NOTICE}`
     this.assertConversation(conversationId)
     // 先占运行槽再写 DB(单运行守卫失败不落库)
     const abort = this.acquireRun(conversationId)
-    store.updateConversationStatus(conversationId, 'running')
-    // 上下文窗口:超预算时对更早历史做 LLM 摘要压缩(摘要失败回退最近 50 条硬截断)
-    const history = historyMessages(store.listMessages(conversationId))
-    store.appendMessage({ conversationId, role: 'user', content })
-    const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content: userContentParts(content) }]
-    await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps, 'done', input.sysPrompt ?? this.cfg.sysPrompt, abort)
+    try {
+      store.updateConversationStatus(conversationId, 'running')
+      // 上下文窗口:超预算时对更早历史做 LLM 摘要压缩(摘要失败回退最近 50 条硬截断)
+      const history = historyMessages(store.listMessages(conversationId))
+      store.appendMessage({ conversationId, role: 'user', content })
+      const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content: userContentParts(content) }]
+      await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps, 'done', input.sysPrompt ?? this.cfg.sysPrompt, abort)
+    } finally {
+      this.releaseRun(conversationId)
+    }
   }
 
   // 重跑恢复(架构设计 §3.3.1a):截断到最后一条 user 消息(其后的 assistant/tool 行不进入上下文)重新多步循环
@@ -428,11 +450,15 @@ ${PLAN_SYSTEM_NOTICE}`
     }
     // 先占运行槽再写 DB(单运行守卫失败不落库)
     const abort = this.acquireRun(conversationId)
-    store.updateConversationStatus(conversationId, input.status ?? 'running')
-    const history = historyMessages(rows.slice(0, idx + 1))
-    const messages = await this.compactContext(history, abort)
-    const maxSteps = input.maxSteps ?? this.cfg.maxSteps ?? DEFAULT_MAX_STEPS
-    await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps, 'done', input.sysPrompt ?? this.cfg.sysPrompt, abort)
+    try {
+      store.updateConversationStatus(conversationId, input.status ?? 'running')
+      const history = historyMessages(rows.slice(0, idx + 1))
+      const messages = await this.compactContext(history, abort)
+      const maxSteps = input.maxSteps ?? this.cfg.maxSteps ?? DEFAULT_MAX_STEPS
+      await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps, 'done', input.sysPrompt ?? this.cfg.sysPrompt, abort)
+    } finally {
+      this.releaseRun(conversationId)
+    }
   }
 
   // Plan 确认(架构设计 §3.3.4):ok → 第二轮带 tools 执行(截断到最后一条 user 消息);!ok → rejected
@@ -532,35 +558,40 @@ ${PLAN_SYSTEM_NOTICE}`
       // 落库顺序:SDK 要求 assistant(tool_calls) 后紧跟 tool 消息。
       // 审批跨轮时,工具结果在下一轮才回传 —— 其结果行必须先落(紧跟上一轮已落库的
       // assistant tool-call 行),再落本轮 assistant,最后落本轮配对的 tool 行。
-      for (const row of toolRows) {
-        if (currentToolCallIds.has(row.tool_call_id ?? '')) continue
+      // 整批在一个事务内执行(宿主支持时):中途失败不留孤儿行(审计3-L5)
+      const flushWrites = (): void => {
+        for (const row of toolRows) {
+          if (currentToolCallIds.has(row.tool_call_id ?? '')) continue
+          store.appendMessage({
+            conversationId,
+            role: 'tool',
+            content: row.content,
+            toolCallId: row.tool_call_id,
+            toolName: row.tool_name,
+            isError: row.is_error === 1,
+          })
+        }
         store.appendMessage({
           conversationId,
-          role: 'tool',
-          content: row.content,
-          toolCallId: row.tool_call_id,
-          toolName: row.tool_name,
-          isError: row.is_error === 1,
+          role: 'assistant',
+          content: assistant.content,
+          reasoning,
+          toolCalls: assistant.tool_calls,
         })
+        for (const row of toolRows) {
+          if (!currentToolCallIds.has(row.tool_call_id ?? '')) continue
+          store.appendMessage({
+            conversationId,
+            role: 'tool',
+            content: row.content,
+            toolCallId: row.tool_call_id,
+            toolName: row.tool_name,
+            isError: row.is_error === 1,
+          })
+        }
       }
-      store.appendMessage({
-        conversationId,
-        role: 'assistant',
-        content: assistant.content,
-        reasoning,
-        toolCalls: assistant.tool_calls,
-      })
-      for (const row of toolRows) {
-        if (!currentToolCallIds.has(row.tool_call_id ?? '')) continue
-        store.appendMessage({
-          conversationId,
-          role: 'tool',
-          content: row.content,
-          toolCallId: row.tool_call_id,
-          toolName: row.tool_name,
-          isError: row.is_error === 1,
-        })
-      }
+      if (store.transaction) store.transaction(flushWrites)
+      else flushWrites()
     }
 
     // SDK v7 原生审批(v7 工具审批:模型执行不暂停,本轮返回 tool-approval-request part;

@@ -182,11 +182,12 @@ async function buildToolsRegistry(db: ReturnType<typeof openDb>, workspace?: str
         command: z.string(),
         timeoutSec: z.number().optional(),
       }),
-      execute: async ({ command, timeoutSec }) => {
+      execute: async ({ command, timeoutSec }, opts) => {
         logOperation('command_exec', `${command.slice(0, 200)} cwd=${cwd}`)
-        const r = await commandExec(command, { cwd, allowedDirs, timeoutSec })
+        const abortSignal = (opts as { abortSignal?: AbortSignal } | undefined)?.abortSignal
+        const r = await commandExec(command, { cwd, allowedDirs, timeoutSec, abortSignal })
         logOperation('command_exec.done', `code=${r.code} stdout=${r.stdout.length}B stderr=${r.stderr.length}B`)
-        return { stdout: r.stdout, stderr: r.stderr, code: r.code, timedOut: r.timedOut ?? false }
+        return { stdout: r.stdout, stderr: r.stderr, code: r.code, timedOut: r.timedOut ?? false, aborted: r.aborted ?? false }
       },
     }),
     // 命令审批策略(架构设计 §3.4):白名单命令免审批,其余走引擎门控;
@@ -341,6 +342,8 @@ app.whenReady().then(async () => {
     appendMessage: (m) => appendMessage(db, m),
     addArtifact: (a) => addArtifact(db, a),
     listArtifacts: (cid) => listArtifacts(db, cid),
+    // 引擎 flushStep 整批落库走一个 SQLite 事务(审计3-L5)
+    transaction: (fn) => db.transaction(fn)(),
     getSetting: (k) => getSetting(db, k),
     setSetting: (k, v) => setSetting(db, k, v),
     createProject: (input) => createProject(db, input),
