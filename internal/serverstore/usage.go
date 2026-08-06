@@ -24,6 +24,13 @@ func UpdateUsageTokens(db *sql.DB, id, promptTokens, completionTokens int64) err
 	return err
 }
 
+// DeleteUsage removes a usage row. Used to drop pending rows that can never
+// be backfilled (C-9: failed/aborted streams).
+func DeleteUsage(db *sql.DB, id int64) error {
+	_, err := db.Exec("DELETE FROM usage WHERE id = ?", id)
+	return err
+}
+
 // CleanupPendingUsage deletes zero-token rows older than cutoff (stale pending
 // rows left by interrupted streaming requests). Run at server startup.
 func CleanupPendingUsage(db *sql.DB, cutoff time.Time) error {

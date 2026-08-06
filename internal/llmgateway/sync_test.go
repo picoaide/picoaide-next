@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
@@ -96,5 +97,34 @@ func TestSyncOnceFetchFailureSkips(t *testing.T) {
 	models, _ := ListModels(db)
 	if len(models) != 0 {
 		t.Fatalf("no models expected, got %+v", models)
+	}
+}
+
+// C-9: CleanupPendingUsage runs on every sync iteration, so stale pending
+// usage rows cannot accumulate between restarts.
+func TestSyncIterationCleansPendingUsage(t *testing.T) {
+	db := syncTestDB(t)
+	uid, err := serverstore.CreateUser(db, &serverstore.User{Username: "u-cleanup", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := serverstore.RecordUsage(db, uid, "m", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE usage SET created_at = ? WHERE id = ?",
+		time.Now().Add(-2*time.Hour).Format("2006-01-02 15:04:05"), id); err != nil {
+		t.Fatal(err)
+	}
+	fetchFn := func(url string) ([]byte, error) { return []byte(`{"data":[]}`), nil }
+	if _, err := SyncIteration(db, fetchFn); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM usage").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("stale pending usage rows = %d, want 0", n)
 	}
 }

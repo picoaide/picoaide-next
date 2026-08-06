@@ -93,13 +93,23 @@ func SyncProvider(db *sql.DB, ch channels.Channel, p *serverstore.GatewayProvide
 	return SyncResult{Provider: p.Name, Added: len(newNames), Removed: removed}
 }
 
-// SyncLoop 定时执行 SyncOnce,固定间隔。
+// SyncIteration runs one model sync plus pending-usage cleanup (C-9): stale
+// zero-token rows from interrupted streams are purged on every tick, not
+// only at startup.
+func SyncIteration(db *sql.DB, fetchFn func(url string) ([]byte, error)) ([]SyncResult, error) {
+	if err := serverstore.CleanupPendingUsage(db, time.Now().Add(-time.Hour)); err != nil {
+		log.Printf("gateway: cleanup pending usage: %v", err)
+	}
+	return SyncOnce(db, fetchFn)
+}
+
+// SyncLoop 定时执行 SyncIteration,固定间隔。
 func SyncLoop(db *sql.DB, interval time.Duration, fetchFn func(url string) ([]byte, error)) {
 	if interval <= 0 {
 		interval = time.Hour
 	}
 	for {
-		if _, err := SyncOnce(db, fetchFn); err != nil {
+		if _, err := SyncIteration(db, fetchFn); err != nil {
 			log.Printf("gateway sync: %v", err)
 		}
 		time.Sleep(interval)

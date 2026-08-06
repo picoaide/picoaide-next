@@ -240,19 +240,84 @@ func TestProxyStreamClientDisconnectKeepsPendingRow(t *testing.T) {
 	cancel() // simulate client disconnect
 	<-done
 
+	// C-9: a client-disconnected stream must not leak a pending usage row
 	var n int
 	if err := db.QueryRow("SELECT COUNT(*) FROM usage").Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
-		t.Fatalf("usage rows = %d, want 1 pending", n)
+	if n != 0 {
+		t.Fatalf("usage rows = %d, want 0 (pending row cleaned up on disconnect)", n)
 	}
-	var pt, ct int64
-	if err := db.QueryRow("SELECT prompt_tokens, completion_tokens FROM usage").Scan(&pt, &ct); err != nil {
+}
+
+// C-9: a 4xx upstream on a streaming request must not leave a pending usage row.
+func TestProxyStream4xxCleansPendingRow(t *testing.T) {
+	f := newFakeUpstream(t)
+	f.status = http.StatusBadRequest
+	r, db, token := newGateway(t, f)
+	w := doPost(t, r, "/v1/chat/completions",
+		`{"model":"deepseek-chat","messages":[],"stream":true}`, token, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM usage").Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if pt != 0 || ct != 0 {
-		t.Fatalf("pending row not left as-is: pt=%d ct=%d", pt, ct)
+	if n != 0 {
+		t.Fatalf("usage rows = %d, want 0 after 4xx stream", n)
+	}
+}
+
+// C-9: a stream whose providers all fail (502) must not leak a pending row.
+func TestProxyStream502CleansPendingRow(t *testing.T) {
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+
+	r, db, token := newGateway(t, nil)
+	if _, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models) VALUES ('dead', ?, 'k', '["deepseek-chat"]')`, deadURL); err != nil {
+		t.Fatal(err)
+	}
+
+	w := doPost(t, r, "/v1/chat/completions",
+		`{"model":"deepseek-chat","messages":[],"stream":true}`, token, nil)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", w.Code)
+	}
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM usage").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("usage rows = %d, want 0 after 502 stream", n)
+	}
+}
+
+// C-8: an oversized non-stream upstream response is refused with 502 instead
+// of being buffered unboundedly.
+func TestProxyOversizedUpstreamResponse(t *testing.T) {
+	f := newFakeUpstream(t)
+	f.nonStream = `{"id":"x","content":"` + strings.Repeat("a", 4096) + `"}`
+	r, _, token := newGateway(t, f)
+
+	prev := maxUpstreamBody
+	maxUpstreamBody = 1024
+	defer func() { maxUpstreamBody = prev }()
+
+	w := doPost(t, r, "/v1/chat/completions",
+		`{"model":"deepseek-chat","messages":[]}`, token, nil)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", w.Code)
+	}
+	var out map[string]any
+	json.Unmarshal(w.Body.Bytes(), &out)
+	if code := out["error"].(map[string]any)["code"]; code != "UPSTREAM" {
+		t.Fatalf("code = %v", code)
+	}
+	// 5#11: the 502 message must not echo upstream error details
+	if msg := out["error"].(map[string]any)["message"].(string); strings.Contains(msg, "a") && strings.Contains(msg, "id") {
+		t.Fatalf("502 leaks upstream body in message: %q", msg)
 	}
 }
 
