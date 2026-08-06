@@ -2,8 +2,10 @@ package serverauth
 
 import (
 	"errors"
+	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-ldap/ldap/v3"
 )
@@ -216,5 +218,38 @@ func TestLDAPNoGroupFilter(t *testing.T) {
 	}
 	if len(f.filters) != 1 {
 		t.Fatalf("only user search expected, got %v", f.filters)
+	}
+}
+
+// C-7: a hung LDAP server must not block login forever; dialConn applies a
+// bounded timeout to both connect and read phases.
+func TestLDAPDialTimeoutApplies(t *testing.T) {
+	prev := ldapTimeout
+	ldapTimeout = 200 * time.Millisecond
+	defer func() { ldapTimeout = prev }()
+
+	// listener that accepts connections but never answers the LDAP bind
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) { time.Sleep(2 * time.Second); c.Close() }(c)
+		}
+	}()
+
+	p := &LDAPProvider{ServerURL: "ldap://" + ln.Addr().String()}
+	start := time.Now()
+	if _, err := p.Authenticate("alice", "pw"); err == nil {
+		t.Fatal("expected error from timed-out LDAP connection")
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("auth took %v, want ~%v timeout", d, ldapTimeout)
 	}
 }

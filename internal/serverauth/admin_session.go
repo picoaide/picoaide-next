@@ -36,6 +36,11 @@ func CreateAdminSession(db *sql.DB, userID int64) (*AdminSession, string, error)
 		return nil, "", err
 	}
 	s := &AdminSession{ID: id, UserID: userID, CSRFKey: csrfKey, ExpiresAt: time.Now().Add(AdminSessionTTL)}
+	// C-15: sweep already-expired sessions on every login so the table cannot
+	// grow without bound from abandoned logins.
+	if _, err := db.Exec("DELETE FROM admin_sessions WHERE expires_at < ?", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		return nil, "", err
+	}
 	if _, err := db.Exec(`INSERT INTO admin_sessions (id, user_id, csrf_key, expires_at) VALUES (?, ?, ?, ?)`,
 		id, userID, csrfKey, s.ExpiresAt.UTC().Format(time.RFC3339)); err != nil {
 		return nil, "", err

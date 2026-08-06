@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -135,6 +136,71 @@ func TestLoginRateLimit(t *testing.T) {
 	}
 }
 
+// C-1: forged X-Forwarded-For must not reset the per-IP login rate limit.
+// The limit key is derived from the connection's RemoteAddr, never from the
+// attacker-controlled XFF header.
+func TestLoginRateLimitXFFSpoof(t *testing.T) {
+	r, db, cleanup := newTestAPI(t)
+	defer cleanup()
+	createUser(t, db, "admin", "Admin@123", false)
+
+	status := http.StatusOK
+	xff := []string{"10.0.0.1", "10.0.0.2", "1.2.3.4", "203.0.113.9"}
+	for i := 0; i < 15; i++ {
+		w, out := doJSON(t, r, "POST", "/api/auth/login", `{"username":"admin","password":"wrong"}`,
+			map[string]string{"X-Forwarded-For": xff[i%len(xff)]})
+		status = w.Code
+		if status == http.StatusTooManyRequests {
+			if code, _ := out["error"].(map[string]any)["code"].(string); code != "RATE_LIMITED" {
+				t.Fatalf("rate limit code = %v", out)
+			}
+			break
+		}
+	}
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("XFF spoofing bypassed the login rate limit, last status = %d", status)
+	}
+}
+
+// C-13: concurrent first logins for the same new external user must not 500
+// (one goroutine's INSERT wins, the rest re-fetch the row).
+func TestProvisionUserConcurrentCreate(t *testing.T) {
+	db, err := serverstore.EnsureMigrated(tempPath(t, "race.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	api := New(db)
+
+	ui := UserInfo{Username: "raceuser", Source: "external"}
+	var wg sync.WaitGroup
+	errs := make([]error, 16)
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = api.provisionUser(ui)
+		}(i)
+	}
+	wg.Wait()
+	for i, e := range errs {
+		if e != nil {
+			t.Fatalf("concurrent provision #%d failed: %v", i, e)
+		}
+	}
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM users WHERE username = 'raceuser'").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("users rows = %d, want 1", n)
+	}
+	u, err := serverstore.GetUserByUsername(db, "raceuser")
+	if err != nil || u.Source != "external" {
+		t.Fatalf("race user = %+v %v", u, err)
+	}
+}
+
 func TestProvisionUserRejectsLocalAccountTakeover(t *testing.T) {
 	db, err := serverstore.EnsureMigrated(tempPath(t, "takeover.db"))
 	if err != nil {
@@ -142,7 +208,6 @@ func TestProvisionUserRejectsLocalAccountTakeover(t *testing.T) {
 	}
 	defer db.Close()
 	createUser(t, db, "admin", "Admin@123", true) // local admin
-
 	api := New(db)
 
 	// external identity (LDAP/OIDC) colliding with a local account must NOT adopt it
@@ -185,7 +250,7 @@ func TestBootstrapAdmin(t *testing.T) {
 		t.Fatal("expected error without password env")
 	}
 
-	t.Setenv("PICOAI_ADMIN_PASSWORD", "Secret@99")
+	t.Setenv("PICOAI_ADMIN_PASSWORD", "Secret@99x")
 	if err := EnsureBootstrapAdmin(db, "boss"); err != nil {
 		t.Fatalf("EnsureBootstrapAdmin: %v", err)
 	}
@@ -193,7 +258,7 @@ func TestBootstrapAdmin(t *testing.T) {
 	if err != nil || !u.IsAdmin {
 		t.Fatalf("boss not admin: %v %+v", err, u)
 	}
-	if util.VerifyPassword(u.PasswordHash, "Secret@99") == false {
+	if util.VerifyPassword(u.PasswordHash, "Secret@99x") == false {
 		t.Fatal("bootstrap password not set correctly")
 	}
 

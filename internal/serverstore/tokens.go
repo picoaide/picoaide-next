@@ -71,8 +71,25 @@ func RevokeTokenByID(db *sql.DB, tokenID int64) error {
 	return nil
 }
 
-// TouchTokenLastUsed records the last successful verification time.
+// tokenTouchInterval throttles last_used_at rewrites (审计 5#3): every
+// successful verification would otherwise write the api_tokens row.
+const tokenTouchInterval = time.Minute
+
+// TouchTokenLastUsed records the last successful verification time, at most
+// once per tokenTouchInterval per token.
 func TouchTokenLastUsed(db *sql.DB, tokenID int64) error {
+	var lastUsed sql.NullString
+	if err := db.QueryRow("SELECT last_used_at FROM api_tokens WHERE id = ?", tokenID).Scan(&lastUsed); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if lastUsed.Valid {
+		if t, err := time.Parse(time.RFC3339, lastUsed.String); err == nil && time.Since(t) < tokenTouchInterval {
+			return nil // throttled
+		}
+	}
 	_, err := db.Exec("UPDATE api_tokens SET last_used_at = ? WHERE id = ?",
 		time.Now().UTC().Format(time.RFC3339), tokenID)
 	return err

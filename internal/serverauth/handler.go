@@ -186,11 +186,20 @@ func (a *API) provisionUser(ui UserInfo) (*serverstore.User, error) {
 			Status:      1,
 		})
 		if err != nil {
-			return nil, err
-		}
-		u, err = serverstore.GetUserByID(a.DB, id)
-		if err != nil {
-			return nil, err
+			if !errors.Is(err, serverstore.ErrDuplicate) {
+				return nil, err
+			}
+			// C-13: a concurrent first login inserted the row between our
+			// lookup and INSERT; re-fetch it instead of failing with a 500.
+			u, err = serverstore.GetUserByUsername(a.DB, ui.Username)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			u, err = serverstore.GetUserByID(a.DB, id)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	if err != nil && !errors.Is(err, serverstore.ErrNotFound) {

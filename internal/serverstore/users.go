@@ -195,14 +195,26 @@ func nullIfEmpty(s string) any {
 }
 
 // DeleteUser removes a user and all their FK-referenced rows
-// (api_tokens, usage, admin_sessions, mcp_config_downloads, user_groups)
-// in a single transaction so deletion never trips the FK constraint.
+// (api_tokens, usage, admin_sessions, mcp_config_downloads, user_groups,
+// kb_folder_users) in a single transaction so deletion never trips the FK
+// constraint. Deleting the last remaining admin rolls back with ErrLastAdmin
+// (C-17: the guard runs inside the transaction, closing the count-then-delete
+// TOCTOU; 审计 S1: kb_folder_users rows keyed by username are cleaned too).
 func DeleteUser(db *sql.DB, id int64) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	var username string
+	var wasAdmin bool
+	if err := tx.QueryRow("SELECT username, is_admin FROM users WHERE id = ?", id).Scan(&username, &wasAdmin); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	// cascade stmts keyed by user id; the kb grant is keyed by username
 	for _, stmt := range []string{
 		"DELETE FROM api_tokens WHERE user_id = ?",
 		"DELETE FROM usage WHERE user_id = ?",
@@ -214,6 +226,9 @@ func DeleteUser(db *sql.DB, id int64) error {
 			return err
 		}
 	}
+	if _, err := tx.Exec("DELETE FROM kb_folder_users WHERE username = ?", username); err != nil {
+		return err
+	}
 	res, err := tx.Exec("DELETE FROM users WHERE id = ?", id)
 	if err != nil {
 		return err
@@ -221,6 +236,17 @@ func DeleteUser(db *sql.DB, id int64) error {
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return ErrNotFound
+	}
+	// C-17: guard runs after the delete inside the same transaction; if the
+	// deleted row was an admin and none remain, roll back.
+	if wasAdmin {
+		var admins int
+		if err := tx.QueryRow("SELECT COUNT(*) FROM users WHERE is_admin = 1").Scan(&admins); err != nil {
+			return err
+		}
+		if admins == 0 {
+			return ErrLastAdmin
+		}
 	}
 	return tx.Commit()
 }
