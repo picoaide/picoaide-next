@@ -14,7 +14,7 @@ declare module 'ws' {
     off(event: 'message', listener: (data: Buffer, isBinary: boolean) => void): this
   }
   export class WebSocketServer {
-    constructor(options: { port: number; host: string })
+    constructor(options: { port: number; host: string; maxPayload?: number })
     on(event: 'connection', listener: (ws: WebSocket) => void): this
     on(event: 'listening', listener: () => void): this
     on(event: 'error', listener: (err: NodeJS.ErrnoException) => void): this

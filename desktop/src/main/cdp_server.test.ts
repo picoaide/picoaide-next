@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
-import { startCdpServer, type CdpServer } from './cdp_server'
+import { sendCdp, startCdpServer, type CdpServer } from './cdp_server'
 
 const servers: CdpServer[] = []
 
@@ -165,5 +165,37 @@ describe('startCdpServer', () => {
     expect(resp.result).toEqual({ url: 'z', title: 'Z' })
     replacement.close()
     newAgent.close()
+  })
+
+  it('immediately re-adopts the oldest live connection when the extension disconnects', async () => {
+    // B-2 回归:extension 断开后的重接管不得再起 1s 稳定门槛(与插件重连的 1s 门槛
+    // 竞速 → 先到者可能是 Agent 短连接被误设 extension,插件重连被拒);直接接管最老存活连接
+    const changes: boolean[] = []
+    const srv = await start({ port: 0, onExtensionChange: (c) => changes.push(c) })
+    const ext = await connect(srv.port) // 插件
+    await new Promise((r) => setTimeout(r, 1100)) // 接管(1s 门槛)
+    expect(changes).toEqual([true])
+    const agent = await connect(srv.port) // 第二连接(非 extension)
+    ext.close()
+    // 不等 1s:重接管路径立即生效(旧实现走 adopt 1s 门槛 → 50ms 时 extension 仍为 null)
+    await new Promise((r) => setTimeout(r, 50))
+    expect(changes).toEqual([true, false, true])
+    agent.close()
+  })
+
+  it('sendCdp rejects immediately when the bridge disconnects instead of waiting for the timeout', async () => {
+    // B-8:请求挂起期间插件/桥断开 → 立即报"插件已断开",不干等 5s 超时
+    const srv = await startCdpServer({ port: 0, adoptDelayMs: 50, handler: {} })
+    servers.push(srv)
+    const ext = await connect(srv.port)
+    await new Promise((r) => setTimeout(r, 80)) // 接管
+    ext.on('message', () => {}) // 收到请求不回执
+    const req = sendCdp('browser.tabInfo', {}, { port: srv.port, timeoutMs: 5000 })
+    await new Promise((r) => setTimeout(r, 30)) // 请求已发出、pending
+    const start = Date.now()
+    await srv.close() // 断开所有客户端(含 sendCdp 的连接)
+    await expect(req).rejects.toThrow('浏览器插件已断开')
+    expect(Date.now() - start).toBeLessThan(1000) // 旧实现要等满 5s 超时
+    ext.close()
   })
 })

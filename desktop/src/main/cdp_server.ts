@@ -11,6 +11,8 @@ import { WebSocket, WebSocketServer } from 'ws'
 import { ToolError } from './tools/paths'
 
 export const DEFAULT_CDP_PORT = 54321
+// 单条报文上限(16MiB):大页面快照/长内容经桥转发,超出即断开连接,防内存打爆
+export const MAX_CDP_PAYLOAD = 16 * 1024 * 1024
 
 export interface CdpHandler {
   [method: string]: (params: any) => Promise<any> | any
@@ -36,7 +38,7 @@ export function startCdpServer(opts: { port?: number; handler?: CdpHandler; onEx
   // 插件重连时被拒,转发楔住到 Agent 关闭为止(甚至永久白连)
   const adoptDelayMs = opts.adoptDelayMs ?? 1000
   return new Promise<CdpServer>((resolve, reject) => {
-    const wss = new WebSocketServer({ port, host: '127.0.0.1' })
+    const wss = new WebSocketServer({ port, host: '127.0.0.1', maxPayload: MAX_CDP_PAYLOAD })
     const clients = new Set<WebSocket>()
     const pending = new Map<number, Pending>()
     let extension: WebSocket | null = null
@@ -140,10 +142,12 @@ export function startCdpServer(opts: { port?: number; handler?: CdpHandler; onEx
             safeSend(p.ws, JSON.stringify({ id: p.id, error: { code: -32000, message: '浏览器插件未连接' } }))
           }
           pending.clear()
-          // 重新接管现存的最老存活连接(同样走稳定连接门槛,防误接管 Agent 短连接)
+          // 重接管:直接接管现存最老存活连接(Set 插入序 = 连接序),不再起 1s 门槛。
+          // 与插件自身连入的 1s 稳定门槛竞速会产生"Agent 短连接先到者被误设 extension、
+          // 插件重连被拒"的楔住窗口;重接管是恢复路径,越早接管服务中断越短
           for (const c of clients) {
             if (c.readyState === WebSocket.OPEN) {
-              adopt(c)
+              setExtension(c)
               break
             }
           }
@@ -200,6 +204,11 @@ export async function sendCdp(
     ws.on('error', () => {
       clearTimeout(timer)
       finish(() => reject(new ToolError('浏览器插件未连接')))
+    })
+    // 请求挂起期间连接断开(桥关闭/插件重连重置转发)→ 立即报错,不干等超时
+    ws.on('close', () => {
+      clearTimeout(timer)
+      finish(() => reject(new ToolError('浏览器插件已断开')))
     })
   })
 }

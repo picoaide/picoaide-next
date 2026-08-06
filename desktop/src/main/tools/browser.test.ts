@@ -1,7 +1,24 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
 import { startCdpServer, type CdpServer } from '../cdp_server'
-import { createBrowserTools, HIGH_RISK_TOOLS } from './browser'
+import { createBrowserTools, cdpTimeoutFor, HIGH_RISK_TOOLS } from './browser'
+
+describe('per-method CDP timeouts', () => {
+  // B-3 回归:sendCdp 默认 5s 超时会腰斩扩展侧长等待(waitFor 上限 60s / dialog 10s)
+  it('wait_for with timeoutMs 60000 uses an internal timeout beyond 5s', () => {
+    expect(cdpTimeoutFor('browser.waitFor', { timeoutMs: 60000 })).toBeGreaterThan(5000)
+  })
+
+  it('wait_for default (10000) gets a 2s margin, capped at 65s', () => {
+    expect(cdpTimeoutFor('browser.waitFor', {})).toBe(12000)
+    expect(cdpTimeoutFor('browser.waitFor', { timeoutMs: 120000 })).toBe(65000)
+  })
+
+  it('dialog waits up to 12s; other methods keep the 5s default', () => {
+    expect(cdpTimeoutFor('browser.dialog', {})).toBe(12000)
+    expect(cdpTimeoutFor('browser.click', {})).toBeUndefined()
+  })
+})
 
 describe('browser tool registration', () => {
   it('marks operation tools as high risk (needsApproval)', () => {
