@@ -30,6 +30,11 @@ const defaultRateLimit = 60
 // requests are a few hundred KB even with long context).
 const maxChatBody = 16 << 20
 
+// maxUpstreamBody caps a non-stream upstream response body (C-8); oversized
+// responses are refused with 502 instead of being buffered unboundedly.
+// Test-injectable.
+var maxUpstreamBody = 32 << 20
+
 // STREAM_IDLE_TIMEOUT is the max gap between upstream SSE chunks before the
 // stream is treated as hung and terminated.
 const STREAM_IDLE_TIMEOUT = 90 * time.Second
@@ -129,7 +134,15 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		log.Printf("gateway: model %s provider %s failed: %v", req.Model, ups[i].Name, err)
 	}
 	if resp == nil {
-		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "上游服务不可用:"+err.Error())
+		// C-9: no provider succeeded; the pending usage row can never be
+		// backfilled, so drop it instead of inflating aggregates.
+		if usageID > 0 {
+			if err := serverstore.DeleteUsage(a.DB, usageID); err != nil {
+				log.Printf("gateway: delete pending usage: %v", err)
+			}
+		}
+		// 5#11: fixed text — never echo upstream error details to clients
+		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "上游服务不可用")
 		return
 	}
 	if req.Stream {
@@ -248,9 +261,14 @@ func (a *API) forward(c *gin.Context, up *Upstream, raw []byte, stream bool) (*h
 // serveJSON passes a non-stream upstream response through and records usage.
 func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model string) {
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxUpstreamBody)+1))
 	if err != nil {
 		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "读取上游响应失败")
+		return
+	}
+	if len(body) > maxUpstreamBody {
+		// C-8: refuse oversized responses instead of buffering them
+		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "上游响应过大")
 		return
 	}
 	if pt, ct, ok, _ := parseUsage(body); ok {
@@ -269,15 +287,38 @@ func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model
 
 // serveStream passes an SSE response through line by line, preserving
 // "data:" lines and "[DONE]", and backfills the pending usage row from the
-// final chunk's "usage" field.
+// final chunk's "usage" field. Rows that can never be backfilled are deleted
+// (C-9): upstream 4xx, client disconnect, write failure.
 func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 	defer resp.Body.Close()
+	// upstream 4xx: no SSE to stream, the pending row is dropped
+	if resp.StatusCode >= 400 {
+		if usageID > 0 {
+			if err := serverstore.DeleteUsage(a.DB, usageID); err != nil {
+				log.Printf("gateway: delete pending usage: %v", err)
+			}
+		}
+		c.Status(resp.StatusCode)
+		for k, vv := range resp.Header {
+			for _, v := range vv {
+				c.Writer.Header().Add(k, v)
+			}
+		}
+		io.Copy(c.Writer, resp.Body)
+		return
+	}
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.WriteHeader(resp.StatusCode)
 	fl, _ := c.Writer.(http.Flusher)
 	br := bufio.NewReader(resp.Body)
+	clientGone := false
 	for {
+		// 5#9/5#10: stop pumping once the client context is gone
+		if c.Request.Context().Err() != nil {
+			clientGone = true
+			break
+		}
 		line, err := readLineWithIdle(br, streamIdleTimeout)
 		if len(line) > 0 {
 			if s := strings.TrimSpace(line); strings.HasPrefix(s, "data:") {
@@ -289,7 +330,10 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 					}
 				}
 			}
-			c.Writer.WriteString(line)
+			if _, werr := c.Writer.WriteString(line); werr != nil {
+				clientGone = true
+				break
+			}
 			if fl != nil {
 				fl.Flush()
 			}
@@ -303,6 +347,11 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 				}
 			}
 			break
+		}
+	}
+	if clientGone && usageID > 0 {
+		if err := serverstore.DeleteUsage(a.DB, usageID); err != nil {
+			log.Printf("gateway: delete pending usage: %v", err)
 		}
 	}
 }
