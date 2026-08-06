@@ -324,6 +324,13 @@ func TestAdminKBUploadMultipartTxt(t *testing.T) {
 	if w, _ := kbMultipart(t, r, map[string]string{"title": "太大"}, "大.txt", big, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("oversize: %d %s", w.Code, w.Body.String())
 	}
+	// 审计 6-K5: folder_id must parse and exist
+	if w, _ := kbMultipart(t, r, map[string]string{"title": "坏目录", "folder_id": "99999"}, "x.txt", []byte("x"), hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown folder_id: %d %s", w.Code, w.Body.String())
+	}
+	if w, _ := kbMultipart(t, r, map[string]string{"title": "坏目录", "folder_id": "abc"}, "x.txt", []byte("x"), hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("non-numeric folder_id: %d %s", w.Code, w.Body.String())
+	}
 }
 
 func TestAdminKBUploadMultipartDocx(t *testing.T) {

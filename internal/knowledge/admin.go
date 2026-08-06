@@ -93,7 +93,23 @@ func uploadDoc(c *gin.Context, db *sql.DB, uploadsDir string) {
 		if title == "" {
 			title = fh.Filename
 		}
-		folderID, _ = strconv.ParseInt(c.PostForm("folder_id"), 10, 64)
+		// 审计 6-K5: folder_id 必须可解析且存在(0/缺省 = 全局根目录)
+		folderIDStr := c.PostForm("folder_id")
+		if folderIDStr == "" {
+			folderIDStr = "0"
+		}
+		folderID, err = strconv.ParseInt(folderIDStr, 10, 64)
+		if err != nil || folderID < 0 {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "folder_id 无效")
+			return
+		}
+		if folderID != 0 {
+			var n int
+			if err := db.QueryRow("SELECT COUNT(*) FROM kb_folders WHERE id = ?", folderID).Scan(&n); err != nil || n == 0 {
+				serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "folder_id 不存在")
+				return
+			}
+		}
 		if contentType, err = classifyFile(fh.Filename); err != nil {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", err.Error())
 			return
