@@ -2,9 +2,13 @@ import { isIPv6 } from 'node:net'
 import { lookup } from 'node:dns/promises'
 import { z } from 'zod'
 import type { Tool } from 'ai'
+import iconv from 'iconv-lite'
 
 const DEFAULT_MAX_BYTES = 5 * 1024 * 1024
 const DEFAULT_TIMEOUT_SEC = 15
+// DNS 解析兜底超时:恶意/故障 DNS 服务器可能永不应答,不能无限挂起
+const DNS_TIMEOUT_MS = 10_000
+const SEARCH_MAX_BYTES = 8 * 1024 * 1024
 
 // SSRF 防护:默认拒绝 loopback/私有/链路本地/ULA 网段(架构设计 §3.4)。
 // pragmatism: 不用 node:net BlockList——其 check() 对 IPv6 一律返回 false(实测
@@ -84,6 +88,8 @@ export interface WebFetchOptions {
   maxBytes?: number
   timeoutSec?: number
   allowPrivate?: boolean
+  // 引擎取消信号:abort 时中断 fetch(与超时共用同一信号链)
+  abortSignal?: AbortSignal
 }
 
 export async function webFetch(url: string, opts: WebFetchOptions = {}): Promise<string> {
@@ -98,15 +104,18 @@ export async function webFetch(url: string, opts: WebFetchOptions = {}): Promise
   if (u.protocol !== 'http:' && u.protocol !== 'https:') {
     throw new Error('仅支持 http/https 协议')
   }
-  if (!opts.allowPrivate) await assertPublicHost(u.hostname)
+  if (!opts.allowPrivate) await assertPublicHost(u.hostname, timeoutSec)
 
   // 重定向逐跳 SSRF 校验:fetch 自动跟随会把公网站点 302 到 127.0.0.1/内网,
-  // 初始 URL 校验形同虚设 → manual 模式每跳重新校验(最多 5 跳)
+  // 初始 URL 校验形同虚设 → manual 模式每跳重新校验(最多 5 跳);每跳也重新校验协议
   let current = u
   for (let hop = 0; hop < 5; hop++) {
-    if (!opts.allowPrivate) await assertPublicHost(current.hostname)
+    if (current.protocol !== 'http:' && current.protocol !== 'https:') {
+      throw new Error('仅支持 http/https 协议')
+    }
+    if (!opts.allowPrivate) await assertPublicHost(current.hostname, timeoutSec)
     const res = await fetch(current.toString(), {
-      signal: AbortSignal.timeout(timeoutSec * 1000),
+      signal: combinedSignal(opts.abortSignal, timeoutSec * 1000),
       redirect: 'manual',
     })
     if (res.status >= 300 && res.status < 400) {
@@ -127,18 +136,66 @@ export async function webFetch(url: string, opts: WebFetchOptions = {}): Promise
       if (total > maxBytes) throw new Error('页面超过大小限制')
       chunks.push(value)
     }
-    return htmlToText(Buffer.concat(chunks).toString('utf8'))
+    // 按 Content-Type 的 charset 解码(无 charset → UTF-8,失败回退 GBK),否则 GBK 页面全乱码
+    return htmlToText(decodeHtml(Buffer.concat(chunks), charsetFrom(res.headers.get('content-type'))))
   }
   throw new Error('重定向次数过多')
 }
 
+// 外部取消信号与超时合并:无 abortSignal 时退化为纯超时(保持旧行为)
+function combinedSignal(external: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  if (!external) return AbortSignal.timeout(timeoutMs)
+  const controller = new AbortController()
+  const onAbort = () => controller.abort(external.reason)
+  external.addEventListener('abort', onAbort, { once: true })
+  const timer = setTimeout(() => controller.abort(new DOMException('The operation was aborted.', 'AbortError')), timeoutMs)
+  timer.unref?.()
+  controller.signal.addEventListener('abort', () => {
+    external.removeEventListener('abort', onAbort)
+    clearTimeout(timer)
+  }, { once: true })
+  return controller.signal
+}
+
+function charsetFrom(contentType: string | null): string | undefined {
+  const m = contentType?.match(/charset\s*=\s*"?([\w-]+)"?/i)
+  return m?.[1]?.toLowerCase()
+}
+
+// 页面解码:显式 charset(GBK/GB2312/Big5 等)走 iconv;缺省 UTF-8 严格失败回退 GBK(常见页面无声明)
+function decodeHtml(buf: Buffer, charset?: string): string {
+  if (charset && (charset === 'gbk' || charset === 'gb2312' || charset === 'gb18030' || charset === 'big5')) {
+    return iconv.decode(buf, charset === 'gb2312' ? 'gbk' : charset)
+  }
+  if (charset && charset !== 'utf-8' && charset !== 'utf8') {
+    try {
+      return new TextDecoder(charset).decode(buf)
+    } catch {
+      return iconv.decode(buf, 'gbk')
+    }
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buf)
+  } catch {
+    return iconv.decode(buf, 'gbk')
+  }
+}
+
 // pragmatism: 字面 IP/localhost 直接判定;主机名做一次 DNS 查询,任一解析地址落在
 // 私有网段即拒绝(有内网地址即存在 SSRF 面,不赌取巧)。DNS 失败视为不可验证,直接抛错。
-async function assertPublicHost(hostname: string): Promise<void> {
+async function assertPublicHost(hostname: string, timeoutSec: number): Promise<void> {
   const h = hostname.toLowerCase().replace(/^\[|\]$/g, '')
   if (isPrivateHost(h)) throw new Error('SSRF 防护:拒绝访问内网地址')
   if (isIPv6(h) || parseIPv4(h)) return
-  const addrs = await lookup(h, { all: true })
+  // DNS 兜底超时:坏/慢 DNS 服务器会挂住 lookup 永不返回,race 限时(timeoutSec 供测试缩短)
+  const dnsTimeout = Math.min(DNS_TIMEOUT_MS, Math.max(1000, timeoutSec * 1000))
+  const addrs = await Promise.race([
+    lookup(h, { all: true }),
+    new Promise<never>((_, reject) => {
+      const timer = setTimeout(() => reject(new Error('DNS 解析超时')), dnsTimeout)
+      timer.unref?.()
+    }),
+  ])
   if (addrs.some((a) => isPrivateHost(a.address))) {
     throw new Error('SSRF 防护:拒绝访问内网地址')
   }
@@ -161,9 +218,21 @@ export async function webSearch(
     signal: AbortSignal.timeout(DEFAULT_TIMEOUT_SEC * 1000),
   })
   if (!res.ok) throw new Error(`搜索失败: HTTP ${res.status}`)
+  if (!res.body) return []
+  // 先读限 8MB 再 parse:res.json() 无上限,恶意端点可返回 GB 级 JSON 撑爆内存
+  const reader = res.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > SEARCH_MAX_BYTES) throw new Error('搜索结果超过大小限制')
+    chunks.push(value)
+  }
   let data: unknown
   try {
-    data = await res.json()
+    data = JSON.parse(Buffer.concat(chunks).toString('utf8'))
   } catch {
     return []
   }
@@ -208,8 +277,12 @@ export function createWebTools(cfg: { allowPrivate: boolean; searchEndpoint: str
     web_fetch: {
       description: '抓取网页内容并转为纯文本(仅 http/https,拒绝内网地址)',
       inputSchema: z.object({ url: z.string().url(), max_bytes: z.number().optional() }),
-      execute: async (input: { url: string; max_bytes?: number }) =>
-        webFetch(input.url, { maxBytes: input.max_bytes, allowPrivate: cfg.allowPrivate }),
+      execute: async (input: { url: string; max_bytes?: number }, opts) =>
+        webFetch(input.url, {
+          maxBytes: input.max_bytes,
+          allowPrivate: cfg.allowPrivate,
+          abortSignal: (opts as { abortSignal?: AbortSignal } | undefined)?.abortSignal,
+        }),
     },
     web_search: {
       description: '搜索网页,返回标题/链接/摘要列表(使用管理员配置的搜索端点)',

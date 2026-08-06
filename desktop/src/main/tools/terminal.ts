@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import iconv from 'iconv-lite'
 import { isAllowed } from './paths'
 
 export interface CommandResult {
@@ -8,6 +9,7 @@ export interface CommandResult {
   stderr: string
   code: number
   timedOut?: boolean
+  aborted?: boolean
 }
 
 export interface CommandOpts {
@@ -16,12 +18,24 @@ export interface CommandOpts {
   maxOutput?: number
   // 审批门控在引擎层消费;此处保留签名供上层透传(审批=执行的同一命令串)
   allowedDirs: string[]
+  // 引擎取消信号(工具执行 abortSignal 透传):abort 时立即 kill 进程组,不等超时
+  abortSignal?: AbortSignal
 }
 
 export const TRUNCATED_MARKER = '…[输出截断]'
 export const TIMEOUT_STDERR = '命令超时'
+export const ABORT_STDERR = '命令已取消'
 const DEFAULT_TIMEOUT_SEC = 60
 const DEFAULT_MAX_OUTPUT = 50 * 1024
+
+// 子进程输出解码:UTF-8 严格失败回退 GBK(Windows 简体中文程序常见 GBK 输出)
+export function decodeOutput(buf: Buffer): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buf)
+  } catch {
+    return iconv.decode(buf, 'gbk')
+  }
+}
 
 export async function commandExec(command: string, opts: CommandOpts): Promise<CommandResult> {
   const maxOutput = opts.maxOutput ?? DEFAULT_MAX_OUTPUT
@@ -32,19 +46,10 @@ export async function commandExec(command: string, opts: CommandOpts): Promise<C
     let stdout = ''
     let stderr = ''
     let timedOut = false
+    let aborted = false
     let settled = false
 
-    const settle = (code: number) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      resolveResult({ stdout, stderr, code, ...(timedOut ? { timedOut: true } : {}) })
-    }
-
-    const timer = setTimeout(() => {
-      if (settled) return
-      timedOut = true
-      stderr = TIMEOUT_STDERR
+    const killTree = (): void => {
       if (process.platform === 'win32') {
         spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'])
       } else if (child.pid) {
@@ -54,6 +59,32 @@ export async function commandExec(command: string, opts: CommandOpts): Promise<C
           /* 进程已退出 */
         }
       }
+    }
+
+    const settle = (code: number) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      opts.abortSignal?.removeEventListener('abort', onAbort)
+      resolveResult({ stdout, stderr, code, ...(timedOut ? { timedOut: true } : {}), ...(aborted ? { aborted: true } : {}) })
+    }
+
+    const onAbort = () => {
+      if (settled) return
+      aborted = true
+      stderr = stderr ? `${stderr}\n${ABORT_STDERR}` : ABORT_STDERR
+      killTree()
+      // kill 后等 close 收尾;2s 兜底,防 kill 失败挂死
+      const grace = setTimeout(() => settle(124), 2000)
+      grace.unref()
+    }
+
+    const timer = setTimeout(() => {
+      if (settled) return
+      timedOut = true
+      // 追加而非覆盖:超时前已产生的 stderr 是排错关键信息
+      stderr = stderr ? `${stderr}\n${TIMEOUT_STDERR}` : TIMEOUT_STDERR
+      killTree()
       // SIGKILL 后等 close 收尾;2s 兜底,防 kill 失败挂死
       const grace = setTimeout(() => settle(124), 2000)
       grace.unref()
@@ -61,10 +92,12 @@ export async function commandExec(command: string, opts: CommandOpts): Promise<C
 
     const appendCapped = (buf: string, chunk: Buffer, max: number): string => {
       if (buf.length >= max) return buf
+      const text = decodeOutput(chunk)
       const need = max - buf.length
-      return chunk.length > need ? buf + chunk.toString('utf8', 0, need) + TRUNCATED_MARKER : buf + chunk.toString('utf8')
+      return text.length > need ? buf + text.slice(0, need) + TRUNCATED_MARKER : buf + text
     }
 
+    opts.abortSignal?.addEventListener('abort', onAbort, { once: true })
     child.stdout?.on('data', (chunk: Buffer) => {
       stdout = appendCapped(stdout, chunk, maxOutput)
     })
@@ -96,7 +129,8 @@ const SHELL_CHAR_RE = /[;|&<>`]/
 // pip 包安装参数白名单:纯包名(可带 ==版本)、-U/--upgrade、--user、-q/--quiet、--no-deps
 // 其余参数(URL、--index-url、--extra-index-url、-e 等)一律拒绝,防止任意源安装
 const PACKAGE_INSTALL_FLAGS = new Set(['-U', '--upgrade', '--user', '-q', '--quiet', '--no-deps'])
-const PACKAGE_NAME_RE = /^[a-zA-Z0-9_.\-]+(==[a-zA-Z0-9_.\-]+)?$/
+// 包名必须字母数字开头且含字母数字:pip install . / .. / ./local 是目录安装,一律走审批
+const PACKAGE_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.\-]*(==[a-zA-Z0-9_.\-]+)?$/
 
 function isPackageInstall(command: string): boolean {
   const parts = command.trim().split(/\s+/)

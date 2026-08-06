@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { lookup } from 'node:dns/promises'
+import iconv from 'iconv-lite'
 import { createWebTools, isPrivateHost, webFetch, webSearch } from './web'
 
 vi.mock('node:dns/promises', () => ({ lookup: vi.fn() }))
@@ -143,6 +144,57 @@ describe('webFetch', () => {
     expect(await webFetch('http://example.com/x')).toBe('ok')
     expect(mock).toHaveBeenCalledOnce()
   })
+
+  it('decodes a GBK page according to its Content-Type charset', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(iconv.encode('<p>中文GBK页面</p>', 'gbk') as unknown as Uint8Array, {
+          status: 200,
+          headers: { 'content-type': 'text/html; charset=gbk' },
+        }),
+      ),
+    )
+    const text = await webFetch('https://example.com/gbk')
+    expect(text).toContain('中文GBK页面')
+  })
+
+  it('rejects a redirect to a non-http(s) protocol', async () => {
+    mockLookup([{ address: '93.184.216.34', family: 4 }])
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: 'file:///etc/passwd' } }))
+    vi.stubGlobal('fetch', mock)
+    await expect(webFetch('https://example.com/x')).rejects.toThrow(/仅支持 http\/https/)
+    // 逐跳协议校验在 fetch 之前拦截,不发起第二次请求
+    expect(mock).toHaveBeenCalledTimes(1)
+  })
+
+  it('bounds a hanging DNS lookup instead of waiting forever', async () => {
+    vi.mocked(lookup).mockImplementation(() => new Promise(() => {}) as never)
+    const mock = vi.fn()
+    vi.stubGlobal('fetch', mock)
+    await expect(webFetch('http://example.com/x', { timeoutSec: 0.05 })).rejects.toThrow(/DNS 解析超时/)
+    expect(mock).not.toHaveBeenCalled()
+  })
+
+  it('propagates an external abort signal to the fetch', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_url: string, init?: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('The operation was aborted.', 'AbortError')),
+            )
+          }),
+      ),
+    )
+    const controller = new AbortController()
+    const run = webFetch('https://example.com/slow', { timeoutSec: 30, abortSignal: controller.signal })
+    setTimeout(() => controller.abort(), 10)
+    await expect(run).rejects.toThrow(/aborted/i)
+  })
 })
 
 describe('webSearch', () => {
@@ -199,6 +251,11 @@ describe('webSearch', () => {
     expect(await webSearch('hi', 'https://s.example/api')).toEqual([])
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(ok('{"nope":1}')))
     expect(await webSearch('hi', 'https://s.example/api')).toEqual([])
+  })
+
+  it('rejects an oversized search response instead of parsing it', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('x'.repeat(9 * 1024 * 1024), { status: 200 })))
+    await expect(webSearch('hi', 'https://s.example/api')).rejects.toThrow('搜索结果超过大小限制')
   })
 })
 

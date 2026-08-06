@@ -66,6 +66,21 @@ describe('createSandboxTool', () => {
     await expect(tool.execute!({ command: 'bad' }, toolOptions())).rejects.toThrow('boom')
     expect(mocks.stop).toHaveBeenCalledTimes(1)
   })
+
+  it('external abort stops the session immediately (run is abort-insensitive)', async () => {
+    // just-bash 的 run 对 abort 不敏感(永不 resolve)→ abort 后必须 stop 会话让 run 立即结束
+    mocks.run.mockReturnValue(new Promise(() => {}) as never)
+    const tool = createSandboxTool(makeProvider())
+    const controller = new AbortController()
+    const started = Date.now()
+
+    const run = tool.execute!({ command: 'sleep 999' }, { toolCallId: 'call_1', abortSignal: controller.signal } as never)
+    setTimeout(() => controller.abort(), 10)
+
+    await expect(run).rejects.toThrow('任务已取消')
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(mocks.stop).toHaveBeenCalled()
+  })
 })
 
 describe('getSandbox', () => {

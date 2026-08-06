@@ -1,7 +1,6 @@
 import type { Tool } from 'ai'
 import { z } from 'zod'
 import type { HarnessV1SandboxProvider } from '@ai-sdk/harness'
-import type { Experimental_SandboxSession } from '@ai-sdk/provider-utils'
 
 export const SANDBOX_MAX_OUTPUT_CHARS = 50 * 1024
 const TRUNCATE_MARKER = '\n...[输出已截断]'
@@ -26,18 +25,6 @@ export function truncateOutput(s: string): string {
   return s.slice(0, SANDBOX_MAX_OUTPUT_CHARS) + TRUNCATE_MARKER
 }
 
-// ponytail: per-command 超时走 abortSignal(run 的原生机制);just-bash 全局 timeoutMs 需建会话时设定,粒度太粗
-async function runCommand(session: Experimental_SandboxSession, command: string, timeoutSec?: number) {
-  const abort = new AbortController()
-  const effective = timeoutSec && timeoutSec > 0 ? timeoutSec : DEFAULT_TIMEOUT_SEC
-  const timer = setTimeout(() => abort.abort(new Error(`命令超时(${effective}s)`)), effective * 1000)
-  try {
-    return await session.run({ command, abortSignal: abort.signal })
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
 export function createSandboxTool(sandbox: HarnessV1SandboxProvider): Tool {
   return {
     description:
@@ -46,13 +33,39 @@ export function createSandboxTool(sandbox: HarnessV1SandboxProvider): Tool {
       command: z.string(),
       timeoutSec: z.number().optional(),
     }),
-    execute: async ({ command, timeoutSec }) => {
+    execute: async ({ command, timeoutSec }, options) => {
       const session = await sandbox.createSession()
+      // 引擎取消信号 + 命令超时合并为一个 controller:just-bash 的 run 对 abort 不敏感,
+      // abort 后必须 stop 会话才能让挂起的 run 立即结束(否则会话泄漏、卡到超时)
+      const external = (options as { abortSignal?: AbortSignal } | undefined)?.abortSignal
+      const controller = new AbortController()
+      const onExternalAbort = () => controller.abort(new Error('任务已取消'))
+      external?.addEventListener('abort', onExternalAbort, { once: true })
+      const effective = timeoutSec && timeoutSec > 0 ? timeoutSec : DEFAULT_TIMEOUT_SEC
+      const timer = setTimeout(() => controller.abort(new Error(`命令超时(${effective}s)`)), effective * 1000)
       try {
-        const result = await runCommand(session, command, timeoutSec)
+        const result = await Promise.race([
+          session.run({ command, abortSignal: controller.signal }),
+          new Promise<never>((_, reject) => {
+            controller.signal.addEventListener(
+              'abort',
+              () => {
+                void Promise.resolve(session.stop()).catch(() => {})
+                reject(controller.signal.reason ?? new Error('命令已取消'))
+              },
+              { once: true },
+            )
+          }),
+        ])
         return { exitCode: result.exitCode, stdout: truncateOutput(result.stdout), stderr: truncateOutput(result.stderr) }
       } finally {
-        await session.stop()
+        external?.removeEventListener('abort', onExternalAbort)
+        clearTimeout(timer)
+        try {
+          await session.stop()
+        } catch {
+          /* 已 stop */
+        }
       }
     },
   }

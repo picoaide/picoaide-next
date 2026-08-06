@@ -2,7 +2,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { commandExec, needsApprovalFor, TRUNCATED_MARKER } from './terminal'
+import iconv from 'iconv-lite'
+import { commandExec, decodeOutput, needsApprovalFor, TRUNCATED_MARKER } from './terminal'
 
 describe('commandExec', () => {
   let tmp: string
@@ -40,6 +41,31 @@ describe('commandExec', () => {
     expect(r.stdout.length).toBeLessThanOrEqual(2048 + TRUNCATED_MARKER.length)
     expect(r.stdout.endsWith(TRUNCATED_MARKER)).toBe(true)
     expect(r.code).toBe(0)
+  })
+
+  it('abort kills the process group immediately instead of waiting for the timeout', async () => {
+    const abort = new AbortController()
+    const started = Date.now()
+    const run = commandExec('sleep 30', { cwd: tmp, timeoutSec: 5, allowedDirs: [tmp], abortSignal: abort.signal })
+    setTimeout(() => abort.abort(), 100)
+    const r = await run
+    const elapsed = Date.now() - started
+    expect(r.aborted).toBe(true)
+    expect(r.timedOut).toBeUndefined()
+    // 若不挂到 abort 上,要等 5s 超时才会返回;进程组 kill 应让 sleep 立即退出
+    expect(elapsed).toBeLessThan(2000)
+  })
+
+  it('timeout appends to existing stderr instead of overwriting it', async () => {
+    const r = await commandExec('echo err >&2; sleep 5', { cwd: tmp, timeoutSec: 1, allowedDirs: [tmp] })
+    expect(r.stderr).toContain('err')
+    expect(r.stderr).toContain('命令超时')
+    expect(r.timedOut).toBe(true)
+  })
+
+  it('decodeOutput falls back to GBK for non-UTF-8 bytes', () => {
+    expect(decodeOutput(Buffer.from('plain utf8'))).toBe('plain utf8')
+    expect(decodeOutput(iconv.encode('中文输出', 'gbk'))).toBe('中文输出')
   })
 })
 
@@ -97,6 +123,10 @@ describe('needsApprovalFor', () => {
     ['python3 -c "import pypdf"', true],
     ['python3 -m pip install', true],
     ['python3 -m pip install --index-url http://evil x', true],
+    ['pip install .', true],
+    ['pip install ..', true],
+    ['pip install ./local', true],
+    ['pip install ../pkg', true],
   ])('package install %s → %s', (cmd, expected) => {
     expect(needsApprovalFor(cmd, [tmp])).toBe(expected)
   })
