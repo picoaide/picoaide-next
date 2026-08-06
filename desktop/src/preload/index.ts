@@ -94,11 +94,12 @@ const api = {
     ipcRenderer.invoke('plugin:mcp.toggle', input),
   cdpStatus: (): Promise<{ running: boolean; port: number; extension: boolean; error: string | null }> => ipcRenderer.invoke('cdp:status'),
   onCdpExtension: (cb: (payload: { connected: boolean }) => void): Unsub => subscribe('cdp:extension', cb),
+  tlsResetFingerprints: (): Promise<void> => ipcRenderer.invoke('tls:resetFingerprints'),
   onAgentEvent: (cb: (ev: AgentEvent) => void): Unsub => subscribe('agent:event', cb),
   onInterrupted: (cb: (list: ConversationRow[]) => void): Unsub => subscribe('chat:interrupted', cb),
   onChatTitle: (cb: (payload: { conversationId: number; title: string }) => void): Unsub =>
     subscribe('chat:title', cb),
-  onConnectionStatus: (cb: (status: 'online' | 'offline' | 'auth_expired' | 'trusting_cert') => void): Unsub =>
+  onConnectionStatus: (cb: (status: 'online' | 'offline' | 'auth_expired' | 'trusting_cert' | 'cert_mismatch') => void): Unsub =>
     subscribe('connection:status', cb),
   onLoggedIn: (cb: (session: Session) => void): Unsub => subscribe('auth:logged-in', cb),
 }

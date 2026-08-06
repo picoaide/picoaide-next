@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { loadElectronModule } from '../util/electron'
 
@@ -46,8 +46,15 @@ export function checkFingerprint(storePath: string, serverHost: string, fingerpr
   return known === fingerprint ? 'trusted' : 'mismatch'
 }
 
+// 审计3-M4:证书轮换后用户经设置页"重置已信任证书"清除 TOFU 指纹,下次连接重新信任
+export function clearFingerprints(storePath: string): void {
+  rmSync(storePath, { force: true })
+}
+
 export interface InstallCertOptions {
   onUnknownFingerprint?: (host: string, fingerprint: string) => void
+  // 审计3-M4:证书轮换(mismatch)独立回调,UI 可提示"重置已信任证书"
+  onMismatchFingerprint?: (host: string, fingerprint: string) => void
   // 测试注入:提供 electron session 替代 require/import(默认自动获取)
   getSession?: () => unknown
 }
@@ -86,6 +93,7 @@ export async function installCertificateVerification(storePath: string, opts: In
     if (status === 'trusted') {
       callback(0)
     } else if (status === 'mismatch') {
+      opts.onMismatchFingerprint?.(hostKey, fingerprint)
       callback(-2)
     } else {
       // TOFU:首次连接未知指纹 → 记录并信任;此后同指纹 trusted、不同指纹(如 MITM)拒绝

@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-export type ConnectionStatus = 'online' | 'offline' | 'auth_expired'
+export type ConnectionStatus = 'online' | 'offline' | 'auth_expired' | 'cert_mismatch'
 
 interface ConnectionState {
   status: ConnectionStatus

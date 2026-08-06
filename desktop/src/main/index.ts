@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, nativeTheme, shell } from 'electron'
+import { app, BrowserWindow, dialog, Menu, nativeTheme, shell } from 'electron'
 import { join } from 'path'
 import { tool } from 'ai'
 import { z } from 'zod'
@@ -17,7 +17,7 @@ import { listMessages, appendMessage, updateMessageContent, deleteMessagesAfter,
 import { addArtifact, listArtifacts } from './store/artifacts'
 import { getSetting, setSetting } from './store/settings'
 import { dataDir, dbPath, workspaceDir } from './paths'
-import { installCertificateVerification } from './gateway/tls'
+import { installCertificateVerification, clearFingerprints } from './gateway/tls'
 import { createGatewayModel as makeGatewayModel } from './agent/provider'
 import { createKbTools } from './agent/engine'
 import type { GatedTool } from './agent/engine'
@@ -286,217 +286,237 @@ async function loadMcpTools(db: ReturnType<typeof openDb>): Promise<{ tools: Rec
 }
 
 app.whenReady().then(async () => {
-  const fs = await import('node:fs')
-  fs.mkdirSync(dataDir(), { recursive: true })
-  fs.mkdirSync(join(dataDir(), 'workspaces'), { recursive: true })
-  fs.mkdirSync(join(dataDir(), 'skills'), { recursive: true })
-  fs.mkdirSync(join(dataDir(), 'mcp'), { recursive: true })
-  initOperationLog()
-  const db = openDb(dbPath())
-  migrate(db)
+  try {
+    const fs = await import('node:fs')
+    fs.mkdirSync(dataDir(), { recursive: true })
+    fs.mkdirSync(join(dataDir(), 'workspaces'), { recursive: true })
+    fs.mkdirSync(join(dataDir(), 'skills'), { recursive: true })
+    fs.mkdirSync(join(dataDir(), 'mcp'), { recursive: true })
+    initOperationLog()
+    const db = openDb(dbPath())
+    migrate(db)
 
-  // 浏览器插件桥(3.15):固定监听 127.0.0.1:54321,退出时关闭
-  let cdpServer: import('./cdp_server').CdpServer | null = null
-  let cdpExtension = false
-  const cdpPort = 54321
-  import('./cdp_server').then((m) => m.startCdpServer({ port: cdpPort, onExtensionChange: (connected) => {
-    cdpExtension = connected
-    mainWindow?.webContents.send('cdp:extension', { connected })
-  } })).then(
-    (srv) => {
-      cdpServer = srv
-      console.log(`CDP bridge listening on 127.0.0.1:${srv.port}`)
-    },
-    (err: unknown) => {
-      console.error('CDP bridge failed to start:', err instanceof Error ? err.message : err)
-      mainWindow?.webContents.send('cdp:status', { running: false, port: cdpPort, error: err instanceof Error ? err.message : String(err) })
-    },
-  )
-  app.on('will-quit', () => {
-    void cdpServer?.close()
-  })
-
-  installCertificateVerification(join(dataDir(), 'fingerprints.json'), {
-    onUnknownFingerprint: () => {
-      // 首次连接自签证书:自动信任并记录(UI 提示由 renderer 呈现)
-      if (mainWindow) {
-        mainWindow.webContents.send('connection:status', 'trusting_cert')
-      }
-    },
-  })
-
-  const store: StoreLike = {
-    createConversation: (input) => createConversation(db, input),
-    listConversations: () => listConversations(db),
-    getConversation: (id) => getConversation(db, id),
-    updateConversationStatus: (id, status) => updateConversationStatus(db, id, status as any),
-    deleteConversation: (id) => deleteConversation(db, id),
-    setConversationTitle: (id, title) => setConversationTitle(db, id, title),
-    setConversationStarred: (id, starred) => setConversationStarred(db, id, starred),
-    setConversationArchived: (id, archived) => setConversationArchived(db, id, archived),
-    setConversationWorkspace: (id, ws) => setConversationWorkspace(db, id, ws),
-    listMessages: (cid) => listMessages(db, cid),
-    updateMessageContent: (id, content) => updateMessageContent(db, id, content),
-    deleteMessagesAfter: (cid, id) => deleteMessagesAfter(db, cid, id),
-    deleteMessage: (id) => deleteMessage(db, id),
-    appendMessage: (m) => appendMessage(db, m),
-    addArtifact: (a) => addArtifact(db, a),
-    listArtifacts: (cid) => listArtifacts(db, cid),
-    // 引擎 flushStep 整批落库走一个 SQLite 事务(审计3-L5)
-    transaction: (fn) => db.transaction(fn)(),
-    getSetting: (k) => getSetting(db, k),
-    setSetting: (k, v) => setSetting(db, k, v),
-    createProject: (input) => createProject(db, input),
-    listProjects: () => listProjects(db),
-    getProject: (id) => getProject(db, id),
-    deleteProject: (id) => deleteProject(db, id),
-    setConversationProject: (cid, pid) => setConversationProject(db, cid, pid),
-  }
-  appStore = store
-
-  const authDeps: AuthIpcDeps = {
-    flow: { login, saveSession, loadSession, clearSession },
-    getBootstrap,
-    openExternal: (url) => shell.openExternal(url),
-    onSessionEstablished: (session) => {
-      // 任何登录/恢复路径都重建引擎:丢弃旧会话引擎(中止其运行,防止旧 token 继续跑)
-      resetAgentEngine()
-      startPoller(session)
-      lastServerURL = session.serverURL
-      setSetting(db, 'last_server_url', session.serverURL)
-      mainWindow?.webContents.send('auth:logged-in', session)
-    },
-    onSessionCleared: () => {
-      stopPoller()
-      resetAgentEngine()
-      // 登出必须清 MCP 凭证内存,否则下一个用户的会话沿用上一个用户的插件凭证
-      clearMcpCredentials()
-    },
-  }
-
-  lastServerURL = getSetting(db, 'last_server_url')
-
-  registerIpcHandlers({
-    ...buildHandlers(),
-    'cdp:status': () => ({ running: cdpServer !== null, port: cdpPort, extension: cdpExtension, error: cdpServer === null ? 'CDP 桥启动失败(端口可能被占用)' : null }),
-    ...buildAuthHandlers(authDeps),
-    ...buildPluginHandlers({
-      store: { getSetting: (k) => getSetting(db, k), setSetting: (k, v) => setSetting(db, k, v) },
-      refreshBootstrap: async () => {
-        const session = getCurrentSession()
-        if (!session) throw new Error('未登录')
-        const { config } = await getBootstrap(session)
-        setBootstrapCache(config)
-        return config
+    // 浏览器插件桥(3.15):固定监听 127.0.0.1:54321,退出时关闭
+    let cdpServer: import('./cdp_server').CdpServer | null = null
+    let cdpExtension = false
+    const cdpPort = 54321
+    import('./cdp_server').then((m) => m.startCdpServer({ port: cdpPort, onExtensionChange: (connected) => {
+      cdpExtension = connected
+      mainWindow?.webContents.send('cdp:extension', { connected })
+    } })).then(
+      (srv) => {
+        cdpServer = srv
+        console.log(`CDP bridge listening on 127.0.0.1:${srv.port}`)
       },
-    }),
-    ...buildAgentHandlers({
-      store,
-      sysPrompt: async () => {
-        const extra = await loadInstalledSkillInstruction()
-        return buildSystemPrompt(extra || undefined)
+      (err: unknown) => {
+        console.error('CDP bridge failed to start:', err instanceof Error ? err.message : err)
+        mainWindow?.webContents.send('cdp:status', { running: false, port: cdpPort, error: err instanceof Error ? err.message : String(err) })
       },
-      createModel: () => {
-        const session = getCurrentSession()
-        if (!session) throw new Error('未登录')
-        const bootstrap = getBootstrapCache()
-        const model = bootstrap.models.find((m) => m.id === bootstrap.default_model) ?? bootstrap.models[0]
-        if (!model) throw new Error('无可用模型')
-        return makeGatewayModel(session.serverURL, session.token, model.id)
+    )
+    app.on('will-quit', () => {
+      void cdpServer?.close()
+    })
+
+    // TOFU 指纹文件路径:证书轮换后设置页"重置已信任证书"清除(tls:resetFingerprints)
+    const fingerprintsPath = join(dataDir(), 'fingerprints.json')
+    installCertificateVerification(fingerprintsPath, {
+      onUnknownFingerprint: () => {
+        // 首次连接自签证书:自动信任并记录(UI 提示由 renderer 呈现)
+        if (mainWindow) {
+          mainWindow.webContents.send('connection:status', 'trusting_cert')
+        }
       },
-      getTools: (workspace?: string) => buildToolsRegistry(db, workspace),
-      getWindow: () => mainWindow,
-      listAllowedDirs: () => resolveAllowedDirs(workspaceDir(), getAllowedDirsFromSettings((k) => getSetting(db, k))),
-      listProjectPaths: () => listProjects(db).map((p) => p.path),
-      autoTitle: async ({ conversationId }) => {
-        const conv = store.getConversation(conversationId)
-        if (!conv || conv.title !== '') return
-        // 并发去重:ask + editAndRerun 双触发时只跑一次(同会话 in-flight 锁)
-        if (titleInflight.has(conversationId)) return
-        titleInflight.add(conversationId)
-        try {
-          const msgs = store.listMessages(conversationId)
-          const firstUser = msgs.find((m) => m.role === 'user')
-          if (!firstUser || !firstUser.content) return
+      onMismatchFingerprint: () => {
+        // 证书轮换(审计3-M4):事件可区分,UI 提示走"重置已信任证书"
+        if (mainWindow) {
+          mainWindow.webContents.send('connection:status', 'cert_mismatch')
+        }
+      },
+    })
+
+    const store: StoreLike = {
+      createConversation: (input) => createConversation(db, input),
+      listConversations: () => listConversations(db),
+      getConversation: (id) => getConversation(db, id),
+      updateConversationStatus: (id, status) => updateConversationStatus(db, id, status as any),
+      deleteConversation: (id) => deleteConversation(db, id),
+      setConversationTitle: (id, title) => setConversationTitle(db, id, title),
+      setConversationStarred: (id, starred) => setConversationStarred(db, id, starred),
+      setConversationArchived: (id, archived) => setConversationArchived(db, id, archived),
+      setConversationWorkspace: (id, ws) => setConversationWorkspace(db, id, ws),
+      listMessages: (cid) => listMessages(db, cid),
+      updateMessageContent: (id, content) => updateMessageContent(db, id, content),
+      deleteMessagesAfter: (cid, id) => deleteMessagesAfter(db, cid, id),
+      deleteMessage: (id) => deleteMessage(db, id),
+      appendMessage: (m) => appendMessage(db, m),
+      addArtifact: (a) => addArtifact(db, a),
+      listArtifacts: (cid) => listArtifacts(db, cid),
+      // 引擎 flushStep 整批落库走一个 SQLite 事务(审计3-L5)
+      transaction: (fn) => db.transaction(fn)(),
+      getSetting: (k) => getSetting(db, k),
+      setSetting: (k, v) => setSetting(db, k, v),
+      createProject: (input) => createProject(db, input),
+      listProjects: () => listProjects(db),
+      getProject: (id) => getProject(db, id),
+      deleteProject: (id) => deleteProject(db, id),
+      setConversationProject: (cid, pid) => setConversationProject(db, cid, pid),
+    }
+    appStore = store
+
+    const authDeps: AuthIpcDeps = {
+      flow: { login, saveSession, loadSession, clearSession },
+      getBootstrap,
+      openExternal: (url) => shell.openExternal(url),
+      onSessionEstablished: (session) => {
+        // 任何登录/恢复路径都重建引擎:丢弃旧会话引擎(中止其运行,防止旧 token 继续跑)
+        resetAgentEngine()
+        startPoller(session)
+        lastServerURL = session.serverURL
+        setSetting(db, 'last_server_url', session.serverURL)
+        mainWindow?.webContents.send('auth:logged-in', session)
+      },
+      onSessionCleared: () => {
+        stopPoller()
+        resetAgentEngine()
+        // 登出必须清 MCP 凭证内存,否则下一个用户的会话沿用上一个用户的插件凭证
+        clearMcpCredentials()
+      },
+    }
+
+    lastServerURL = getSetting(db, 'last_server_url')
+
+    registerIpcHandlers({
+      ...buildHandlers(),
+      'cdp:status': () => ({ running: cdpServer !== null, port: cdpPort, extension: cdpExtension, error: cdpServer === null ? 'CDP 桥启动失败(端口可能被占用)' : null }),
+      'tls:resetFingerprints': () => clearFingerprints(fingerprintsPath),
+      ...buildAuthHandlers(authDeps),
+      ...buildPluginHandlers({
+        store: { getSetting: (k) => getSetting(db, k), setSetting: (k, v) => setSetting(db, k, v) },
+        refreshBootstrap: async () => {
           const session = getCurrentSession()
-          if (!session) return
+          if (!session) throw new Error('未登录')
+          const { config } = await getBootstrap(session)
+          setBootstrapCache(config)
+          return config
+        },
+      }),
+      ...buildAgentHandlers({
+        store,
+        sysPrompt: async () => {
+          const extra = await loadInstalledSkillInstruction()
+          return buildSystemPrompt(extra || undefined)
+        },
+        createModel: () => {
+          const session = getCurrentSession()
+          if (!session) throw new Error('未登录')
           const bootstrap = getBootstrapCache()
           const model = bootstrap.models.find((m) => m.id === bootstrap.default_model) ?? bootstrap.models[0]
-          if (!model) return
-          let title = ''
+          if (!model) throw new Error('无可用模型')
+          return makeGatewayModel(session.serverURL, session.token, model.id)
+        },
+        getTools: (workspace?: string) => buildToolsRegistry(db, workspace),
+        getWindow: () => mainWindow,
+        listAllowedDirs: () => resolveAllowedDirs(workspaceDir(), getAllowedDirsFromSettings((k) => getSetting(db, k))),
+        listProjectPaths: () => listProjects(db).map((p) => p.path),
+        autoTitle: async ({ conversationId }) => {
+          const conv = store.getConversation(conversationId)
+          if (!conv || conv.title !== '') return
+          // 并发去重:ask + editAndRerun 双触发时只跑一次(同会话 in-flight 锁)
+          if (titleInflight.has(conversationId)) return
+          titleInflight.add(conversationId)
           try {
-            title = await generateTitle(
-              makeGatewayModel(session.serverURL, session.token, model.id),
-              firstUser.content,
-              { fetch: gatewayFetch },
-            )
-          } catch {
-            // 网关失败兜底:截取首条用户消息
-            title = fallbackTitle(firstUser.content)
+            const msgs = store.listMessages(conversationId)
+            const firstUser = msgs.find((m) => m.role === 'user')
+            if (!firstUser || !firstUser.content) return
+            const session = getCurrentSession()
+            if (!session) return
+            const bootstrap = getBootstrapCache()
+            const model = bootstrap.models.find((m) => m.id === bootstrap.default_model) ?? bootstrap.models[0]
+            if (!model) return
+            let title = ''
+            try {
+              title = await generateTitle(
+                makeGatewayModel(session.serverURL, session.token, model.id),
+                firstUser.content,
+                { fetch: gatewayFetch },
+              )
+            } catch {
+              // 网关失败兜底:截取首条用户消息
+              title = fallbackTitle(firstUser.content)
+            }
+            // 生成期间用户可能已手动重命名:仅在仍为空时写入
+            if (title && store.getConversation(conversationId)?.title === '') {
+              store.setConversationTitle(conversationId, title)
+              // 实时通知 renderer 刷新侧边栏标题(不等下次 loadConversations)
+              mainWindow?.webContents.send('chat:title', { conversationId, title })
+            }
+          } finally {
+            titleInflight.delete(conversationId)
           }
-          // 生成期间用户可能已手动重命名:仅在仍为空时写入
-          if (title && store.getConversation(conversationId)?.title === '') {
-            store.setConversationTitle(conversationId, title)
-            // 实时通知 renderer 刷新侧边栏标题(不等下次 loadConversations)
-            mainWindow?.webContents.send('chat:title', { conversationId, title })
+        },
+        registerEngineReset: (reset) => {
+          resetAgentEngine = reset
+        },
+        fetch: gatewayFetch,
+        addAllowedDir: (dir) => {
+          // 关键:必须同步更新当前活跃工具注册表持有的 allowedDirs 数组(工具 execute 闭包引用它),
+          // 否则越界授权后的"自动重试"仍走旧目录清单再次越界失败(要等下次 getTools 重建才生效)。
+          if (activeAllowedDirs && !activeAllowedDirs.includes(dir)) activeAllowedDirs.push(dir)
+          const current = getAllowedDirsFromSettings((k) => getSetting(db, k))
+          if (!current.includes(dir)) {
+            current.push(dir)
+            setSetting(db, 'allowed_dirs', JSON.stringify(current))
           }
-        } finally {
-          titleInflight.delete(conversationId)
+        },
+      }),
+    })
+
+    handleAuthDeepLink = (url: string) => handleAuthDeepLinkImpl(url, authDeps)
+    for (const arg of process.argv) {
+      if (arg.startsWith('picoaide://')) handleAuthDeepLinkImpl(arg, authDeps)
+    }
+
+    buildMenu()
+    createWindow()
+
+    // 窗口状态记忆(chatbox window_state):重启恢复位置/尺寸
+    const savedBounds = getSetting(db, 'window_bounds')
+    if (savedBounds) {
+      try {
+        const b = JSON.parse(savedBounds) as { x?: number; y?: number; width?: number; height?: number }
+        if (typeof b.width === 'number' && typeof b.height === 'number') {
+          mainWindow?.setBounds({ x: b.x ?? 0, y: b.y ?? 0, width: b.width, height: b.height })
         }
-      },
-      registerEngineReset: (reset) => {
-        resetAgentEngine = reset
-      },
-      fetch: gatewayFetch,
-      addAllowedDir: (dir) => {
-        // 关键:必须同步更新当前活跃工具注册表持有的 allowedDirs 数组(工具 execute 闭包引用它),
-        // 否则越界授权后的"自动重试"仍走旧目录清单再次越界失败(要等下次 getTools 重建才生效)。
-        if (activeAllowedDirs && !activeAllowedDirs.includes(dir)) activeAllowedDirs.push(dir)
-        const current = getAllowedDirsFromSettings((k) => getSetting(db, k))
-        if (!current.includes(dir)) {
-          current.push(dir)
-          setSetting(db, 'allowed_dirs', JSON.stringify(current))
-        }
-      },
-    }),
-  })
-
-  handleAuthDeepLink = (url: string) => handleAuthDeepLinkImpl(url, authDeps)
-  for (const arg of process.argv) {
-    if (arg.startsWith('picoaide://')) handleAuthDeepLinkImpl(arg, authDeps)
-  }
-
-  buildMenu()
-  createWindow()
-
-  // 窗口状态记忆(chatbox window_state):重启恢复位置/尺寸
-  const savedBounds = getSetting(db, 'window_bounds')
-  if (savedBounds) {
-    try {
-      const b = JSON.parse(savedBounds) as { x?: number; y?: number; width?: number; height?: number }
-      if (typeof b.width === 'number' && typeof b.height === 'number') {
-        mainWindow?.setBounds({ x: b.x ?? 0, y: b.y ?? 0, width: b.width, height: b.height })
+      } catch {
+        // 损坏的状态忽略
       }
-    } catch {
-      // 损坏的状态忽略
     }
+    mainWindow?.on('close', () => {
+      const b = mainWindow?.getBounds()
+      if (b) setSetting(db, 'window_bounds', JSON.stringify(b))
+    })
+
+    // 深色模式跟随系统(HIG):nativeTheme 变化时广播给所有窗口
+    nativeTheme.on('updated', () => {
+      const theme: 'dark' | 'light' = nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
+      for (const win of BrowserWindow.getAllWindows()) {
+        win.webContents.send('theme:changed', theme)
+      }
+    })
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    })
+  } catch (err) {
+    // 审计3-M3:DB 打开/迁移失败不再静默挂死 —— 弹错误框 + 修复指引后退出
+    const message = err instanceof Error ? err.message : String(err)
+    console.error('startup failed:', err)
+    dialog.showErrorBox(
+      '数据目录损坏',
+      `启动失败,无法打开本地数据库。\n\n${message}\n\n若数据目录已损坏,请备份后删除以下目录中的 picoaide.db 再启动:\n${dataDir()}`,
+    )
+    app.exit(1)
   }
-  mainWindow?.on('close', () => {
-    const b = mainWindow?.getBounds()
-    if (b) setSetting(db, 'window_bounds', JSON.stringify(b))
-  })
-
-  // 深色模式跟随系统(HIG):nativeTheme 变化时广播给所有窗口
-  nativeTheme.on('updated', () => {
-    const theme: 'dark' | 'light' = nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
-    for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send('theme:changed', theme)
-    }
-  })
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
-  })
 })
 
 app.on('window-all-closed', () => {

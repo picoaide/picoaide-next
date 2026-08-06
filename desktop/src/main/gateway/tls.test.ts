@@ -63,6 +63,17 @@ describe('TOFU store', () => {
     const { loadFingerprints } = await loadTls()
     expect(loadFingerprints(join(tmp, 'nope.json'))).toEqual({})
   })
+
+  it('clearFingerprints deletes the store, returning to unknown (审计3-M4)', async () => {
+    const { clearFingerprints, saveFingerprint, checkFingerprint } = await loadTls()
+    const store = join(tmp, 'fingerprints.json')
+    const fp = createHash('sha256').update(randomBytes(32)).digest('hex')
+    saveFingerprint(store, 'gw.example.com', fp)
+    expect(existsSync(store)).toBe(true)
+    clearFingerprints(store)
+    expect(existsSync(store)).toBe(false)
+    expect(checkFingerprint(store, 'gw.example.com', fp)).toBe('unknown')
+  })
 })
 
 describe('installCertificateVerification', () => {
@@ -114,5 +125,32 @@ describe('installCertificateVerification', () => {
     expect(results).toEqual([0, 0, -2, 0, 0])
     expect(notified).toEqual([['gw:443', fp1], ['other:443', fp3], ['gw:8443', fp1]])
     expect(loadFingerprints(store)).toEqual({ 'gw:443': fp1, 'other:443': fp3, 'gw:8443': fp1 })
+  })
+
+  it('notifies a distinct mismatch event on cert rotation (审计3-M4)', async () => {
+    const { installCertificateVerification, sha256Fingerprint } = await loadTls()
+    const store = join(tmp, 'fingerprints.json')
+    const cert1 = randomBytes(64)
+    const cert2 = randomBytes(64)
+    const fp1 = sha256Fingerprint(cert1)
+    const fp2 = sha256Fingerprint(cert2)
+
+    const results: number[] = []
+    const mismatches: Array<[string, string]> = []
+    let proc: ((req: any, cb: (n: number) => void) => void) | null = null
+    const fakeSession = {
+      setCertificateVerifyProc: (fn: (req: any, cb: (n: number) => void) => void) => {
+        proc = fn
+      },
+    }
+
+    await installCertificateVerification(store, {
+      getSession: () => fakeSession as never,
+      onMismatchFingerprint: (host, fp) => mismatches.push([host, fp]),
+    })
+    proc!({ hostname: 'gw', port: 443, certificate: { data: cert1 } }, (n) => results.push(n))
+    proc!({ hostname: 'gw', port: 443, certificate: { data: cert2 } }, (n) => results.push(n))
+    expect(results).toEqual([0, -2])
+    expect(mismatches).toEqual([['gw:443', fp2]])
   })
 })

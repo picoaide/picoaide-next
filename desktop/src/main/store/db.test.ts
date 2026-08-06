@@ -18,6 +18,17 @@ describe('db', () => {
     cleanup()
   })
 
+  it('openDb sets a 3s busy_timeout (审计3-L4)', () => {
+    const { dbPath, cleanup } = tmpDb()
+    const db = openDb(dbPath)
+    try {
+      expect(db.pragma('busy_timeout', { simple: true })).toBe(3000)
+    } finally {
+      db.close()
+      cleanup()
+    }
+  })
+
   it('after migrate, schema_migrations and the 4 business tables exist', () => {
     const { dbPath, cleanup } = tmpDb()
     const db = openDb(dbPath)

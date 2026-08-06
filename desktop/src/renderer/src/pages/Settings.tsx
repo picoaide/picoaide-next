@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ArrowDownToLine, Check, Copy, LogOut, RefreshCw, Trash2 } from 'lucide-react'
+import { ArrowDownToLine, Check, Copy, LogOut, RefreshCw, ShieldAlert, Trash2 } from 'lucide-react'
 import { Input } from '../components/ui/input'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
@@ -155,6 +155,13 @@ export default function Settings({
     }
   }
 
+  // 证书轮换(mismatch)后 TOFU 指纹需重置,否则所有请求被拒且只能手工删文件(审计3-M4)
+  const resetCerts = () =>
+    run('certs', async () => {
+      await picoaide().tlsResetFingerprints()
+      toast('已清除证书信任,重新连接时将自动信任新证书')
+    })
+
   return (
     <div className="mx-auto flex h-screen max-w-3xl flex-col overflow-y-auto p-6">
       <div className="mb-6 flex items-center justify-between">
@@ -234,6 +241,14 @@ export default function Settings({
           <div className="flex justify-between">
             <span className="text-muted-foreground">当前模型</span>
             <span>{info?.model || '—'}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3 border-t pt-3">
+            <span className="flex items-center gap-1 text-muted-foreground">
+              <ShieldAlert className="h-3.5 w-3.5" /> 已信任证书(TOFU)
+            </span>
+            <Button variant="outline" size="sm" onClick={() => void resetCerts()} disabled={busy !== ''}>
+              重置已信任证书
+            </Button>
           </div>
           <div className="border-t pt-3">
             <Button variant="outline" size="sm" className="text-destructive hover:text-destructive" onClick={() => void logout()}>
