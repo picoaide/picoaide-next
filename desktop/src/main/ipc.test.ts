@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { tool } from 'ai'
@@ -916,6 +916,228 @@ describe('chat:attach', () => {
     } finally {
       setDataDirOverride(null)
       rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('IPC 输入校验(审计3-M2/M1)', () => {
+  it('chat:attach 整体校验:数组内任一非法 dataUrl → 全部不落盘', async () => {
+    const { deps } = makeDeps()
+    const handlers = buildAgentHandlers(deps)
+    const tmp = mkdtempSync(join(tmpdir(), 'picoaide-ipc-valid-'))
+    setDataDirOverride(tmp)
+    try {
+      const id = handlers['chat:new']({})
+      await expect(
+        handlers['chat:attach']({
+          conversationId: id,
+          files: [
+            { kind: 'image', name: 'ok.png', dataUrl: `data:image/png;base64,${Buffer.from([0x89, 0x50]).toString('base64')}` },
+            { kind: 'image', name: 'bad.png', dataUrl: 'garbage-without-data-prefix' },
+          ],
+        }),
+      ).rejects.toThrow(/data:/)
+      // 先校验后落盘:第一个文件也不得写入
+      expect(existsSync(join(tmp, 'workspaces', 'attachments'))).toBe(false)
+    } finally {
+      setDataDirOverride(null)
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  it('chat:attach 非字符串文件名拒绝且不落盘', async () => {
+    const { deps } = makeDeps()
+    const handlers = buildAgentHandlers(deps)
+    const tmp = mkdtempSync(join(tmpdir(), 'picoaide-ipc-name2-'))
+    setDataDirOverride(tmp)
+    try {
+      const id = handlers['chat:new']({})
+      await expect(
+        handlers['chat:attach']({
+          conversationId: id,
+          files: [{ kind: 'file', name: 42 as unknown as string, dataUrl: 'data:text/csv;base64,YQo=' }],
+        }),
+      ).rejects.toThrow(/文件名/)
+      expect(existsSync(join(tmp, 'workspaces', 'attachments'))).toBe(false)
+    } finally {
+      setDataDirOverride(null)
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  it('chat:search 非字符串 query 不抛 TypeError(统一 String 化)', () => {
+    const { deps } = makeDeps()
+    const handlers = buildAgentHandlers(deps)
+    expect(() => handlers['chat:search']({ query: 42 as unknown as string })).not.toThrow()
+    expect(() => handlers['chat:search']({ query: null as unknown as string })).not.toThrow()
+    expect(handlers['chat:search']({ query: 42 as unknown as string })).toEqual([])
+  })
+
+  it('project:create 拒绝相对路径/根目录/空路径', () => {
+    const { deps } = makeDeps()
+    const handlers = buildAgentHandlers(deps)
+    expect(() => handlers['project:create']({ name: 'x', path: 'relative/dir' })).toThrow(/绝对路径/)
+    expect(() => handlers['project:create']({ name: 'x', path: '/' })).toThrow(/绝对路径/)
+    expect(() => handlers['project:create']({ name: 'x', path: '' })).toThrow(/绝对路径/)
+    expect(() => handlers['project:create']({ name: 'x', path: '/ok/abs' })).not.toThrow()
+  })
+
+  it('chat:rename / chat:new 非字符串标题拒绝', () => {
+    const { deps, store } = makeDeps()
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({})
+    expect(() => handlers['chat:rename']({ conversationId: id, title: 42 as unknown as string })).toThrow()
+    expect(() => handlers['chat:new']({ title: 42 as unknown as string })).toThrow()
+    expect(store.getConversation(id)?.title).toBe('')
+  })
+})
+
+describe('未登录时的本地操作(审计3-M1)', () => {
+  it('chat:delete 在 createModel 抛未登录时仍可删除本地会话', async () => {
+    const { deps, store } = makeDeps()
+    deps.createModel = () => {
+      throw new Error('未登录')
+    }
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({})
+    await expect(handlers['chat:delete']({ conversationId: id })).resolves.toBeUndefined()
+    expect(store.getConversation(id)).toBeNull()
+  })
+
+  it('chat:cancel / agent:confirm 在引擎构造失败时不泄漏 unhandled rejection', async () => {
+    const { deps } = makeDeps()
+    deps.createModel = () => {
+      throw new Error('未登录')
+    }
+    const handlers = buildAgentHandlers(deps)
+    let leaked: unknown = undefined
+    const onRej = (reason: unknown) => {
+      leaked = reason
+    }
+    process.on('unhandledRejection', onRej)
+    try {
+      handlers['chat:cancel']()
+      handlers['agent:confirm']({ requestId: 'x', ok: true })
+      await new Promise((r) => setTimeout(r, 50))
+      expect(leaked).toBeUndefined()
+    } finally {
+      process.removeListener('unhandledRejection', onRej)
+    }
+  })
+})
+
+describe('并发与运行中守卫(审计3-L1/L2)', () => {
+  it('并发 getEngine 只构造一个引擎实例(async sysPrompt 下)', async () => {
+    const { deps, modelCalls } = makeDeps('text')
+    deps.sysPrompt = async () => 'sys'
+    const handlers = buildAgentHandlers(deps)
+    const id1 = handlers['chat:new']({})
+    const id2 = handlers['chat:new']({})
+    const results = await Promise.allSettled([
+      handlers['chat:ask']({ conversationId: id1, content: 'a' }),
+      handlers['chat:ask']({ conversationId: id2, content: 'b' }),
+    ])
+    expect(modelCalls()).toBe(1)
+    expect(results.some((r) => r.status === 'fulfilled')).toBe(true)
+  })
+
+  it('chat:editAndRerun 在会话运行中拒绝且不改库', async () => {
+    const { deps, store, sent } = makeDeps('hang')
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({ mode: 'craft' })
+    const m1 = store.appendMessage({ conversationId: id, role: 'user', content: 'old question' })
+    const ask = handlers['chat:ask']({ conversationId: id, content: 'hi' })
+    await waitFor(() => eventsOf(sent).length > 0)
+    await expect(handlers['chat:editAndRerun']({ conversationId: id, messageId: m1, content: 'edited' })).rejects.toThrow(/运行/)
+    expect(store.listMessages(id).find((m) => m.id === m1)?.content).toBe('old question')
+    expect(store.getConversation(id)?.status).not.toBe('failed')
+    handlers['chat:cancel']()
+    await ask
+  })
+})
+
+describe('登出清空审批缓冲(审计3-L3)', () => {
+  it('engine reset(登出)清空 pending confirm_required,rendererReady 不再补发', async () => {
+    const { deps, sent, resetEngine } = makeDeps('tool-call')
+    deps.getTools = async () => ({
+      tools: {
+        file_delete: tool({
+          description: 'delete a file',
+          inputSchema: z.object({ path: z.string() }),
+          execute: async () => 'deleted',
+        }),
+      },
+      highRiskTools: new Set(['file_delete']),
+    })
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({ mode: 'craft' })
+    const run = handlers['chat:ask']({ conversationId: id, content: 'delete it' })
+    await new Promise((r) => setTimeout(r, 100))
+    resetEngine()
+    handlers['picoaide:rendererReady']()
+    await run.catch(() => {})
+    expect(eventsOf(sent).some((e) => (e as { type: string }).type === 'confirm_required')).toBe(false)
+  })
+})
+
+describe('会话删除清理磁盘(审计3-H2)', () => {
+  it('chat:delete 清理项目会话 workspace 的 attachments 与 tool-outputs,保留其他文件', async () => {
+    const { deps, store } = makeDeps()
+    const handlers = buildAgentHandlers(deps)
+    const dir = mkdtempSync(join(tmpdir(), 'picoaide-ipc-del-'))
+    deps.listProjectPaths = () => [dir]
+    try {
+      const pid = handlers['project:create']({ name: 'p', path: dir })
+      const id = handlers['chat:new']({ projectId: pid })
+      const ws = store.getConversation(id)!.workspace
+      const attach = join(ws, 'attachments')
+      const out = join(ws, 'tool-outputs')
+      mkdirSync(attach, { recursive: true })
+      mkdirSync(out, { recursive: true })
+      writeFileSync(join(attach, 'a.png'), 'x')
+      writeFileSync(join(out, 't.txt'), 'y')
+      writeFileSync(join(ws, 'keep.md'), 'z')
+      await handlers['chat:delete']({ conversationId: id })
+      expect(existsSync(attach)).toBe(false)
+      expect(existsSync(out)).toBe(false)
+      expect(existsSync(join(ws, 'keep.md'))).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('chat:delete 不清理已知根目录之外的 workspace(路径校验兜底)', async () => {
+    const { deps, store } = makeDeps()
+    const handlers = buildAgentHandlers(deps)
+    const dir = mkdtempSync(join(tmpdir(), 'picoaide-ipc-out-'))
+    const outside = mkdtempSync(join(tmpdir(), 'picoaide-ipc-outside-'))
+    try {
+      const id = handlers['chat:new']({})
+      const ws = join(outside, 'conv-ws')
+      mkdirSync(join(ws, 'attachments'), { recursive: true })
+      writeFileSync(join(ws, 'attachments', 'a.png'), 'x')
+      store.setConversationWorkspace(id, ws)
+      await handlers['chat:delete']({ conversationId: id })
+      expect(existsSync(join(ws, 'attachments', 'a.png'))).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('project:delete 仅解绑,不删项目目录文件(现状保持)', async () => {
+    const { deps, store } = makeDeps()
+    const handlers = buildAgentHandlers(deps)
+    const dir = mkdtempSync(join(tmpdir(), 'picoaide-ipc-projdel-'))
+    try {
+      const pid = handlers['project:create']({ name: 'p', path: dir })
+      const id = handlers['chat:new']({ projectId: pid })
+      const ws = store.getConversation(id)!.workspace
+      writeFileSync(join(ws, 'keep.md'), 'x')
+      handlers['project:delete']({ id: pid })
+      expect(existsSync(join(ws, 'keep.md'))).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })

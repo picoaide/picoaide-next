@@ -1,6 +1,6 @@
 import { dialog, ipcMain, nativeTheme, shell } from 'electron'
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { isAbsolute, join } from 'node:path'
 import { AgentEngine } from './agent/engine'
 import type { GatedTool, StoreLike as EngineStore } from './agent/engine'
 import type { AgentEvent } from './agent/events'
@@ -217,29 +217,48 @@ export type ChatHandlers = Omit<IpcHandlers, 'auth:login' | 'auth:loadSession' |
 export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
   // 引擎单例(持有 currentAbort/审批队列);模型经 createModel 惰性创建(登录后 token 就绪)
   let engine: AgentEngine | null = null
+  // 构造中占位(审计3-L1):async sysPrompt 下并发 getEngine 双重构造,构造完成再赋值
+  let enginePromise: Promise<AgentEngine> | null = null
   const resetEngine = (): void => {
     // 登出/换账号/过期:必须先中止运行中的任务(循环、审批、网关调用),
     // 否则旧引擎继续用旧 token 跑并 emit 事件串到新会话 UI
     engine?.cancel()
     engine = null
+    // 审批缓冲跨账号残留(审计3-L3):登出即清,renderer 下次就绪不得补发旧账号的确认框
+    pending.length = 0
   }
   deps.registerEngineReset?.(resetEngine)
   // 基础系统提示(默认提示 + 技能指令),craft/plan 每次运行重新解析后追加 AGENTS.md
   const basePrompt = async (): Promise<string> =>
     typeof deps.sysPrompt === 'function' ? await deps.sysPrompt() : deps.sysPrompt
   const getEngine = async (): Promise<AgentEngine> => {
-    if (!engine) {
-      const sysPrompt = typeof deps.sysPrompt === 'function' ? await deps.sysPrompt() : deps.sysPrompt
-      engine = new AgentEngine(
-        { model: deps.createModel(), sysPrompt, ...(deps.fetch ? { fetch: deps.fetch } : {}) },
-        {
-          store: deps.store,
-          emit: emitAgentEvent,
-          addAllowedDir: deps.addAllowedDir,
+    // 双检(审计3-L1):构造期间并发调用复用同一 Promise,避免 sysPrompt 异步窗口内双重构造
+    if (!engine && !enginePromise) {
+      enginePromise = (async () => {
+        const sysPrompt = typeof deps.sysPrompt === 'function' ? await deps.sysPrompt() : deps.sysPrompt
+        return new AgentEngine(
+          { model: deps.createModel(), sysPrompt, ...(deps.fetch ? { fetch: deps.fetch } : {}) },
+          {
+            store: deps.store,
+            emit: emitAgentEvent,
+            addAllowedDir: deps.addAllowedDir,
+          },
+        )
+      })()
+      enginePromise.then(
+        (e) => {
+          engine = e
+          enginePromise = null
+        },
+        () => {
+          // 构造失败(如未登录):清空占位,下次调用重新尝试
+          enginePromise = null
         },
       )
     }
-    return engine
+    const e = engine ?? (await enginePromise)
+    if (!e) throw new Error('引擎构造失败')
+    return e
   }
   // confirm_required 事件缓冲:renderer 未就绪(未订阅 agent:event)时暂存,rendererReady 后补发(防弹窗丢失)
   let rendererReady = false
@@ -263,6 +282,7 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
       flushPending()
     },
     'chat:new': (input) => {
+      if (input?.title !== undefined && typeof input.title !== 'string') throw new Error('无效的标题')
       const projectId = input?.projectId ?? null
       const id = deps.store.createConversation({ title: input?.title, mode: input?.mode, projectId })
       if (projectId !== null) {
@@ -276,7 +296,14 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
       return id
     },
     'project:list': () => deps.store.listProjects(),
-    'project:create': ({ name, path }) => deps.store.createProject({ name, path }),
+    'project:create': ({ name, path }) => {
+      // 审计3-M2:非法路径会允许 chat:new 在任意位置建目录并进入 artifact:read 读取范围
+      if (typeof path !== 'string' || path.trim().length === 0 || !isAbsolute(path) || path === '/') {
+        throw new Error('项目路径必须为绝对路径,且不能是根目录')
+      }
+      if (typeof name !== 'string' || name.trim().length === 0) throw new Error('项目名不能为空')
+      return deps.store.createProject({ name, path })
+    },
     'project:delete': ({ id }) => deps.store.deleteProject(id),
     'conversation:moveProject': ({ conversationId, projectId }) => deps.store.setConversationProject(conversationId, projectId),
     // 附带文件落盘:粘贴图片/拖拽文件 → 会话 workspace 的 attachments/ 目录(无项目回退全局工作目录)。
@@ -284,12 +311,20 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
     'chat:attach': async ({ conversationId, files }) => {
       const conv = deps.store.getConversation(conversationId)
       if (!conv) throw new Error('会话不存在')
+      // 审计3-M2:整体先校验(类型/格式)再落盘,失败不留半写文件/垃圾字节
+      if (!Array.isArray(files)) throw new Error('无效的附件参数')
+      for (const f of files) {
+        if (f.kind !== 'image' && f.kind !== 'file') throw new Error(`未知的附件类型:${String(f.kind)}`)
+        if (typeof f.dataUrl !== 'string' || !f.dataUrl.startsWith('data:') || !f.dataUrl.includes(',')) {
+          throw new Error('无效的附件数据(dataUrl 必须以 data: 开头且包含逗号)')
+        }
+        if (typeof f.name !== 'string') throw new Error('无效的附件文件名')
+      }
       const base = resolveWorkspace(conv.workspace, workspaceDir())
       const dir = join(base, 'attachments')
       mkdirSync(dir, { recursive: true })
       const out: AttachResult[] = []
       files.forEach((f, i) => {
-        if (f.kind !== 'image' && f.kind !== 'file') throw new Error(`未知的附件类型:${String(f.kind)}`)
         const mime = f.dataUrl.slice(5, f.dataUrl.indexOf(';'))
         const bytes = dataUrlBytes(f.dataUrl)
         if (f.kind === 'image') {
@@ -368,8 +403,12 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
         await (await getEngine()).approvePlan({ conversationId, ok })
       }
     },
-    'chat:cancel': () => { void getEngine().then((e) => e.cancel()) },
-    'agent:confirm': ({ requestId, ok }) => { void getEngine().then((e) => e.confirm(requestId, ok)) },
+    'chat:cancel': () => {
+      void getEngine().then((e) => e.cancel()).catch(() => {})
+    },
+    'agent:confirm': ({ requestId, ok }) => {
+      void getEngine().then((e) => e.confirm(requestId, ok)).catch(() => {})
+    },
     'chat:list': () => deps.store.listConversations(),
     // 启动扫描用:重启后 status IN ('running','executing') 的会话(架构设计 §3.3.1a)
     'chat:listRunning': () =>
@@ -377,8 +416,14 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
     'chat:messages': ({ conversationId }) => deps.store.listMessages(conversationId),
     // 消息编辑(chatbox 语义):改 user 消息内容 + 截断其后消息 + 重跑(模式决定是否带工具)
     'chat:editAndRerun': async ({ conversationId, messageId, content }) => {
+      if (typeof content !== 'string') throw new Error('无效的消息内容')
       const conv = deps.store.getConversation(conversationId)
       const mode = conv?.mode ?? 'ask'
+      // 审计3-L2:运行中先拒绝,避免先改库后占槽失败导致"库已改但没重跑"
+      const e = await getEngine()
+      if (e.runningConversation === conversationId) {
+        throw new Error('会话正在运行,请先停止再编辑重跑')
+      }
       deps.store.updateMessageContent(messageId, content)
       deps.store.deleteMessagesAfter(conversationId, messageId)
       // 引擎仅允许 running/executing/planning/failed 状态重跑,编辑场景先把 done 置为 failed
@@ -404,21 +449,42 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
     },
     'chat:artifacts': ({ conversationId }) => deps.store.listArtifacts(conversationId),
     'chat:delete': async ({ conversationId }) => {
-      // 删除运行中会话:先中止引擎,避免运行中的写库/FK 报错把结果吞掉
-      const e = await getEngine()
-      if (e.runningConversation === conversationId) e.cancel()
+      // 删除运行中会话:先中止引擎,避免运行中的写库/FK 报错把结果吞掉;
+      // 引擎不可用(未登录,createModel 抛错)时跳过,本地删除照常(审计3-M1)
+      try {
+        const e = await getEngine()
+        if (e.runningConversation === conversationId) e.cancel()
+      } catch {
+        // 忽略:本地会话删除不依赖引擎
+      }
+      const conv = deps.store.getConversation(conversationId)
+      // 审计3-H2:清理会话工作区的落盘子目录(attachments/tool-outputs);
+      // 仅当 workspace 位于已知根目录(项目目录 + 全局工作目录)内,防误删(复用 isAllowed)
+      if (conv?.workspace) {
+        const roots = [...(deps.listProjectPaths?.() ?? []), workspaceDir()]
+        if (isAllowed(conv.workspace, roots)) {
+          for (const sub of ['attachments', 'tool-outputs']) {
+            rmSync(join(conv.workspace, sub), { recursive: true, force: true })
+          }
+        }
+      }
       deps.store.deleteConversation(conversationId)
     },
-    'chat:rename': ({ conversationId, title }) => deps.store.setConversationTitle(conversationId, title),
+    'chat:rename': ({ conversationId, title }) => {
+      if (typeof title !== 'string') throw new Error('无效的标题')
+      deps.store.setConversationTitle(conversationId, title)
+    },
     'chat:setStarred': ({ conversationId, starred }) => deps.store.setConversationStarred(conversationId, starred),
     'chat:setArchived': ({ conversationId, archived }) => deps.store.setConversationArchived(conversationId, archived),
     // 全局搜索(Cmd+P,chatbox SearchDialog 轻量版):标题 LIKE + 消息内容 LIKE,各取前 20 条
     'chat:search': ({ query }) => {
-      const q = query.trim()
-      if (!q) return []
-      const like = `%${q}%`
+      // 审计3-M2:非字符串 query(损坏的 renderer 调用)统一 String 化,不抛 TypeError
+      const q = typeof query === 'string' ? query : String(query ?? '')
+      const trimmed = q.trim()
+      if (!trimmed) return []
+      const like = `%${trimmed}%`
       const byTitle = (deps.store.listConversations() as (ConversationRow & { starred?: number; archived?: number })[])
-        .filter((c) => c.archived !== 1 && c.title.toLowerCase().includes(q.toLowerCase()))
+        .filter((c) => c.archived !== 1 && c.title.toLowerCase().includes(trimmed.toLowerCase()))
         .slice(0, 20)
         .map((c) => ({ conversationId: c.id, title: c.title || '新会话', snippet: '' }))
       const byMsg: { conversationId: number; title: string; snippet: string }[] = []
@@ -430,10 +496,10 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
         for (const m of rows) {
           if (++scanned > MAX_SCAN) return [...byTitle, ...byMsg]
           if (m.role !== 'user' && m.role !== 'assistant') continue
-          const idx = m.content.toLowerCase().indexOf(q.toLowerCase())
+          const idx = m.content.toLowerCase().indexOf(trimmed.toLowerCase())
           if (idx >= 0) {
             const start = Math.max(0, idx - 30)
-            const snippet = (start > 0 ? '…' : '') + m.content.slice(start, idx + q.length + 30) + '…'
+            const snippet = (start > 0 ? '…' : '') + m.content.slice(start, idx + trimmed.length + 30) + '…'
             byMsg.push({ conversationId: c.id, title: c.title || '未命名会话', snippet })
             if (byMsg.length >= 20) break
           }
