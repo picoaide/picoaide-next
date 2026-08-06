@@ -249,6 +249,37 @@ func TestDeleteUserLastAdminConcurrent(t *testing.T) {
 	}
 }
 
+// 审计 6-S1: deleting a user also removes their kb_folder_users grants
+// (the table is keyed by username, so the delete must be explicit).
+func TestDeleteUserCleansKBFolderGrants(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	uid, err := CreateUserWithPassword(db, "grantee", "pw123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fid, err := CreateKBFolder(db, "folder", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := GrantFolderUser(db, fid, "grantee"); err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteUser(db, uid); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM kb_folder_users WHERE username = 'grantee'").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("kb_folder_users rows left after user delete: %d", n)
+	}
+}
+
 func TestSettings(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()

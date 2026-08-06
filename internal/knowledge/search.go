@@ -2,6 +2,7 @@ package knowledge
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"unicode"
 
@@ -96,74 +97,49 @@ func searchInFolders(db *sql.DB, folders []int64, query string, page, pageSize i
 	for i, w := range words {
 		ftsQuery[i] = `"` + w + `"*`
 	}
+	ftsMatch := strings.Join(ftsQuery, " ")
 
-	byID := map[int64]SearchResult{}
-	var ordered []int64
-
-	// FTS5 hits, best relevance first.
-	rows, err := db.Query(`SELECT d.id, d.folder_id, d.title, d.content, d.content_type, d.size, d.source, d.created_by, bm25(kb_fts)
-		FROM kb_documents d JOIN kb_fts f ON f.rowid = d.id
-		WHERE kb_fts MATCH ? AND d.folder_id IN (`+in+`) AND d.status = 'ready'
-		ORDER BY bm25(kb_fts)`,
-		append([]any{strings.Join(ftsQuery, " ")}, inArgs()...)...)
-	if err != nil {
-		return nil, 0, err
-	}
-	for rows.Next() {
-		var r SearchResult
-		if err := rows.Scan(&r.ID, &r.FolderID, &r.Title, &r.Content, &r.ContentType, &r.Size, &r.Source, &r.CreatedBy, &r.Score); err != nil {
-			rows.Close()
-			return nil, 0, err
-		}
-		byID[r.ID] = r
-		ordered = append(ordered, r.ID)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, 0, err
-	}
-
-	// LIKE fallback for recall (mid-token hanzi etc.), appended after FTS hits.
+	// One deduped predicate drives both the COUNT and the page query (C-5):
+	// a doc matches when it hits the FTS query (subquery on rowid) or LIKE
+	// matches every word. Pagination and total therefore agree exactly.
 	conds := make([]string, len(words))
 	likeArgs := make([]any, 0, len(words)*2)
 	for i, w := range words {
 		conds[i] = "(d.title LIKE ? OR d.content LIKE ?)"
 		likeArgs = append(likeArgs, "%"+w+"%", "%"+w+"%")
 	}
-	likeArgs = append(likeArgs, inArgs()...)
-	rows, err = db.Query(`SELECT id, folder_id, title, content, content_type, size, source, created_by
-		FROM kb_documents d WHERE (`+strings.Join(conds, " AND ")+`) AND d.folder_id IN (`+in+`) AND d.status = 'ready'`, likeArgs...)
-	if err != nil {
-		return nil, 0, err
-	}
-	for rows.Next() {
-		var r SearchResult
-		if err := rows.Scan(&r.ID, &r.FolderID, &r.Title, &r.Content, &r.ContentType, &r.Size, &r.Source, &r.CreatedBy); err != nil {
-			rows.Close()
-			return nil, 0, err
-		}
-		if _, seen := byID[r.ID]; !seen {
-			byID[r.ID] = r
-			ordered = append(ordered, r.ID)
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
+	where := fmt.Sprintf(`d.folder_id IN (%s) AND d.status = 'ready' AND (
+		d.id IN (SELECT rowid FROM kb_fts WHERE kb_fts MATCH ?) OR %s)`, in, strings.Join(conds, " AND "))
+	whereArgs := append(append([]any{}, inArgs()...), append([]any{ftsMatch}, likeArgs...)...)
+
+	var total int64
+	if err := db.QueryRow("SELECT COUNT(*) FROM kb_documents d WHERE "+where, whereArgs...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
-	total := int64(len(ordered))
-	start := (page - 1) * pageSize
-	if start >= len(ordered) {
-		return []SearchResult{}, total, nil
+	// FTS hits first ordered by bm25, LIKE-only hits appended (NULL score).
+	// bm25() is NULL for joined FTS rows outside the MATCH result set.
+	rows, err := db.Query(`SELECT d.id, d.folder_id, d.title, d.content, d.content_type, d.size, d.source, d.created_by,
+			COALESCE(bm25(kb_fts), 0)
+		FROM kb_documents d LEFT JOIN kb_fts f ON f.rowid = d.id
+		WHERE `+where+`
+		ORDER BY (d.id IN (SELECT rowid FROM kb_fts WHERE kb_fts MATCH ?)) DESC, bm25(kb_fts) ASC
+		LIMIT ? OFFSET ?`,
+		append(append(whereArgs, ftsMatch), pageSize, (page-1)*pageSize)...)
+	if err != nil {
+		return nil, 0, err
 	}
-	end := start + pageSize
-	if end > len(ordered) {
-		end = len(ordered)
+	defer rows.Close()
+	out := make([]SearchResult, 0, pageSize)
+	for rows.Next() {
+		var r SearchResult
+		if err := rows.Scan(&r.ID, &r.FolderID, &r.Title, &r.Content, &r.ContentType, &r.Size, &r.Source, &r.CreatedBy, &r.Score); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, r)
 	}
-	out := make([]SearchResult, 0, end-start)
-	for _, id := range ordered[start:end] {
-		out = append(out, byID[id])
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
 	}
 	return out, total, nil
 }

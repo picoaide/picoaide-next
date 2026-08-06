@@ -115,12 +115,30 @@ func ClaimPendingKBDocument(db *sql.DB) (*KBDocument, error) {
 // CompleteKBDocument finishes an async upload: errMsg == "" marks the doc
 // ready with extracted content (FTS synced by trigger kb_au); otherwise the
 // doc is marked error with the message and the raw file is kept for OCR.
+// Claims are non-exclusive, so completions are CAS-guarded on status:
+// a stale worker finishing a row another worker already completed is
+// ignored (C-3) — an error must never clobber a ready extraction and a
+// late success must never resurrect an error row.
 func CompleteKBDocument(db *sql.DB, id int64, content, errMsg string) error {
 	if errMsg == "" {
-		_, err := db.Exec("UPDATE kb_documents SET content = ?, size = ?, status = 'ready', error = '' WHERE id = ?", content, len(content), id)
+		_, err := db.Exec("UPDATE kb_documents SET content = ?, size = ?, status = 'ready', error = '' WHERE id = ? AND status = 'pending'", content, len(content), id)
 		return err
 	}
-	_, err := db.Exec("UPDATE kb_documents SET status = 'error', error = ? WHERE id = ?", errMsg, id)
+	doc, err := GetKBDocument(db, id)
+	if err != nil {
+		return err
+	}
+	if doc.Status != "pending" {
+		return nil // already completed by another worker
+	}
+	_, err = db.Exec("UPDATE kb_documents SET status = 'error', error = ? WHERE id = ? AND status = 'pending'", errMsg, id)
+	return err
+}
+
+// PurgeOldAuditLogs deletes kb audit entries older than cutoff (审计 6-K6,
+// retention housekeeping, run at startup).
+func PurgeOldAuditLogs(db *sql.DB, cutoff time.Time) error {
+	_, err := db.Exec("DELETE FROM kb_audit_logs WHERE created_at < ?", cutoff.Format(sqliteTimeFmt))
 	return err
 }
 

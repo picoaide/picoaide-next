@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestKBCrud(t *testing.T) {
@@ -290,5 +291,73 @@ func TestKBPendingDocLifecycle(t *testing.T) {
 	}
 	if err := RetryKBDocument(db, 99999); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("retry missing: %v, want ErrNotFound", err)
+	}
+}
+
+// C-3: the claim is non-exclusive (two workers can process the same row); a
+// stale worker's failure must never clobber a successful extraction.
+func TestKBDoubleWorkerRace(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	id, err := CreatePendingKBDocument(db, 0, "竞态文档", "text", 10, "upload", "admin")
+	if err != nil || id == 0 {
+		t.Fatalf("CreatePendingKBDocument: %d %v", id, err)
+	}
+	// worker 1 completes successfully
+	if err := CompleteKBDocument(db, id, "提取成功", ""); err != nil {
+		t.Fatal(err)
+	}
+	// worker 2 holds a stale claim, its file is gone, it reports an error —
+	// the row must stay ready
+	if err := CompleteKBDocument(db, id, "", "文件不存在"); err != nil {
+		t.Fatal(err)
+	}
+	doc, _ := GetKBDocument(db, id)
+	if doc.Status != "ready" || doc.Content != "提取成功" || doc.Error != "" {
+		t.Fatalf("ready doc clobbered by stale worker: %+v", doc)
+	}
+	// error first, then a stale success completion: status stays error
+	id2, _ := CreatePendingKBDocument(db, 0, "反向竞态", "text", 10, "upload", "admin")
+	if err := CompleteKBDocument(db, id2, "", "解析失败"); err != nil {
+		t.Fatal(err)
+	}
+	if err := CompleteKBDocument(db, id2, "迟到的成功", ""); err != nil {
+		t.Fatal(err)
+	}
+	doc, _ = GetKBDocument(db, id2)
+	if doc.Status != "error" || doc.Error == "" {
+		t.Fatalf("error doc clobbered by stale success: %+v", doc)
+	}
+}
+
+// 审计 6-K6: audit logs older than the retention window are purged.
+func TestPurgeOldAuditLogs(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := AuditLog(db, "alice", "kb_upload", "doc#1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := AuditLog(db, "bob", "kb_upload", "doc#2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE kb_audit_logs SET created_at = ? WHERE username = 'alice'",
+		time.Now().AddDate(0, 0, -120).Format("2006-01-02 15:04:05")); err != nil {
+		t.Fatal(err)
+	}
+	if err := PurgeOldAuditLogs(db, time.Now().AddDate(0, 0, -90)); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM kb_audit_logs").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("audit logs left = %d, want 1 (only the recent one)", n)
 	}
 }

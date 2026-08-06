@@ -2,6 +2,8 @@ package knowledge
 
 import (
 	"database/sql"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -211,5 +213,125 @@ func TestIndexDocument(t *testing.T) {
 	doc, err := serverstore.GetKBDocument(db, id)
 	if err != nil || doc.Title != "读我" {
 		t.Fatalf("GetKBDocument: %v %+v", err, doc)
+	}
+}
+
+// C-5: pagination stays correct on a large dataset; total is exact and pages
+// never overlap or drop hits (SQL-level LIMIT/OFFSET + separate COUNT).
+func TestSearchLargePagination(t *testing.T) {
+	db := kbDB(t)
+	aliceFolder, _ := seedDocs(t, db)
+	for i := 0; i < 247; i++ {
+		if _, err := serverstore.CreateKBDocument(db, aliceFolder,
+			fmt.Sprintf("公共文档%d", i), "公共知识内容 填充文本", "text", 0, "upload", "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const totalWant = 248 // 1 seed + 247
+	seen := map[int64]bool{}
+	sum := 0
+	pages := 0
+	for page := 1; ; page++ {
+		res, total, err := Search(db, "alice", nil, "知识", page, 20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total != totalWant {
+			t.Fatalf("page %d total = %d, want %d", page, total, totalWant)
+		}
+		if len(res) == 0 {
+			break
+		}
+		pages++
+		if pages > 20 {
+			t.Fatalf("more than 20 pages for %d hits", totalWant)
+		}
+		for _, r := range res {
+			if seen[r.ID] {
+				t.Fatalf("doc %d duplicated across pages", r.ID)
+			}
+			seen[r.ID] = true
+		}
+		sum += len(res)
+	}
+	if sum != totalWant || len(seen) != totalWant {
+		t.Fatalf("sum=%d unique=%d, want %d", sum, len(seen), totalWant)
+	}
+}
+
+// C-5b: FTS hits (bm25-ordered) stay ahead of LIKE-only hits across page
+// boundaries — the offset must count FTS hits first.
+func TestSearchLikeOnlyHitsAfterFTSAcrossPages(t *testing.T) {
+	db := kbDB(t)
+	aliceFolder, _ := seedDocs(t, db)
+	for i := 0; i < 5; i++ {
+		if _, err := serverstore.CreateKBDocument(db, aliceFolder,
+			fmt.Sprintf("f%d", i), "知识内容", "text", 0, "upload", "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// mid-token "知识": FTS prefix misses, LIKE catches it
+	likeID, err := serverstore.CreateKBDocument(db, aliceFolder, "like-only", "手册知识", "text", 0, "upload", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, total, err := Search(db, "alice", nil, "知识", 1, 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 7 || len(res) != 6 {
+		t.Fatalf("page1: total=%d len=%d, want 7/6", total, len(res))
+	}
+	for _, r := range res {
+		if r.ID == likeID {
+			t.Fatal("LIKE-only hit appeared before FTS hits")
+		}
+	}
+	res, total, err = Search(db, "alice", nil, "知识", 2, 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 7 || len(res) != 1 || res[0].ID != likeID {
+		t.Fatalf("page2: total=%d len=%d res=%v, want the LIKE-only hit", total, len(res), res)
+	}
+}
+
+// C-4: a pending row whose raw upload file never landed (INSERT/Rename race,
+// manual deletion) is skipped — not marked error, not extracted.
+func TestProcessPendingSkipsMissingFile(t *testing.T) {
+	db := kbDB(t)
+	id, err := serverstore.CreatePendingKBDocument(db, 0, "孤儿文档", "text", 5, "upload", "admin")
+	if err != nil || id == 0 {
+		t.Fatalf("CreatePendingKBDocument: %d %v", id, err)
+	}
+	if processNextPending(db, t.TempDir()) {
+		t.Fatal("processNextPending with missing file returned true")
+	}
+	doc, err := serverstore.GetKBDocument(db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Status != "pending" || doc.Error != "" {
+		t.Fatalf("doc = %+v, want pending with no error (skipped)", doc)
+	}
+}
+
+// 审计 6-K4: orphaned kb-* temp files from crashed uploads are swept at
+// startup; numeric raw-upload files (keyed by doc id) are kept.
+func TestCleanupUploadTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"kb-12345", "kb-abc", "42"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	CleanupUploadTempFiles(dir)
+	for _, name := range []string{"kb-12345", "kb-abc"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("temp file %s not swept", name)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "42")); err != nil {
+		t.Fatalf("raw upload file removed: %v", err)
 	}
 }
