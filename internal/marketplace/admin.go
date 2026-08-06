@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -15,18 +17,32 @@ import (
 )
 
 // RegisterAdminRoutes mounts /api/admin/skills, /api/admin/mcp and
-// /api/admin/mcp-downloads behind AdminAuth.
-func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
+// /api/admin/mcp-downloads behind AdminAuth. cacheDir is the skill repo/archive
+// cache, invalidated when a skill's source changes (C-6).
+func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g := r.Group("/api/admin", serverauth.AdminAuth(db))
 	g.GET("/skills", func(c *gin.Context) { listSkillsAdmin(c, db) })
 	g.POST("/skills", func(c *gin.Context) { createSkillAdmin(c, db) })
-	g.PUT("/skills/:name", func(c *gin.Context) { updateSkillAdmin(c, db) })
+	g.PUT("/skills/:name", func(c *gin.Context) { updateSkillAdmin(c, db, cacheDir) })
 	g.DELETE("/skills/:name", func(c *gin.Context) { deleteSkillAdmin(c, db) })
 	g.GET("/mcp", func(c *gin.Context) { listMCPAdmin(c, db) })
 	g.POST("/mcp", func(c *gin.Context) { createMCPAdmin(c, db) })
 	g.PUT("/mcp/:id", func(c *gin.Context) { updateMCPAdmin(c, db) })
 	g.DELETE("/mcp/:id", func(c *gin.Context) { deleteMCPAdmin(c, db) })
 	g.GET("/mcp-downloads", func(c *gin.Context) { listDownloads(c, db) })
+}
+
+// invalidateSkillCache removes the cached repo clone and built archives for a
+// skill (C-6): a version/git change must not keep serving the old package.
+func invalidateSkillCache(cacheDir, name string) {
+	if !util.SafePathSegment(name) {
+		return
+	}
+	os.RemoveAll(filepath.Join(cacheDir, name))
+	matches, _ := filepath.Glob(filepath.Join(cacheDir, name+"-*.tar.gz"))
+	for _, m := range matches {
+		os.Remove(m)
+	}
 }
 
 func listSkillsAdmin(c *gin.Context, db *sql.DB) {
@@ -77,7 +93,7 @@ func createSkillAdmin(c *gin.Context, db *sql.DB) {
 	c.JSON(http.StatusOK, gin.H{"skill": skillJSON(*s)})
 }
 
-func updateSkillAdmin(c *gin.Context, db *sql.DB) {
+func updateSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 	name := c.Param("name")
 	s, err := serverstore.GetSkill(db, name)
 	if errors.Is(err, serverstore.ErrNotFound) {
@@ -93,8 +109,10 @@ func updateSkillAdmin(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
 		return
 	}
-	if req.Version != "" {
+	sourceChanged := false
+	if req.Version != "" && req.Version != s.Version {
 		s.Version = req.Version
+		sourceChanged = true
 	}
 	if req.Description != "" {
 		s.Description = req.Description
@@ -102,15 +120,21 @@ func updateSkillAdmin(c *gin.Context, db *sql.DB) {
 	if req.Author != "" {
 		s.Author = req.Author
 	}
-	if req.GitURL != "" {
+	if req.GitURL != "" && req.GitURL != s.GitURL {
 		s.GitURL = req.GitURL
+		sourceChanged = true
 	}
-	if req.GitRef != "" {
+	if req.GitRef != "" && req.GitRef != s.GitRef {
 		s.GitRef = req.GitRef
+		sourceChanged = true
 	}
 	if err := serverstore.UpdateSkill(db, s); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 		return
+	}
+	// C-6: the cached repo/archive now describe a different source
+	if sourceChanged {
+		invalidateSkillCache(cacheDir, s.Name)
 	}
 	c.JSON(http.StatusOK, gin.H{"skill": skillJSON(*s)})
 }

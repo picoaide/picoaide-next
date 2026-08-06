@@ -173,6 +173,27 @@ func TestBuildPackageRejects(t *testing.T) {
 	}
 }
 
+// 审计 6-M4: maxPackageSize is enforced while archiving — a skill whose
+// source exceeds the ceiling is refused.
+func TestBuildPackageSizeLimit(t *testing.T) {
+	prev := maxPackageSize
+	maxPackageSize = 4096
+	defer func() { maxPackageSize = prev }()
+
+	cache := t.TempDir()
+	repo := filepath.Join(cache, "demo")
+	writeFixtureRepo(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, "big.bin"), make([]byte, 8192), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildPackage(repo, "demo", "1.0.0"); err == nil {
+		t.Fatal("oversized package accepted")
+	}
+	if _, err := os.Stat(filepath.Join(cache, "demo-1.0.0.tar.gz")); !os.IsNotExist(err) {
+		t.Fatal("oversized archive left on disk")
+	}
+}
+
 func TestCloneRepo(t *testing.T) {
 	src := makeGitRepo(t, filepath.Join(t.TempDir(), "src"))
 	dst := filepath.Join(t.TempDir(), "clone")

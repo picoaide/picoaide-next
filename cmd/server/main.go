@@ -92,7 +92,7 @@ func main() {
 	llmgateway.RegisterRoutes(r, db)
 	llmgateway.RegisterAdminRoutes(r, db)
 	marketplace.RegisterRoutes(r, db, *dataDir+"/skills-cache")
-	marketplace.RegisterAdminRoutes(r, db)
+	marketplace.RegisterAdminRoutes(r, db, *dataDir+"/skills-cache")
 	knowledge.RegisterRoutes(r, db)
 	uploadsDir := filepath.Join(*dataDir, "kb_uploads")
 	knowledge.StartUploadQueue(db, uploadsDir, 2)

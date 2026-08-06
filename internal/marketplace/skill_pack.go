@@ -19,10 +19,10 @@ import (
 
 // maxRepoSize caps the cloned skill source; maxPackageSize caps the built
 // archive. Both are ceilings, not quotas.
-const (
-	maxRepoSize    = 200 << 20
-	maxPackageSize = 100 << 20
-)
+const maxRepoSize = 200 << 20
+
+// maxPackageSize is enforced while archiving (审计 6-M4); test-injectable.
+var maxPackageSize = 100 << 20
 
 type skillMetadata struct {
 	Name         string   `yaml:"name"`
@@ -131,6 +131,7 @@ func buildArchive(repoPath, name, version, dst string) error {
 	}()
 	gw := gzip.NewWriter(tmp)
 	tw := tar.NewWriter(gw)
+	total := int64(0) // 审计 6-M4: archive byte counter
 	err = filepath.WalkDir(repoPath, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -159,6 +160,10 @@ func buildArchive(repoPath, name, version, dst string) error {
 		info, err := d.Info()
 		if err != nil {
 			return err
+		}
+		total += info.Size()
+		if total > int64(maxPackageSize) {
+			return fmt.Errorf("package exceeds %d bytes", maxPackageSize)
 		}
 		hdr := &tar.Header{
 			Name: filepath.ToSlash(rel),
