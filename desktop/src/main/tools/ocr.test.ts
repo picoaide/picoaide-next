@@ -61,4 +61,22 @@ describe('ocrImage', () => {
 
     await expect(ocrImage('cGFwcA==')).rejects.toThrow(/OCR 不可用/)
   })
+
+  it('resets the failed worker so the next call retries (no permanent rejection)', async () => {
+    mocks.recognize.mockRejectedValueOnce(new Error('tesseract core crashed'))
+    const { ocrImage } = await import('./ocr')
+
+    await expect(ocrImage('cGFwcA==')).rejects.toThrow(/OCR 不可用/)
+    // 失败后单例被重置:下一次调用重新创建 worker 并成功
+    const text = await ocrImage('cGFwcA==')
+    expect(text).toBe('hello 世界')
+    expect(mocks.createWorker).toHaveBeenCalledTimes(2)
+  })
+
+  it('bounds a hanging recognize call with a timeout', async () => {
+    mocks.recognize.mockReturnValue(new Promise(() => {}) as never)
+    const { ocrImage } = await import('./ocr')
+
+    await expect(ocrImage('cGFwcA==', 50)).rejects.toThrow(/OCR 不可用|超时/)
+  })
 })
