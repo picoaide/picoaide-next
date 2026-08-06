@@ -25,10 +25,11 @@ import (
 // authorize (issues single-use codes bound to PKCE challenge + nonce) and
 // token (validates PKCE, returns a signed id_token with the nonce).
 type fakeIDP struct {
-	srv   *httptest.Server
-	key   *rsa.PrivateKey
-	kid   string
-	codes map[string]authReq
+	srv        *httptest.Server
+	key        *rsa.PrivateKey
+	kid        string
+	codes      map[string]authReq
+	tokenDelay time.Duration
 }
 
 type authReq struct {
@@ -81,6 +82,9 @@ func (f *fakeIDP) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Redirect(w, r, redir+sep+"code="+url.QueryEscape(code)+"&state="+url.QueryEscape(q.Get("state")), http.StatusFound)
 	case "/token":
+		if f.tokenDelay > 0 {
+			time.Sleep(f.tokenDelay)
+		}
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, "bad form", http.StatusBadRequest)
 			return
@@ -366,5 +370,31 @@ func TestOIDCStateSingleUse(t *testing.T) {
 	}
 	if _, err := p.HandleCallback("x", "s4"); !errors.Is(err, errOIDCState) {
 		t.Fatalf("err = %v, want errOIDCState", err)
+	}
+}
+
+// C-14: the OIDC code exchange must be bounded; a hung IdP token endpoint
+// cannot hold the callback goroutine forever.
+func TestOIDCExchangeTimeout(t *testing.T) {
+	idp := newFakeIDP(t)
+	idp.tokenDelay = 5 * time.Second // /token never answers in time
+	p := newOIDCProvider(t, idp)
+
+	prev := oidcExchangeTimeout
+	oidcExchangeTimeout = 200 * time.Millisecond
+	defer func() { oidcExchangeTimeout = prev }()
+
+	state := "s-timeout"
+	authURL, err := p.AuthURL(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := authorize(t, idp, authURL)
+	start := time.Now()
+	if _, err := p.HandleCallback(code, state); err == nil {
+		t.Fatal("expected error from timed-out code exchange")
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("exchange took %v, want ~%v timeout", d, oidcExchangeTimeout)
 	}
 }

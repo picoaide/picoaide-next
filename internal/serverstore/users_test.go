@@ -2,6 +2,7 @@ package serverstore
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -158,6 +159,93 @@ func TestDeleteUserWithReferencedRows(t *testing.T) {
 	}
 	if err := db.QueryRow("SELECT COUNT(*) FROM user_groups WHERE user_id = ?", id).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("user_groups left: %d err=%v", n, err)
+	}
+}
+
+// C-17: deleting the last admin rolls the delete back (guard lives inside the
+// transaction, so the count-then-delete TOCTOU is closed).
+func TestDeleteUserLastAdminGuard(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	aID, err := CreateUserWithPassword(db, "adminA", "pw123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bID, err := CreateUserWithPassword(db, "adminB", "pw123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{aID, bID} {
+		u, _ := GetUserByID(db, id)
+		u.IsAdmin = true
+		if err := UpdateUser(db, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := DeleteUser(db, aID); err != nil {
+		t.Fatalf("delete adminA with adminB left: %v", err)
+	}
+	if err := DeleteUser(db, bID); !errors.Is(err, ErrLastAdmin) {
+		t.Fatalf("last admin delete err = %v, want ErrLastAdmin", err)
+	}
+	if _, err := GetUserByUsername(db, "adminB"); err != nil {
+		t.Fatalf("last admin wrongly deleted: %v", err)
+	}
+}
+
+// C-17b: the same guard survives a double-delete race — exactly one of the
+// two concurrent deletes wins and at least one admin remains.
+func TestDeleteUserLastAdminConcurrent(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]int64, 2)
+	for i, name := range []string{"adminX", "adminY"} {
+		id, err := CreateUserWithPassword(db, name, "pw123456")
+		if err != nil {
+			t.Fatal(err)
+		}
+		u, _ := GetUserByID(db, id)
+		u.IsAdmin = true
+		if err := UpdateUser(db, u); err != nil {
+			t.Fatal(err)
+		}
+		ids[i] = id
+	}
+	start := make(chan struct{})
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Add(1)
+		go func(i int, id int64) {
+			defer wg.Done()
+			<-start
+			errs[i] = DeleteUser(db, id)
+		}(i, id)
+	}
+	close(start)
+	wg.Wait()
+
+	ok := 0
+	for _, e := range errs {
+		if e == nil {
+			ok++
+		}
+	}
+	if ok != 1 {
+		t.Fatalf("successful deletes = %d, want exactly 1 (errs=%v)", ok, errs)
+	}
+	var admins int
+	if err := db.QueryRow("SELECT COUNT(*) FROM users WHERE is_admin = 1").Scan(&admins); err != nil {
+		t.Fatal(err)
+	}
+	if admins != 1 {
+		t.Fatalf("admins left = %d, want 1", admins)
 	}
 }
 

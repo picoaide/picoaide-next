@@ -296,25 +296,13 @@ func (a *AdminAPI) deleteUser(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "不能删除自己")
 		return
 	}
-	// block deleting the last admin (fail closed: DB error also refuses)
-	if u.IsAdmin {
-		admins, _, err := serverstore.ListUsers(a.DB, 0, 100000, "")
-		if err != nil {
-			writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-			return
-		}
-		count := 0
-		for _, x := range admins {
-			if x.IsAdmin {
-				count++
-			}
-		}
-		if count <= 1 {
+	// C-17: the last-admin guard runs inside the DeleteUser transaction;
+	// the pre-check was removed to close the count-then-delete TOCTOU.
+	if err := serverstore.DeleteUser(a.DB, id); err != nil {
+		if errors.Is(err, serverstore.ErrLastAdmin) {
 			writeError(c, http.StatusBadRequest, "VALIDATION", "不能删除最后一个管理员")
 			return
 		}
-	}
-	if err := serverstore.DeleteUser(a.DB, id); err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
 		return
 	}

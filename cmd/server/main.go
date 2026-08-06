@@ -60,6 +60,12 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
+	// C-1: trust only loopback proxies, so gin's ClientIP never honors a
+	// spoofed X-Forwarded-For from the public side (rate-limit keys also
+	// derive from RemoteAddr as a second line of defense).
+	if err := r.SetTrustedProxies([]string{"127.0.0.1", "::1"}); err != nil {
+		log.Fatalf("trusted proxies: %v", err)
+	}
 
 	if _, err := util.EnsureMasterKey(*dataDir); err != nil {
 		log.Fatalf("master key: %v", err)

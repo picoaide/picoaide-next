@@ -313,6 +313,84 @@ func TestVerifyTokenTouchesLastUsed(t *testing.T) {
 	}
 }
 
+// C-15: creating an admin session sweeps already-expired sessions, so the
+// admin_sessions table cannot grow without bound.
+func TestCreateAdminSessionCleansExpired(t *testing.T) {
+	db := mustDB(t)
+	defer db.Close()
+	uid, err := createUserDB(db, "boss", "pw123456", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO admin_sessions (id, user_id, csrf_key, expires_at) VALUES (?, ?, 'k', ?)`,
+		"expired-1", uid, time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO admin_sessions (id, user_id, csrf_key, expires_at) VALUES (?, ?, 'k', ?)`,
+		"expired-2", uid, time.Now().Add(-48*time.Hour).UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := CreateAdminSession(db, uid); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"expired-1", "expired-2"} {
+		var n int
+		if err := db.QueryRow("SELECT COUNT(*) FROM admin_sessions WHERE id = ?", id).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("expired session %s not swept", id)
+		}
+	}
+}
+
+// C-16: bootstrap admin password must satisfy the same 10-char policy as
+// admin-created users (PICOAI_ADMIN_PASSWORD is the only gate).
+func TestEnsureBootstrapAdminPasswordPolicy(t *testing.T) {
+	db := mustDB(t)
+	defer db.Close()
+
+	t.Setenv("PICOAI_ADMIN_PASSWORD", "short")
+	if err := EnsureBootstrapAdmin(db, "admin"); err == nil {
+		t.Fatal("short bootstrap password accepted")
+	}
+
+	t.Setenv("PICOAI_ADMIN_PASSWORD", "this-is-long-enough")
+	if err := EnsureBootstrapAdmin(db, "admin"); err != nil {
+		t.Fatalf("bootstrap with valid password: %v", err)
+	}
+	u, err := serverstore.GetUserByUsername(db, "admin")
+	if err != nil || !u.IsAdmin {
+		t.Fatalf("bootstrapped admin = %+v %v", u, err)
+	}
+}
+
+// C-17: deleting the last admin is refused server-side; the row is rolled back.
+func TestDeleteLastAdminRollsBack(t *testing.T) {
+	db := mustDB(t)
+	defer db.Close()
+	if _, err := createUserDB(db, "adminA", "pw123456", true); err != nil {
+		t.Fatal(err)
+	}
+	bID, err := createUserDB(db, "adminB", "pw123456", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.DeleteUser(db, bID); err != nil {
+		t.Fatalf("delete adminB while adminA remains: %v", err)
+	}
+	a, err := serverstore.GetUserByUsername(db, "adminA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.DeleteUser(db, a.ID); err == nil {
+		t.Fatal("last admin deletion succeeded, want rollback")
+	}
+	if _, err := serverstore.GetUserByUsername(db, "adminA"); err != nil {
+		t.Fatalf("last admin was deleted despite guard: %v", err)
+	}
+}
+
 // --- helpers ---
 
 func mustDB(t *testing.T) *sql.DB {

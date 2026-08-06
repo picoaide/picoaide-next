@@ -36,6 +36,10 @@ const (
 	oidcMaxFlows = 1000
 )
 
+// oidcExchangeTimeout bounds the IdP code exchange (C-14); a hung IdP token
+// endpoint must not hold the callback goroutine forever. Test-injectable.
+var oidcExchangeTimeout = 10 * time.Second
+
 // OIDCProvider implements the authorization code + PKCE flow.
 // Config keys: issuer, client_id, client_secret, redirect_url.
 type OIDCProvider struct {
@@ -120,7 +124,8 @@ func (p *OIDCProvider) HandleCallback(code, state string) (UserInfo, error) {
 	if !ok || code == "" {
 		return UserInfo{}, errOIDCState
 	}
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), oidcExchangeTimeout)
+	defer cancel()
 	tok, err := p.cfg.Exchange(ctx, code, oauth2.VerifierOption(flow.verifier))
 	if err != nil {
 		return UserInfo{}, err

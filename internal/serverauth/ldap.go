@@ -2,10 +2,19 @@ package serverauth
 
 import (
 	"errors"
+	"net"
 	"strings"
+	"time"
 
 	"github.com/go-ldap/ldap/v3"
 )
+
+// ldapTimeout bounds every LDAP connection (C-7): connect, bind and search.
+// A hung directory server must never hold a login goroutine forever.
+const ldapTimeoutDefault = 5 * time.Second
+
+// ldapTimeout is test-injectable.
+var ldapTimeout = ldapTimeoutDefault
 
 // ldapConn is the subset of *ldap.Conn used by LDAPProvider; it exists so
 // tests can substitute an in-memory fake.
@@ -57,7 +66,13 @@ func (p *LDAPProvider) dialConn() (ldapConn, error) {
 	if p.dial != nil {
 		return p.dial(p.ServerURL)
 	}
-	return ldap.DialURL(p.ServerURL)
+	conn, err := ldap.DialURL(p.ServerURL, ldap.DialWithDialer(&net.Dialer{Timeout: ldapTimeout}))
+	if err != nil {
+		return nil, err
+	}
+	// read/write deadline so a silent server cannot block bind/search forever
+	conn.SetTimeout(ldapTimeout)
+	return conn, nil
 }
 
 // Authenticate verifies the password via a user bind and resolves groups:

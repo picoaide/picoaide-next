@@ -173,3 +173,54 @@ func TestTouchTokenLastUsed(t *testing.T) {
 		t.Fatal("last_used_at not set")
 	}
 }
+
+// 审计 5#3: repeated verifications must not rewrite last_used_at more than
+// once per tokenTouchInterval (write-amplification throttle).
+func TestTouchTokenLastUsedThrottle(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	uid, err := CreateUser(db, &User{Username: "tokthrottle", Source: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := CreateToken(db, uid, "throttle-tok", time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := TouchTokenLastUsed(db, id); err != nil {
+		t.Fatal(err)
+	}
+	// simulate a later moment still inside the throttle window: the row must
+	// not be rewritten by a second touch
+	future := time.Now().Add(30 * time.Second).UTC().Format(time.RFC3339)
+	if _, err := db.Exec("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", future, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := TouchTokenLastUsed(db, id); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := db.QueryRow("SELECT last_used_at FROM api_tokens WHERE id = ?", id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != future {
+		t.Fatalf("throttled touch rewrote the row: %q != %q", got, future)
+	}
+	// outside the window the touch writes again
+	old := time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)
+	if _, err := db.Exec("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", old, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := TouchTokenLastUsed(db, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT last_used_at FROM api_tokens WHERE id = ?", id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got == old {
+		t.Fatal("touch outside the throttle window was skipped")
+	}
+}
