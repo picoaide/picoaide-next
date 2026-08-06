@@ -1,6 +1,7 @@
 import { unlinkSync, existsSync } from 'node:fs'
 import { loadElectronModule } from '../util/electron'
 import { readJsonFile, sessionPath, writePrivateJsonFile, type Session } from './config'
+import { debugLog, isEnabled as debugLogEnabled } from '../debug'
 
 export class AuthError extends Error {
   constructor(
@@ -106,9 +107,9 @@ export async function fetchJSON(
     parseFailed = true
   }
 
-  // 结构级请求日志(不打正文/token;PICOAI_DEBUG=0 关,测试静音)
-  if (process.env.PICOAI_DEBUG !== '0' && process.env.NODE_ENV !== 'test') {
-    console.log('[picoaide-debug]', 'gateway', opts.method ?? 'GET', path, '->', res.status, parseFailed ? '(non-JSON body)' : '')
+  // 结构级请求日志(不打正文/token;PICOAI_DEBUG=1 开启)
+  if (debugLogEnabled()) {
+    debugLog('gateway', opts.method ?? 'GET', path, '->', res.status, parseFailed ? '(non-JSON body)' : '')
   }
 
   if (!res.ok) {

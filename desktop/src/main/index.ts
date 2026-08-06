@@ -17,6 +17,7 @@ import { listMessages, appendMessage, updateMessageContent, deleteMessagesAfter,
 import { addArtifact, listArtifacts } from './store/artifacts'
 import { getSetting, setSetting } from './store/settings'
 import { dataDir, dbPath, workspaceDir } from './paths'
+import { initDebugLog } from './debug'
 import { installCertificateVerification, clearFingerprints } from './gateway/tls'
 import { createGatewayModel as makeGatewayModel } from './agent/provider'
 import { createKbTools } from './agent/engine'
@@ -289,6 +290,7 @@ app.whenReady().then(async () => {
   try {
     const fs = await import('node:fs')
     fs.mkdirSync(dataDir(), { recursive: true })
+    initDebugLog(dataDir()) // PICOAI_DEBUG=1 时在数据目录写 picoaide-debug.log
     fs.mkdirSync(join(dataDir(), 'workspaces'), { recursive: true })
     fs.mkdirSync(join(dataDir(), 'skills'), { recursive: true })
     fs.mkdirSync(join(dataDir(), 'mcp'), { recursive: true })

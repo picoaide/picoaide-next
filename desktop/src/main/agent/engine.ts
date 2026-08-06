@@ -25,6 +25,7 @@ import { isBoundaryError } from '../tools/paths'
 import type { Session } from '../gateway/config'
 import { compactMessages, messageLength, CONTEXT_TOKEN_BUDGET, DEFAULT_CONTEXT_WINDOW, DEFAULT_STREAM_TIMEOUT } from './compact'
 import { userContentParts } from './attachments'
+import { debugLog } from '../debug'
 
 export { DEFAULT_CONTEXT_WINDOW, DEFAULT_STREAM_TIMEOUT }
 
@@ -35,11 +36,7 @@ export const DEFAULT_RETRY_COUNT = 1
 export const DEFAULT_MAX_OUTPUT_TOKENS = 16384
 const ERROR_PREFIX = 'Error: '
 
-// ---- debug 日志(结构级:只打角色/part 类型/工具 id,不打消息正文与密钥;PICOAI_DEBUG=0 可关,测试环境静音) ----
-const DEBUG_ENABLED = process.env.PICOAI_DEBUG !== '0' && process.env.NODE_ENV !== 'test'
-function debugLog(...args: unknown[]): void {
-  if (DEBUG_ENABLED) console.log('[picoaide-debug]', ...args)
-}
+// ---- debug 日志(结构级:只打角色/part 类型/工具 id,不打消息正文与密钥;PICOAI_DEBUG=1 开启) ----
 
 // 消息序列结构摘要:role[part:type:id, part:type:id] ...(用于排查
 // "assistant tool_calls 无配对 tool 消息"类问题,一行看清消息形状)
