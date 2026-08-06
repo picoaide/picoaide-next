@@ -170,6 +170,13 @@ export class AgentEngine {
     this.deps = deps
   }
 
+
+  // 图片附件读取边界(会话重放安全):仅允许会话 workspace/attachments 内的文件
+  private attachOpts(conversationId: number): { workspace?: string } {
+    const ws = this.deps.store?.getConversation(conversationId)?.workspace
+    return ws && ws.trim().length > 0 ? { workspace: ws } : {}
+  }
+
   // 事件自动附加运行会话 id(renderer 按 activeId 过滤,旧 run 迟到事件不污染新会话 UI);
   // 未运行(探针/断言错误)时用 0,renderer 侧忽略
   private emitEvent(ev: Omit<AgentEvent, 'conversationId'>): void {
@@ -243,9 +250,9 @@ export class AgentEngine {
     try {
       store.updateConversationStatus(conversationId, 'planning')
       // 上下文窗口:超预算时对更早历史做 LLM 摘要压缩(摘要失败回退最近 50 条硬截断)
-      const history = historyMessages(store.listMessages(conversationId))
+      const history = historyMessages(store.listMessages(conversationId), this.attachOpts(conversationId).workspace)
       store.appendMessage({ conversationId, role: 'user', content })
-      const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content: userContentParts(content) }]
+      const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content: userContentParts(content, this.attachOpts(conversationId)) }]
       const tools = readOnlyTools(input.tools ?? {}) as Record<string, GatedTool>
       const system = `${input.sysPrompt ?? this.cfg.sysPrompt}
 
@@ -314,9 +321,9 @@ ${PLAN_SYSTEM_NOTICE}`
     const abort = acquiredAbort ?? this.acquireRun(conversationId)
     store.updateConversationStatus(conversationId, runStatus)
     // 上下文窗口:超预算时对更早历史做 LLM 摘要压缩(摘要失败回退最近 50 条硬截断)
-    const history = historyMessages(store.listMessages(conversationId))
+    const history = historyMessages(store.listMessages(conversationId), this.attachOpts(conversationId).workspace)
     store.appendMessage({ conversationId, role: 'user', content })
-    const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content: userContentParts(content) }]
+    const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content: userContentParts(content, this.attachOpts(conversationId)) }]
 
     let fullText = ''
     let usage: { prompt_tokens: number; completion_tokens: number } = { prompt_tokens: 0, completion_tokens: 0 }
@@ -368,7 +375,7 @@ ${PLAN_SYSTEM_NOTICE}`
           break
         } catch (err) {
           if (abort.signal.aborted || isAbortError(err)) throw err
-          if (attempt < (this.cfg.retryCount ?? 0) && isRetryable(err)) continue
+          if (attempt < (this.cfg.retryCount ?? 0) && isRetryable(err) && fullText === '') continue
           throw err
         }
       }
@@ -397,6 +404,8 @@ ${PLAN_SYSTEM_NOTICE}`
       }
     } finally {
       this.currentAbort = null
+      // runningConversationId 与 currentAbort 同生命周期:漏清会让 delete/cancel 误伤后续会话
+      if (this.runningConversationId === conversationId) this.runningConversationId = null
     }
   }
 
@@ -417,9 +426,9 @@ ${PLAN_SYSTEM_NOTICE}`
     try {
       store.updateConversationStatus(conversationId, 'running')
       // 上下文窗口:超预算时对更早历史做 LLM 摘要压缩(摘要失败回退最近 50 条硬截断)
-      const history = historyMessages(store.listMessages(conversationId))
+      const history = historyMessages(store.listMessages(conversationId), this.attachOpts(conversationId).workspace)
       store.appendMessage({ conversationId, role: 'user', content })
-      const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content: userContentParts(content) }]
+      const messages: ModelMessage[] = [...(await this.compactContext(history, abort)), { role: 'user', content: userContentParts(content, this.attachOpts(conversationId)) }]
       await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps, 'done', input.sysPrompt ?? this.cfg.sysPrompt, abort)
     } finally {
       this.releaseRun(conversationId)
@@ -452,7 +461,7 @@ ${PLAN_SYSTEM_NOTICE}`
     const abort = this.acquireRun(conversationId)
     try {
       store.updateConversationStatus(conversationId, input.status ?? 'running')
-      const history = historyMessages(rows.slice(0, idx + 1))
+      const history = historyMessages(rows.slice(0, idx + 1), this.attachOpts(conversationId).workspace)
       const messages = await this.compactContext(history, abort)
       const maxSteps = input.maxSteps ?? this.cfg.maxSteps ?? DEFAULT_MAX_STEPS
       await this.runCraftLoop(conversationId, messages, input.tools ?? {}, input.highRiskTools ?? new Set(), maxSteps, 'done', input.sysPrompt ?? this.cfg.sysPrompt, abort)
@@ -675,7 +684,13 @@ ${PLAN_SYSTEM_NOTICE}`
                 break
               }
               const hasSideEffects =
-                steps !== stepsBefore || stepToolCalls.length > 0 || stepToolResults.length > 0 || approvalParts.length > 0
+                steps !== stepsBefore ||
+                stepToolCalls.length > 0 ||
+                stepToolResults.length > 0 ||
+                approvalParts.length > 0 ||
+                // 已流出文本/推理:UI 已渲染,重试会造成重复输出
+                stepText.length > 0 ||
+                stepReasoning.length > 0
               if (!hasSideEffects && attempt < (this.cfg.retryCount ?? 0) && isRetryable(err)) continue
               throw err
             }
@@ -698,7 +713,7 @@ ${PLAN_SYSTEM_NOTICE}`
         // 排队消息:当前步骤完成后处理(用户回复中发的新消息,不打断当前轮)
         const queued = this.dequeueMessage(conversationId)
         if (queued !== undefined) {
-          messages.push({ role: 'user', content: userContentParts(queued) })
+          messages.push({ role: 'user', content: userContentParts(queued, this.attachOpts(conversationId)) })
           continue
         }
         // 无审批:本轮有工具调用 → 结果已随 response.messages 回传 → 续跑让模型继续;否则完成
@@ -822,13 +837,15 @@ ${PLAN_SYSTEM_NOTICE}`
     }
   }
 
-  // 审批请求挂起:60s 超时自动拒绝;confirm() 回执结清
+  // 审批请求挂起:60s 超时自动拒绝;confirm() 回执结清。
+  // 超时钳位下限 1s:0/负值配置会让 setTimeout(0) 在弹窗出现前瞬间自动拒绝
   private awaitApproval(requestId: string): Promise<boolean> {
+    const timeoutMs = Math.max(1000, this.cfg.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS)
     return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
         this.pendingApprovals.delete(requestId)
         resolve(false)
-      }, this.cfg.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS)
+      }, timeoutMs)
       this.pendingApprovals.set(requestId, {
         resolve: (ok) => {
           clearTimeout(timer)
@@ -902,9 +919,15 @@ ${PLAN_SYSTEM_NOTICE}`
     if (value === null || value.length <= TOOL_OUTPUT_SPILL_THRESHOLD) return output
     const workspace = conversationId !== undefined ? this.deps.store?.getConversation(conversationId)?.workspace : undefined
     if (!workspace || workspace.trim().length === 0) return output
-    const { path: file, summary } = spillToolOutput(workspace, toolCallId, value)
-    const ref = `[工具输出过长(${value.length} 字符),已保存至 ${file}。摘要: ${summary}...]`
-    return typeof output === 'string' ? ref : { ...(output as object), value: ref }
+    try {
+      const { path: file, summary } = spillToolOutput(workspace, toolCallId, value)
+      const ref = `[工具输出过长(${value.length} 字符),已保存至 ${file}。摘要: ${summary}...]`
+      return typeof output === 'string' ? ref : { ...(output as object), value: ref }
+    } catch {
+      // 落盘失败(workspace 只读/已被删):回退截断原值,绝不把成功的工具结果吞成 tool-error
+      const fallback = value.slice(0, TOOL_OUTPUT_SPILL_THRESHOLD)
+      return typeof output === 'string' ? fallback : { ...(output as object), value: fallback }
+    }
   }
 
   // 产物提取:工具结果含绝对路径 {path, size?} → artifact 事件 + artifacts 表落库;缺 path/相对路径 → 静默跳过
@@ -1113,12 +1136,12 @@ export function sanitizeMessages(messages: ModelMessage[]): ModelMessage[] {
   return final
 }
 
-export function historyMessages(rows: DBMessage[]): ModelMessage[] {
-  return sanitizeMessages(rows.map(toModelMessage))
+export function historyMessages(rows: DBMessage[], workspace?: string): ModelMessage[] {
+  return sanitizeMessages(rows.map((row) => toModelMessage(row, workspace)))
 }
 
-export function toModelMessage(row: DBMessage): ModelMessage {
-  if (row.role === 'user') return { role: 'user', content: userContentParts(row.content) }
+export function toModelMessage(row: DBMessage, workspace?: string): ModelMessage {
+  if (row.role === 'user') return { role: 'user', content: userContentParts(row.content, workspace ? { workspace } : {}) }
   if (row.role === 'tool') {
     const output = row.is_error ? `${ERROR_PREFIX}${row.content}` : row.content
     return {

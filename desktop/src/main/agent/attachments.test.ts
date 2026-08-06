@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { imageFileToDataUrl, userContentParts } from './attachments'
@@ -24,6 +24,43 @@ describe('imageFileToDataUrl', () => {
   it('returns null for unsupported extensions and missing files', () => {
     expect(imageFileToDataUrl('/tmp/nonexistent.png')).toBeNull()
     expect(imageFileToDataUrl('/tmp/notes.txt')).toBeNull()
+  })
+
+  it('rejects paths outside the workspace attachments dir (replay boundary)', () => {
+    const ws = mkdtempSync(join(tmpdir(), 'attach-ws-'))
+    try {
+      expect(imageFileToDataUrl('/etc/hosts', { workspace: ws })).toBeNull()
+      expect(imageFileToDataUrl(join(ws, 'outside.png'), { workspace: ws })).toBeNull()
+      expect(imageFileToDataUrl(join(ws, 'attachments2', 'x.png'), { workspace: ws })).toBeNull()
+    } finally {
+      rmSync(ws, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects attachments larger than 5MB', () => {
+    const ws = mkdtempSync(join(tmpdir(), 'attach-ws-'))
+    try {
+      const dir = join(ws, 'attachments')
+      mkdirSync(dir, { recursive: true })
+      const big = join(dir, 'big.png')
+      writeFileSync(big, Buffer.alloc(6 * 1024 * 1024, 0x89))
+      expect(imageFileToDataUrl(big, { workspace: ws })).toBeNull()
+    } finally {
+      rmSync(ws, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts images inside the workspace attachments dir', () => {
+    const ws = mkdtempSync(join(tmpdir(), 'attach-ws-'))
+    try {
+      const dir = join(ws, 'attachments')
+      mkdirSync(dir, { recursive: true })
+      const shot = join(dir, 'shot.png')
+      writeFileSync(shot, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]))
+      expect(imageFileToDataUrl(shot, { workspace: ws })).toMatch(/^data:image\/png;base64,/)
+    } finally {
+      rmSync(ws, { recursive: true, force: true })
+    }
   })
 })
 
@@ -68,6 +105,18 @@ describe('userContentParts', () => {
     expect(userContentParts('[图片: /gone/away.png]\n\n还有文字')).toBe(
       '[图片: /gone/away.png]\n\n还有文字',
     )
+  })
+
+  it('drops image refs outside the workspace attachments dir (no arbitrary path read)', () => {
+    const ws = mkdtempSync(join(tmpdir(), 'attach-ws-'))
+    try {
+      const parts = userContentParts('[图片: /etc/hosts]\n\n描述一下', { workspace: ws }) as string | Array<{ type: string }>
+      // 越界引用不读文件:降级为纯文本引用
+      expect(typeof parts).toBe('string')
+      expect(parts).toContain('[图片: /etc/hosts]')
+    } finally {
+      rmSync(ws, { recursive: true, force: true })
+    }
   })
 
   it('sends only image parts when text is empty', () => {

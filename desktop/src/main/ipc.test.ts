@@ -642,6 +642,36 @@ describe('chat:continue / chat:approvePlan / chat:listRunning / artifacts', () =
     expect(getTools).toHaveBeenCalledWith('/proj/5')
   })
 
+  it('chat:continue on a plan conversation keeps tools read-only', async () => {
+    const { deps, store } = makeDeps('tool-call')
+    const executed: string[] = []
+    deps.getTools = async () => ({
+      tools: {
+        file_delete: tool({
+          description: 'delete a file',
+          inputSchema: z.object({ path: z.string() }),
+          execute: async ({ path }) => {
+            executed.push(path)
+            return 'deleted'
+          },
+        }),
+        file_read: tool({
+          description: 'read a file',
+          inputSchema: z.object({ path: z.string() }),
+          execute: async ({ path }) => `contents of ${path}`,
+        }),
+      },
+      highRiskTools: new Set(), // 不挂审批:直接观察"写工具是否被注册"
+    })
+    const handlers = buildAgentHandlers(deps)
+    const id = handlers['chat:new']({ mode: 'plan' })
+    store.updateConversationStatus(id, 'planning')
+    store.appendMessage({ conversationId: id, role: 'user', content: 'plan it' })
+    // 模型本轮调用 file_delete:若只读过滤生效,写工具未注册,SDK 报未知工具而非执行
+    await handlers['chat:continue']({ conversationId: id }).catch(() => {})
+    expect(executed).toEqual([])
+  })
+
   it('chat:editAndRerun rewrites the user message, truncates, and reruns', async () => {
     const { deps, store, sent } = makeDeps('text')
     const handlers = buildAgentHandlers(deps)

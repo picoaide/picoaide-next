@@ -8,6 +8,7 @@ import { z } from 'zod'
 import type { LanguageModel, ModelMessage, Tool } from 'ai'
 import { AgentEngine, createKbTools, fromModelMessage, historyMessages, sanitizeMessages, toModelMessage } from './engine'
 import { compactMessages, CONTEXT_TOKEN_BUDGET } from './compact'
+import { TOOL_OUTPUT_SPILL_THRESHOLD } from './artifacts'
 import type { AppendMessageInput, DBMessage } from './engine'
 import type { AgentEvent } from './events'
 import { createGatewayModel } from './provider'
@@ -37,7 +38,7 @@ class MockProvider {
   specificationVersion = 'v4' as const
   provider = 'mock'
   modelId = 'mock-model'
-  script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang' | 'approval-chain' | 'gated-tool'
+  script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'text-then-error' | 'hang' | 'approval-chain' | 'gated-tool'
   toolName: string
   toolInput: unknown
   callCount = 0
@@ -59,7 +60,7 @@ class MockProvider {
   }
 
   constructor(
-    script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang' | 'approval-chain' | 'gated-tool' = 'text',
+    script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'text-then-error' | 'hang' | 'approval-chain' | 'gated-tool' = 'text',
     toolName = 'file_delete',
     toolInput: unknown = { path: '/home/u/x.doc' },
   ) {
@@ -203,6 +204,19 @@ class MockProvider {
     if (this.script === 'throw') throw new Error('mock upstream failed')
     if (this.script === 'throw-once' && this.callCount === 1) throw new Error('mock upstream failed')
     if (this.script === 'throw-local') throw new Error('local fs error')
+    if (this.script === 'text-then-error') {
+      // 流已输出部分文本后上游失败(网关 SSE 半途断流形态):延迟一点让 transform 先把
+      // text-delta 送到 fullStream,再以流错误结束——引擎必须看到"已输出文本"这一副作用
+      return {
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: 'text-start', id: 't1' })
+            controller.enqueue({ type: 'text-delta', id: 't1', delta: 'partial' })
+            setTimeout(() => controller.error(new Error('upstream 502 mid-stream fail')), 20)
+          },
+        }),
+      }
+    }
     if (this.script === 'hang') {
       return {
         stream: new ReadableStream({
@@ -284,7 +298,7 @@ function makeStore(opts: { workspace?: string } = {}) {
 }
 
 function makeEngine(
-  script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'hang' | 'approval-chain' | 'gated-tool',
+  script: 'text' | 'tool-call' | 'always-tool-call' | 'two-tool-calls' | 'throw' | 'throw-once' | 'throw-local' | 'text-then-error' | 'hang' | 'approval-chain' | 'gated-tool',
   cfg: Partial<{ maxSteps: number; approvalTimeoutMs: number; retryCount: number; fetch: typeof fetch }> = {},
   store: ReturnType<typeof makeStore> = makeStore(),
   toolName = 'file_delete',
@@ -429,6 +443,20 @@ describe('AgentEngine ask mode', () => {
     expect(mock.callCount).toBe(1)
   })
 
+  it('ask does not retry once text has been streamed (no duplicated output)', async () => {
+    const { mock, engine } = makeEngine('text-then-error', { retryCount: 3 })
+    await expect(engine.ask({ conversationId: 1, content: 'hello' })).rejects.toThrow('upstream 502 mid-stream')
+    // 首次已流出 partial → 重试会把 UI 已渲染的文本再刷一遍,必须直接失败
+    expect(mock.callCount).toBe(1)
+  })
+
+  it('clears runningConversationId after ask completes', async () => {
+    const { engine } = makeEngine('text')
+    expect(engine.runningConversation).toBeNull()
+    await engine.ask({ conversationId: 1, content: 'hello' })
+    expect(engine.runningConversation).toBeNull()
+  })
+
   it('craft retries a step whose stream failed before producing any output', async () => {
     const { mock, events, engine, store } = makeEngine('throw-once', { retryCount: 1 })
     await engine.craft({ conversationId: 1, content: 'hello', tools: {}, highRiskTools: new Set() })
@@ -446,6 +474,40 @@ describe('AgentEngine ask mode', () => {
     ).rejects.toThrow('local fs error')
     // 工具执行期间失败:重试会重复副作用,必须直接失败
     expect(mock.callCount).toBe(1)
+  })
+
+  it('craft does not retry a step that already streamed text (no duplicated output)', async () => {
+    const { mock, engine } = makeEngine('text-then-error', { retryCount: 3 })
+    await expect(
+      engine.craft({ conversationId: 1, content: 'hello', tools: {}, highRiskTools: new Set() }),
+    ).rejects.toThrow('upstream 502 mid-stream')
+    // 部分文本已流出并 emit 到 UI → 重试会重复文本,必须直接失败
+    expect(mock.callCount).toBe(1)
+  })
+
+  it('spill write failure falls back to the truncated value, tool result stays successful', async () => {
+    // workspace 指向一个文件(mkdir 必失败):模拟落盘不可写
+    const dir = mkdtempSync(join(tmpdir(), 'picoaide-spill-'))
+    const wsFile = join(dir, 'ws-file')
+    writeFileSync(wsFile, 'x')
+    try {
+      const store = makeStore({ workspace: wsFile })
+      const bigText = tool({
+        description: 'big output',
+        inputSchema: z.object({}),
+        execute: async () => 'X'.repeat(TOOL_OUTPUT_SPILL_THRESHOLD + 100),
+      })
+      const { events, engine } = makeEngine('tool-call', {}, store, 'file_read', { path: '/a' })
+      await engine.craft({ conversationId: 1, content: 'read big', tools: { file_read: bigText }, highRiskTools: new Set() })
+      // 落盘失败不得吞成 tool-error:工具结果仍为成功(回退截断值)
+      expect(eventsOf(events, 'tool_error')).toHaveLength(0)
+      const end = eventsOf(events, 'tool_end')[0] as { data: { output: string } }
+      expect(end).toBeDefined()
+      expect(end.data.output.length).toBeLessThan(TOOL_OUTPUT_SPILL_THRESHOLD + 200)
+      expect(eventsOf(events, 'done')).toHaveLength(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('craft accepts a per-call sysPrompt override', async () => {
@@ -1222,6 +1284,23 @@ describe('approval gate', () => {
     expect(eventsOf(events, 'done')).toHaveLength(1)
   })
 
+  it('clamps approvalTimeoutMs to at least 1s (0 does not auto-deny instantly)', async () => {
+    const { events, engine } = makeEngine('tool-call', { approvalTimeoutMs: 0 })
+    const run = engine.craft({
+      conversationId: 1,
+      content: 'delete it',
+      tools,
+      highRiskTools: new Set(['file_delete']),
+    })
+    await waitFor(() => eventsOf(events, 'confirm_required').length === 1)
+    const req = eventsOf(events, 'confirm_required')[0] as { data: { request_id: string } }
+    engine.confirm(req.data.request_id, true)
+    await run
+    // 若 0 未被钳位,setTimeout(0) 在确认前触发自动拒绝,工具不会执行
+    expect(deletedPaths).toEqual(['/home/u/x.doc'])
+    expect(eventsOf(events, 'done')).toHaveLength(1)
+  })
+
   it('serializes confirmations when a step contains multiple high-risk tools', async () => {
     const { events, engine } = makeEngine('two-tool-calls')
     const run = engine.craft({
@@ -1506,6 +1585,36 @@ describe('compactMessages', () => {
     expect(block).toContain('user: 任务开始')
     expect(block).toContain('assistant: 我先读取配置')
     expect(block).not.toContain('X'.repeat(100))
+  })
+
+  it('drops orphan tool results stranded inside the kept window (cut mismatch)', async () => {
+    const mock = new MockProvider('text')
+    // 布局:pair(c1+结果,大输出)→ 收尾文本 → 孤立结果 c2(其 tool-call 在更早处被剪掉)。
+    // 预算边界剪口把 pair 剪进摘要区,但收尾文本与 c2 留在 kept —— c2 必须被剥离
+    const history: ModelMessage[] = [
+      { role: 'user', content: '任务开始' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: '我先读取配置' },
+          { type: 'tool-call', toolCallId: 'c1', toolName: 'file_read', input: { path: '/a' } },
+        ],
+      },
+      {
+        role: 'tool',
+        content: [{ type: 'tool-result', toolCallId: 'c1', toolName: 'file_read', output: { type: 'text', value: 'X'.repeat(10_000) } }],
+      },
+      { role: 'assistant', content: [{ type: 'text', text: '收尾' }] },
+      {
+        role: 'tool',
+        content: [{ type: 'tool-result', toolCallId: 'c2', toolName: 'file_read', output: { type: 'text', value: 'y' } }],
+      },
+      ...longHistory(22, 1500), // 33000 字符
+    ]
+    const out = await compactMessages(history, mock as unknown as LanguageModel, { budget: 40_000 })
+    // kept 中的孤立 tool 结果(c2 无配对调用)不得残留,否则 SDK 收到孤儿 tool 消息
+    expect(out.some((m) => m.role === 'tool')).toBe(false)
+    expect(out.length).toBe(24) // 摘要 + 23 条保留(收尾 assistant + 22 条)
   })
 })
 

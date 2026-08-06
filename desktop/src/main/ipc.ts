@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { AgentEngine } from './agent/engine'
+import { readOnlyTools } from './agent/modes'
 import type { GatedTool, StoreLike as EngineStore } from './agent/engine'
 import type { AgentEvent } from './agent/events'
 import type { LanguageModel } from 'ai'
@@ -392,7 +393,9 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
       } else {
         const { tools, highRiskTools } = await deps.getTools(conv?.workspace)
         const sysPrompt = (await basePrompt()) + loadProjectInstructions(conv?.workspace)
-        await (await getEngine()).continueConversation({ conversationId, tools, highRiskTools, sysPrompt })
+        // plan 会话继续必须是只读调研(同 plan 首轮):写/执行工具不得在继续时放行
+        const runTools = mode === 'plan' ? readOnlyTools(tools) : tools
+        await (await getEngine()).continueConversation({ conversationId, tools: runTools, highRiskTools, sysPrompt })
       }
     },
     // Plan 确认(架构设计 §3.3.4):ok → 同会话第二轮带 tools 执行;!ok → rejected
@@ -436,7 +439,9 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
       } else {
         const { tools, highRiskTools } = await deps.getTools(conv?.workspace)
         const sysPrompt = (await basePrompt()) + loadProjectInstructions(conv?.workspace)
-        await (await getEngine()).continueConversation({ conversationId, tools, highRiskTools, sysPrompt })
+        // plan 会话编辑重跑同样保持只读(与 chat:continue 一致,防绕过只读白名单)
+        const runTools = mode === 'plan' ? readOnlyTools(tools) : tools
+        await (await getEngine()).continueConversation({ conversationId, tools: runTools, highRiskTools, sysPrompt })
       }
       if (deps.autoTitle) void deps.autoTitle({ conversationId })
     },

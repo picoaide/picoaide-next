@@ -48,7 +48,21 @@ export async function compactMessages(
   // 剪口落在孤儿 tool 结果行上(其 assistant 已被压缩)→ 一并丢弃,避免 SDK 收到无配对 tool 消息
   while (cutIdx < history.length && history[cutIdx].role === 'tool') cutIdx++
   const earlier = history.slice(0, cutIdx)
-  const kept = history.slice(cutIdx)
+  let kept = history.slice(cutIdx)
+  // 剪口之后 kept 中仍可能有孤立 tool 结果行(其 tool-call 在更早处被剪除,或历史本就错位)。
+  // 收集 kept 内全部 tool-call id,丢弃无配对的 tool 行 —— 保留它们会向 SDK 泄漏孤儿 tool 消息
+  const keptCallIds = new Set<string>()
+  for (const m of kept) {
+    if (m.role === 'assistant' && Array.isArray(m.content)) {
+      for (const p of m.content as ToolCallPart[]) if (p.type === 'tool-call') keptCallIds.add(p.toolCallId)
+    }
+  }
+  if (keptCallIds.size > 0 || kept.some((m) => m.role === 'tool')) {
+    kept = kept.filter((m) => {
+      if (m.role !== 'tool' || !Array.isArray(m.content)) return true
+      return (m.content as ToolResultPart[]).every((p) => p.type !== 'tool-result' || keptCallIds.has(p.toolCallId))
+    })
+  }
   const block = summarizeText(earlier)
   if (!block.trim()) return kept
   try {
