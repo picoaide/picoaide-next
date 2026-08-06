@@ -33,7 +33,7 @@ func marketAdminSetup(t *testing.T) (http.Handler, *sql.DB, map[string]string) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	serverauth.RegisterAdminRoutes(r, db)
-	RegisterAdminRoutes(r, db)
+	RegisterAdminRoutes(r, db, t.TempDir())
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))

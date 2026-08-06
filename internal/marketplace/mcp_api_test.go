@@ -4,7 +4,10 @@ import (
 	"database/sql"
 	"net/http"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/util"
@@ -115,5 +118,48 @@ func TestMCPAPI(t *testing.T) {
 	}
 	if w := doReq(r, "GET", path, token); w.Code != http.StatusTooManyRequests || !hasErrCode(w, "RATE_LIMITED") {
 		t.Fatalf("fetch 3 = %d, body %s", w.Code, w.Body.String())
+	}
+}
+
+// C-11: the check-then-act window between "allowed?" and "count" must be
+// closed — concurrent fetches may never exceed the per-user budget.
+func TestMCPConfigLimitConcurrent(t *testing.T) {
+	r, db, token, api := newTestRouter(t)
+	id, _ := seedMCP(t, db, api)
+	api.configRateLimit = 2
+	path := "/api/marketplace/mcp/" + strconv.FormatInt(id, 10) + "/config"
+
+	var ok, limited int32
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w := doReq(r, "GET", path, token)
+			switch w.Code {
+			case http.StatusOK:
+				atomic.AddInt32(&ok, 1)
+			case http.StatusTooManyRequests:
+				atomic.AddInt32(&limited, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	if ok != 2 || limited != 18 {
+		t.Fatalf("ok=%d limited=%d, want exactly 2/18 (atomic budget take)", ok, limited)
+	}
+}
+
+// C-11b: stale rate counters are pruned so the map cannot grow unbounded.
+func TestMCPConfigLimitPrunesStale(t *testing.T) {
+	api := NewAPI(nil, "")
+	api.configHits[7] = &rateCounter{windowStart: time.Now().Add(-2 * time.Hour), count: 99}
+	api.configHits[8] = &rateCounter{windowStart: time.Now(), count: 1}
+	api.configTake(9) // any take prunes while the map is large
+	if _, ok := api.configHits[7]; ok {
+		t.Fatal("stale counter not pruned")
+	}
+	if _, ok := api.configHits[8]; !ok {
+		t.Fatal("fresh counter wrongly pruned")
 	}
 }

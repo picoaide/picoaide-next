@@ -1,7 +1,7 @@
 package marketplace
 
 import (
-	"log"
+	"fmt"
 	"strings"
 
 	"github.com/picoaide/picoaide/internal/util"
@@ -37,22 +37,21 @@ func EncryptEnv(key []byte, env map[string]string) map[string]string {
 	return out
 }
 
-// DecryptEnv reverses EncryptEnv. Values that fail to decrypt are returned
-// unchanged with a log line — a bad value must never take the server down.
-func DecryptEnv(key []byte, env map[string]string) map[string]string {
+// DecryptEnv reverses EncryptEnv. A value that fails to decrypt returns an
+// error (审计 6-M5) — the ciphertext must never be handed out as if it were
+// the credential.
+func DecryptEnv(key []byte, env map[string]string) (map[string]string, error) {
 	out := make(map[string]string, len(env))
 	for k, v := range env {
 		if strings.HasPrefix(v, util.EncPrefix) {
 			pt, err := util.Decrypt(key, v)
 			if err != nil {
-				log.Printf("marketplace: decrypt %s failed: %v", k, err)
-				out[k] = v
-				continue
+				return nil, fmt.Errorf("marketplace: decrypt %s: %w", k, err)
 			}
 			out[k] = pt
 		} else {
 			out[k] = v
 		}
 	}
-	return out
+	return out, nil
 }

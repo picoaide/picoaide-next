@@ -96,6 +96,11 @@ func (a *API) downloadArchive(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "技能读取失败")
 		return
 	}
+	if s.Enabled != 1 {
+		// C-10: 下架即不可下载,与不存在同响应(与 MCP 插件一致)
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能已下架")
+		return
+	}
 	if !util.SafePathSegment(s.Name) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能名不合法")
 		return
@@ -203,7 +208,7 @@ func (a *API) getMCPConfig(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "插件已下架")
 		return
 	}
-	if !a.configAllowed(u.ID) {
+	if !a.configTake(u.ID) {
 		serverauth.WriteError(c, http.StatusTooManyRequests, "RATE_LIMITED", "拉取过于频繁,请稍后再试")
 		return
 	}
@@ -212,37 +217,46 @@ func (a *API) getMCPConfig(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "主密钥未初始化")
 		return
 	}
-	env := DecryptEnv(key, m.Env)
-	headers := DecryptEnv(key, m.Headers)
+	env, err := DecryptEnv(key, m.Env)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "凭证解密失败")
+		return
+	}
+	headers, err := DecryptEnv(key, m.Headers)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "凭证解密失败")
+		return
+	}
 	if err := serverstore.RecordDownload(a.DB, u.ID, m.ID); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "审计记录失败")
 		return
 	}
-	a.countConfigFetch(u.ID)
 	c.JSON(http.StatusOK, gin.H{"config": mcpJSON(*m, env, headers)})
 }
 
-// configAllowed reports whether the user has budget left; countConfigFetch
-// records a successful fetch.
-func (a *API) configAllowed(userID int64) bool {
+// configTake checks the per-user budget and records the take in one critical
+// section (C-11: a split check-then-act would let concurrent requests blow
+// past the limit). Stale windows are pruned on every take.
+func (a *API) configTake(userID int64) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// ponytail: map is bounded by the user count (small in practice), so
+	// pruning on every take is fine; switch to a size threshold if it grows
+	for id, rc := range a.configHits {
+		if time.Since(rc.windowStart) > 2*a.rateWindow {
+			delete(a.configHits, id)
+		}
+	}
 	rc := a.configHits[userID]
 	if rc != nil && time.Since(rc.windowStart) <= a.rateWindow && rc.count >= a.configRateLimit {
 		return false
 	}
-	return true
-}
-
-func (a *API) countConfigFetch(userID int64) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	rc := a.configHits[userID]
 	if rc == nil || time.Since(rc.windowStart) > a.rateWindow {
 		rc = &rateCounter{windowStart: time.Now()}
 		a.configHits[userID] = rc
 	}
 	rc.count++
+	return true
 }
 
 func mcpJSON(m serverstore.MCPServer, env, headers map[string]string) gin.H {

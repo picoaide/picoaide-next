@@ -33,6 +33,11 @@ export async function request<T = any>(path: string, init: RequestInit = {}): Pr
     } catch {
       /* keep defaults */
     }
+    if (res.status === 401 && window.location.pathname !== '/admin/') {
+      // 会话过期/失效:任何页面请求收到 401 都回到登录页(App 挂载时
+      // 的 me() 检查会渲染 Login),而不是停留在已失效的界面
+      window.location.assign('/admin/')
+    }
     throw new ApiError(res.status, code, message)
   }
   return res.json() as Promise<T>
