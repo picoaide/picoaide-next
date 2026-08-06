@@ -166,3 +166,16 @@
 - make check(服务端 go test + 客户端 vitest + typecheck)EXIT 0
 - 客户端:508 passed | 2 skipped(510)(各轮递增)
 - 构建:cd desktop && npm run build 成功
+
+## Round 10(2026-08-06):全系统健壮性审计与修复(用户要求"逐一检查健壮性")
+
+**审计**(6 个并行子代理,每域一个):引擎+上下文 / 工具层 / IPC+存储+网关连接器 / CDP桥+插件+renderer / 服务端认证+网关 / 知识库+商城+webadmin
+**产出**:~60 项缺陷(高 12 / 中 25 / 低 30+),全部核对过实现
+
+**修复**(4 个并行子代理,高+中必做、低尽力):
+- A1 引擎+工具:`92cae1b` `cdad83a` `f65e349` `04435db` — abort 贯穿(终端 kill 进程组/沙盒 session.stop)、file_search ReDoS 防护(嵌套量词拒绝)、pip install . 免审批绕过、plan continue 只读白名单、重试流式文本重复、spill 失败回退、file_edit 20MB 上限、list/search 深度条目上限、损坏条目跳过、web 编码(GBK iconv)/重定向协议/DNS 10s/8MB 上限、终端超时保留 stderr、中文错误包装、runningConversationId 泄漏、附件重放路径+5MB 校验、compact 孤立 tool-result、approval 超时钳位、OCR 重试+60s、剪贴板探测、截屏 1080p 缩略、日志轮转
+- A2 IPC+存储+生命周期:`9030c89` `6623dd1` `b2643b0` — 引擎运行槽 try/finally 释放、会话删除清理磁盘(attachments/tool-outputs,项目解绑不删文件)、IPC 参数校验(垃圾 dataUrl 不落盘/project path 绝对非根)、未登录可删会话、DB 打开失败错误框、TOFU 证书重置 UI、busy_timeout 3000、getEngine 双重构造、editAndRerun 先查槽、审批缓冲登出清空、flushStep 事务
+- B CDP+插件+renderer:`a9bb902` `be225ac` `a530d33` — 取消重跑代际守卫、CDP 重接管直取最老连接、waitFor/dialog 按方法超时(65s/12s)、目标标签页固定、分页切会话丢弃、phantom row 回滚、artifact 事件归属、sendCdp close 立即 reject、maxPayload 16MiB、approval 过期清理、innerText→textContent、插件 promise 队列串行+10s 超时、附件名随机后缀
+- C 服务端:`afa8597` `5f839ad` `5ea1139` `74bfea5` `2b5cecf` — SetTrustedProxies+RemoteAddr 限流键(XFF 伪造)、限流表满淘汰最旧键、kb 队列 CAS+claim 文件校验、搜索 SQL 下沉 LIMIT+COUNT、技能缓存失效、LDAP 5s 超时、serveJSON 32MB、pending usage 失败即清+周期清理、下架技能 404、凭证限流单锁+过期清理、webadmin 401 跳登录、并发首登不 500、OIDC 10s、admin_sessions 清理、bootstrap 密码 10 位、最后管理员事务守卫、token last_used 节流、502 固定文案、kb 临时文件清扫、folder_id 校验、审计日志 90 天清理、maxPackageSize 生效、凭证解密失败报错、删用户清 kb 授权、搜索分页
+
+**验证**:make check EXIT 0;客户端 579 passed | 2 skipped(净增 71 健壮性测试);服务端 8 包全绿;desktop/webadmin/server 三端 build 成功;已 push(2b5cecf)
