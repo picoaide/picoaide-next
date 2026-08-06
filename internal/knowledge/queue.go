@@ -42,6 +42,13 @@ func processNextPending(db *sql.DB, uploadsDir string) bool {
 		return false
 	}
 	path := filepath.Join(uploadsDir, strconv.FormatInt(doc.ID, 10))
+	if _, err := os.Stat(path); err != nil {
+		// C-4: the raw file has not landed yet (INSERT happens before the
+		// Rename in the upload handler) or was manually removed. Skip the
+		// row without marking it error — the upload handler renames the
+		// file into place moments later and the next poll picks it up.
+		return false
+	}
 	content, err := extractSaved(path, doc.ContentType)
 	if err != nil {
 		// raw file kept on disk for a later OCR round

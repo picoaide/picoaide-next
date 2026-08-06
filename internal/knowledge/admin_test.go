@@ -423,6 +423,32 @@ func TestAdminKBUploadMultipartPDFErrors(t *testing.T) {
 	}
 }
 
+// 审计 6-W2: the admin search preview honors page/size and reports total.
+func TestAdminKBSearchPaged(t *testing.T) {
+	r, db, hdr, _ := kbAdminSetup(t)
+	defer db.Close()
+	for i := 0; i < 25; i++ {
+		if w, _ := kbReq(t, r, "POST", "/api/admin/kb/upload",
+			fmt.Sprintf(`{"title":"搜索文档%d","content":"搜索目标内容","folder_id":0}`, i), hdr); w.Code != http.StatusOK {
+			t.Fatalf("upload %d: %d", i, w.Code)
+		}
+	}
+	w, out := kbReq(t, r, "GET", "/api/admin/kb/search?q=搜索目标&page=2&size=10", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("search: %d %s", w.Code, w.Body.String())
+	}
+	if total := out["total"].(float64); total != 25 {
+		t.Fatalf("total = %v, want 25", total)
+	}
+	if results := out["results"].([]any); len(results) != 10 {
+		t.Fatalf("page2 len = %d, want 10", len(results))
+	}
+	w, out = kbReq(t, r, "GET", "/api/admin/kb/search?q=搜索目标&page=3&size=10", "", hdr)
+	if w.Code != http.StatusOK || len(out["results"].([]any)) != 5 {
+		t.Fatalf("page3 = %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestAdminKBPagedDocsAndAudit(t *testing.T) {
 	r, db, hdr, _ := kbAdminSetup(t)
 	defer db.Close()

@@ -22,6 +22,10 @@ import (
 // stores raw uploads awaiting async extraction (<dir>/<doc id>).
 func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, uploadsDir string) {
 	os.MkdirAll(uploadsDir, 0700)
+	// startup housekeeping: orphaned kb-* temp files (审计 6-K4) and audit
+	// logs past the retention window (审计 6-K6)
+	CleanupUploadTempFiles(uploadsDir)
+	_ = serverstore.PurgeOldAuditLogs(db, time.Now().Add(-auditLogRetention))
 	g := r.Group("/api/admin/kb", serverauth.AdminAuth(db))
 	g.POST("/upload", func(c *gin.Context) { uploadDoc(c, db, uploadsDir) })
 	g.POST("/folders", func(c *gin.Context) { createFolder(c, db) })
@@ -44,6 +48,24 @@ func adminUsername(c *gin.Context) string {
 		return "admin"
 	}
 	return u.Username
+}
+
+// auditLogRetention bounds the kb audit log size (审计 6-K6).
+const auditLogRetention = 90 * 24 * time.Hour
+
+// CleanupUploadTempFiles removes orphaned kb-* temp files left by crashes
+// mid-save (审计 6-K4). Numeric files are live raw uploads keyed by doc id
+// and are kept.
+func CleanupUploadTempFiles(uploadsDir string) {
+	entries, err := os.ReadDir(uploadsDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "kb-") {
+			os.Remove(filepath.Join(uploadsDir, e.Name()))
+		}
+	}
 }
 
 type kbUploadReq struct {
@@ -417,10 +439,18 @@ func search(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "q 必填")
 		return
 	}
-	results, _, err := SearchAll(db, q, 1, 20)
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	size, _ := strconv.Atoi(c.DefaultQuery("size", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 || size > 100 {
+		size = 20
+	}
+	results, total, err := SearchAll(db, q, page, size)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "搜索失败")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"results": results})
+	c.JSON(http.StatusOK, gin.H{"results": results, "total": total})
 }
