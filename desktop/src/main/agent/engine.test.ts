@@ -708,6 +708,10 @@ describe('AgentEngine craft (store-backed)', () => {
     expect(eventsOf(events, 'artifact')).toEqual([
       { type: 'artifact', data: { path: '/workspace/report.md', type: 'report', size: 10 } },
     ])
+    // B-7 回归:artifact 事件必须经 emitEvent 附加会话归属(renderer 按 activeId 过滤,
+    // 缺 conversationId 会在切会话窗口期误挂新会话)
+    const raw = events.filter((e) => e.type === 'artifact')[0]
+    expect(raw).toMatchObject({ conversationId: 1, type: 'artifact' })
     expect(store.artifacts).toEqual([{ conversationId: 1, path: '/workspace/report.md', type: 'report', size: 10 }])
   })
 

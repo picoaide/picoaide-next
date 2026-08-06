@@ -918,6 +918,31 @@ describe('chat:attach', () => {
       rmSync(tmp, { recursive: true, force: true })
     }
   })
+
+  it('same-millisecond attachments with the same index do not overwrite each other', async () => {
+    // B-12 回归:文件名 = 时间戳+索引,同毫秒同索引 → 后者覆盖前者;加随机后缀防碰撞
+    const { deps } = makeDeps()
+    const handlers = buildAgentHandlers(deps)
+    const tmp = mkdtempSync(join(tmpdir(), 'picoaide-ipc-collide-'))
+    setDataDirOverride(tmp)
+    try {
+      const id = handlers['chat:new']({})
+      const first = await handlers['chat:attach']({
+        conversationId: id,
+        files: [{ kind: 'image', name: 'a.png', dataUrl: pngDataUrl([1]) }],
+      })
+      const second = await handlers['chat:attach']({
+        conversationId: id,
+        files: [{ kind: 'image', name: 'a.png', dataUrl: pngDataUrl([2]) }],
+      })
+      expect(first[0].path).not.toBe(second[0].path)
+      expect(readFileSync(first[0].path).equals(Buffer.from([1]))).toBe(true)
+      expect(readFileSync(second[0].path).equals(Buffer.from([2]))).toBe(true)
+    } finally {
+      setDataDirOverride(null)
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('IPC 输入校验(审计3-M2/M1)', () => {

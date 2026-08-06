@@ -18,6 +18,9 @@ const CANCEL_FALLBACK_MS = 3000
 // 运行代次:每次新任务递增;cancel 兜底定时器只复位"自己那代"的 streaming,
 // 防止取消后 3s 内用户重发时误复位新运行的 streaming/审批队列
 let runToken = 0
+// 事件流代际:最近一次处理的 agent:event 所属代次。终态事件(done/canceled/error)用它与
+// 当前 runToken 比对做代际守卫(见 onAgentEvent):旧 run 的迟到终态事件不清理新 run 状态
+let lastEventToken = 0
 // 新建会话防重入(双击快速点击创建两个空会话)
 let creatingConversation = false
 
@@ -138,6 +141,9 @@ export const useChatStore = create<ChatState>((set, get) => {
         streamingReasoning: '',
         localError: s.localError ?? (e instanceof Error && e.message ? e.message : `${label}失败,请重试`),
       }))
+      // 失败后从 DB 重载:乐观 user 行未落库,不回滚就永久残留(phantom row);
+      // 期间切走会话则丢弃(与成功路径同守卫)
+      await reloadMessages()
       return false
     }
   }
@@ -259,6 +265,8 @@ export const useChatStore = create<ChatState>((set, get) => {
     set({ loadingEarlier: true })
     try {
       const rows = await picoaide().chatMessagesPaged({ conversationId: activeId, offset: loadedTotal, limit: PAGE_SIZE })
+      // 期间用户切走/新建会话:丢弃旧会话分页结果,不得 prepend 污染新会话列表
+      if (useChatStore.getState().activeId !== activeId) return
       if (rows.length === 0) {
         set({ hasMoreMessages: false })
         return
@@ -438,6 +446,21 @@ export const useChatStore = create<ChatState>((set, get) => {
   onAgentEvent: (ev) => {
     // 会话归属过滤:旧会话运行的迟到事件(切会话/新建/登出后引擎残留)不得污染当前视图
     if (ev.conversationId !== useChatStore.getState().activeId) return
+    // 终态事件代际守卫(B-1):取消是 fire-and-forget,editMessage/approvePlan 在 await
+    // cancel() 后立即起新 run(runToken 递增);引擎单槽 + IPC 保序 → 旧 run 的
+    // canceled/done/error 必在新 run 首个事件之前到达,而每个 run 首个事件是
+    // context_usage 等非终态事件 → 用"上次事件处理时的新鲜度"判定归属:新 run 已启动
+    // 但尚无任何事件流过时到达的终态事件 = 旧 run 迟到事件,丢弃(清理新 run 状态即
+    // "引擎在跑、UI 静默");审批队列仍安全清理(旧 run 已终结,新 run 的 confirm_required
+    // 必在其首个事件之后到达)
+    const fresh = lastEventToken === runToken
+    if (ev.type === 'done' || ev.type === 'canceled' || ev.type === 'error') {
+      if (!fresh) {
+        useApprovalsStore.getState().clear()
+        return
+      }
+    }
+    lastEventToken = runToken
     switch (ev.type) {
       case 'text_delta':
         // 性能(4.4):rAF 合帧渲染,>10 delta/s 的长回复不卡顿;渲染侧再叠 useDeferredValue
@@ -515,7 +538,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         set({ contextUsage: ev.data })
         break
       case 'artifact':
-        // 流式期间实时追加;最终以 done 后的 DB 重载为准(事件不含 conversationId)
+        // 流式期间实时追加;最终以 done 后的 DB 重载为准(事件已含 conversationId,顶部已按 activeId 过滤)
         set((s) => ({
           artifacts: s.artifacts.some((a) => a.path === ev.data.path)
             ? s.artifacts

@@ -1,4 +1,5 @@
 import { dialog, ipcMain, nativeTheme, shell } from 'electron'
+import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { AgentEngine } from './agent/engine'
@@ -334,10 +335,12 @@ export function buildAgentHandlers(deps: AgentIpcDeps): ChatHandlers {
           throw new Error('附带文件超过 100MB 大小限制')
         }
         const buf = Buffer.from(f.dataUrl.slice(f.dataUrl.indexOf(',') + 1), 'base64')
+        // 随机后缀:同毫秒 + 同索引的两次落盘(连续发送同型附件)不得互相覆盖
+        const nonce = randomBytes(3).toString('hex')
         const storedName =
           f.kind === 'image'
-            ? `attach-${Date.now()}-${i}.${imageExt(mime)}`
-            : `${Date.now()}-${i}-${sanitizeFileName(f.name)}`
+            ? `attach-${Date.now()}-${i}-${nonce}.${imageExt(mime)}`
+            : `${Date.now()}-${i}-${nonce}-${sanitizeFileName(f.name)}`
         const path = join(dir, storedName)
         writeFileSync(path, buf)
         out.push({ kind: f.kind, name: f.name, path })

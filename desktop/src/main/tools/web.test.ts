@@ -149,7 +149,7 @@ describe('webFetch', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
-        new Response(iconv.encode('<p>中文GBK页面</p>', 'gbk') as unknown as Uint8Array, {
+        new Response(iconv.encode('<p>中文GBK页面</p>', 'gbk') as unknown as BodyInit, {
           status: 200,
           headers: { 'content-type': 'text/html; charset=gbk' },
         }),

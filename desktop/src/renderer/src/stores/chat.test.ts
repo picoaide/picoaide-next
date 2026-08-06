@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentEvent } from '../../../main/agent/events'
+import type { MessageRow } from '../../../main/ipc'
 import { useChatStore } from './chat'
 import { useConnectionStore } from './connection'
 
@@ -10,6 +11,8 @@ interface FakePicoaide {
   chatAttach: ReturnType<typeof vi.fn>
   chatQueue: ReturnType<typeof vi.fn>
   chatContinue: ReturnType<typeof vi.fn>
+  chatEditAndRerun: ReturnType<typeof vi.fn>
+  chatMessagesPaged: ReturnType<typeof vi.fn>
   approvePlan: ReturnType<typeof vi.fn>
   chatMessages: ReturnType<typeof vi.fn>
   chatArtifacts: ReturnType<typeof vi.fn>
@@ -44,6 +47,11 @@ function makeFake() {
       files.map((f, i) => ({ kind: f.kind, name: f.name, path: `/ws/attachments/${i}.${f.kind === 'image' ? 'png' : f.name}` })),
     ),
     chatContinue: vi.fn(async () => undefined),
+    chatEditAndRerun: vi.fn(async () => undefined),
+    chatMessagesPaged: vi.fn(
+      async (input: { conversationId: number; offset: number; limit: number }) =>
+        messages.filter((m) => m.conversation_id === input.conversationId).map((m) => ({ ...m })),
+    ),
     chatQueue: vi.fn(async () => true),
     approvePlan: vi.fn(async () => undefined),
     chatMessages: vi.fn(async (cid: number) =>
@@ -291,6 +299,76 @@ describe('chat store', () => {
     expect(useChatStore.getState().interrupted.map((c) => c.id)).toEqual([1])
     useChatStore.getState().clearInterrupted()
     expect(useChatStore.getState().interrupted).toEqual([])
+  })
+
+  it('旧 run canceled 事件在新 run 启动后到达 → 不清理新 run 状态', async () => {
+    // B-1 回归:取消是 fire-and-forget,editMessage/approvePlan 先 await cancel() 再起新 run;
+    // 旧 run 的 canceled 事件迟到(引擎单槽 + IPC 保序,必在新 run 首个事件前到达)
+    // 若不清代际 → 清掉新 run 的 streaming → 新 run 在引擎跑、UI 静默
+    useChatStore.setState({
+      activeId: 1,
+      streaming: true,
+      streamingText: '旧 run 文本',
+      messages: [{ id: 5, conversation_id: 1, role: 'user', content: '旧消息', reasoning: '', tool_calls: '', tool_call_id: '', tool_name: '', is_error: 0, created_at: '' }],
+      toolCalls: [{ id: 't1', name: 'bash', input: {}, status: 'running' }],
+      runSteps: [{ id: 't1', toolName: 'bash', status: 'running' }],
+      runStepCount: 0,
+    })
+    let release!: () => void
+    fake.api.chatEditAndRerun.mockImplementation(() => new Promise<void>((r) => (release = r)))
+    const p = useChatStore.getState().editMessage(5, '新内容')
+    await vi.waitFor(() => {
+      // runTask 已启动(runToken 递增,streaming 重置为新 run 视图)
+      expect(useChatStore.getState().runSteps).toEqual([])
+      expect(useChatStore.getState().streaming).toBe(true)
+    })
+    useChatStore.getState().onAgentEvent({ conversationId: 1, type: 'canceled', data: { reason: 'user_canceled' } })
+    // 旧 run 的 canceled 不得清掉新 run 的流式状态(旧实现 → streaming 变 false)
+    expect(useChatStore.getState().streaming).toBe(true)
+    release()
+    await p
+    expect(useChatStore.getState().streaming).toBe(false) // 新 run 正常走完
+  })
+
+  it('切会话后在途分页返回被丢弃(不污染新列表)', async () => {
+    // B-5 回归:loadEarlierMessages 的 fetch 返回前用户已切走 activeId → 旧会话分页行不得 prepend
+    const first = (await useChatStore.getState().newConversation())!
+    for (let i = 1; i <= 3; i++) {
+      fake.messages.push({ id: i, conversation_id: first, role: 'user', content: `m${i}`, reasoning: '', tool_calls: '', tool_call_id: '', tool_name: '', is_error: 0, created_at: '' })
+    }
+    useChatStore.setState({ activeId: first, messages: fake.messages.map((m) => ({ ...m })) as MessageRow[], loadedTotal: 3, hasMoreMessages: false })
+    let release!: (rows: unknown) => void
+    fake.api.chatMessagesPaged.mockImplementation(() => new Promise((r) => (release = r)))
+    const p = useChatStore.getState().loadEarlierMessages()
+    const other = (await useChatStore.getState().newConversation())! // 切走
+    expect(other).not.toBe(first)
+    release([{ id: 99, conversation_id: first, role: 'user', content: '旧分页行', reasoning: '', tool_calls: '', tool_call_id: '', tool_name: '', is_error: 0, created_at: '' }])
+    await p
+    expect(useChatStore.getState().activeId).toBe(other)
+    expect(useChatStore.getState().messages).toEqual([]) // 新会话列表未被旧分页污染
+  })
+
+  it('发送失败后重载消息列表(乐观行回滚,无 phantom row)', async () => {
+    // B-6 回归:chatAsk 抛错后乐观 user 行未落库,若不清 → 永久残留(与 DB 不一致)
+    fake.api.chatAsk.mockRejectedValue(new Error('upstream 502'))
+    useChatStore.setState({ activeId: 1, messages: [] })
+    const ok = await useChatStore.getState().sendMessage('会失败的消息')
+    expect(ok).toBe(false)
+    expect(useChatStore.getState().streaming).toBe(false)
+    expect(useChatStore.getState().localError).toContain('upstream 502')
+    expect(useChatStore.getState().messages.every((m) => m.content !== '会失败的消息')).toBe(true)
+  })
+
+  it('artifact 事件带会话归属:切会话后旧会话 artifact 不误挂', async () => {
+    // B-7 回归:artifact 事件已含 conversationId,渲染器按 activeId 过滤;
+    // 引擎在事件内附加归属,切会话窗口期不得误挂到新会话
+    const id = (await useChatStore.getState().newConversation())!
+    useChatStore.getState().onAgentEvent({ conversationId: id, type: 'artifact', data: { path: '/w/a.md', type: 'report', size: 1 } })
+    expect(useChatStore.getState().artifacts.map((a) => a.path)).toEqual(['/w/a.md'])
+    const other = (await useChatStore.getState().newConversation())!
+    await useChatStore.getState().selectConversation(other)
+    useChatStore.getState().onAgentEvent({ conversationId: id, type: 'artifact', data: { path: '/w/b.md', type: 'report', size: 2 } })
+    expect(useChatStore.getState().artifacts).toEqual([])
   })
 })
 

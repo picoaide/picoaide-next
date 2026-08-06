@@ -22,8 +22,15 @@ interface ApprovalsState {
 
 export const useApprovalsStore = create<ApprovalsState>((set) => ({
   queue: [],
+  // 过期项不消费(引擎 60s 超时已拒绝,UI 残留卡到 done):push 时过滤,
+  // 新审批不与过期残留同屏;超时/取消的迟到回执是引擎侧 no-op
   push: (data) =>
-    set((s) => ({ queue: [...s.queue, { ...data, expiresAt: Date.now() + APPROVAL_TIMEOUT_MS }] })),
+    set((s) => ({
+      queue: [
+        ...s.queue.filter((q) => q.expiresAt > Date.now()),
+        { ...data, expiresAt: Date.now() + APPROVAL_TIMEOUT_MS },
+      ],
+    })),
   resolve: (requestId, ok) => {
     void picoaide().confirm(requestId, ok)
     set((s) => ({ queue: s.queue.filter((q) => q.request_id !== requestId) }))
