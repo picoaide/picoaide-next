@@ -771,14 +771,14 @@ Expected: 全部 PASS
 Run(依次,每步断言):
 ```bash
 # 1. 建超管(密码必须经 env 提供;缺失则启动失败)
-PICOAI_ADMIN_PASSWORD='Admin@123' bin/picoaide-server -addr :8080 -data ./data --bootstrap-admin admin &
+PICOAI_ADMIN_PASSWORD='Admin@123456' bin/picoaide-server -addr :8080 -data ./data --bootstrap-admin admin &
 TOKEN=$(curl -s -XPOST localhost:8080/api/auth/login -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"Admin@123"}' | jq -r .token)
+  -d '{"username":"admin","password":"Admin@123456"}' | jq -r .token)
 # 1.5 启动配置(零配置核心:模型+默认模型+建议清单)
 curl -H "Authorization: Bearer $TOKEN" localhost:8080/api/config/bootstrap | jq
 # 1.6 管理端登录(session + CSRF;1.16a/1.16b/1.16c 后可用)
 ADMIN_COOKIE=$(curl -s -c /tmp/pa.jar -XPOST localhost:8080/api/admin/login -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"Admin@123"}' | jq -r .csrf_token)
+  -d '{"username":"admin","password":"Admin@123456"}' | jq -r .csrf_token)
 # 上架一个技能(Git 源;curl 带 X-CSRF-Token 与 cookie;也可在管理页手工上架)
 curl -b /tmp/pa.jar -H "X-CSRF-Token: $ADMIN_COOKIE" -H 'Content-Type: application/json' \
   -XPOST localhost:8080/api/admin/skills -d '{"name":"demo","git_url":"...","version":"1.0.0"}'
