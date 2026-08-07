@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
-
 )
 
 // seedEmbeddingModel reuses the fake upstream for model "bge-m3" so the
