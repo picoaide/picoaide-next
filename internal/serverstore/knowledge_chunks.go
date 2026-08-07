@@ -2,6 +2,7 @@ package serverstore
 
 import (
 	"database/sql"
+	"errors"
 	"strings"
 )
 
@@ -92,6 +93,49 @@ func GetChunksByIDs(db *sql.DB, ids []int64) ([]KBChunk, error) {
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// DocsMissingChunkEmbeddings returns ready documents whose chunks have no
+// vectors yet (embedding backfill scan).
+func DocsMissingChunkEmbeddings(db *sql.DB) ([]int64, error) {
+	rows, err := db.Query(`SELECT DISTINCT c.doc_id FROM kb_chunks c
+		JOIN kb_documents d ON d.id = c.doc_id
+		LEFT JOIN kb_chunk_embeddings ce ON ce.chunk_id = c.id
+		WHERE d.status = 'ready' AND ce.chunk_id IS NULL ORDER BY c.doc_id LIMIT 2000`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// NextDocMissingChunkEmbeddings returns one ready document missing chunk
+// vectors (embedding loop), or ErrNotFound when nothing is pending.
+func NextDocMissingChunkEmbeddings(db *sql.DB) (int64, error) {
+	var id int64
+	err := db.QueryRow(`SELECT c.doc_id FROM kb_chunks c
+		JOIN kb_documents d ON d.id = c.doc_id
+		LEFT JOIN kb_chunk_embeddings ce ON ce.chunk_id = c.id
+		WHERE d.status = 'ready' AND ce.chunk_id IS NULL
+		ORDER BY c.doc_id LIMIT 1`).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return id, err
+}
+
+// ClearChunkEmbeddings deletes all chunk vectors (model change / reindex).
+func ClearChunkEmbeddings(db *sql.DB) error {
+	_, err := db.Exec("DELETE FROM kb_chunk_embeddings")
+	return err
 }
 
 // CreateKBDocumentWithChunks creates a document and its chunks atomically.

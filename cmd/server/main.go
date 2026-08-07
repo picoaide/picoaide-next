@@ -102,6 +102,11 @@ func main() {
 			log.Printf("kb backfill chunks: %v", err)
 		}
 	}()
+	// 向量检索(B2):网关 embedder + 后台向量化循环;模型未配置时纯词法
+	embedder := llmgateway.NewEmbedder(db)
+	knowledge.SetEmbedder(embedder)
+	go func() { knowledge.BackfillEmbeddings(db, embedder) }()
+	knowledge.StartEmbeddingLoop(db, embedder, time.Second)
 	knowledge.RegisterAdminRoutes(r, db, uploadsDir)
 	bootstrap.RegisterRoutes(r, db)
 	// 渠道模型自动同步(固定间隔 1 小时;拉取上游 /models 自动上架/下架,
