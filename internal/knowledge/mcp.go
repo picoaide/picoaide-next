@@ -188,7 +188,8 @@ func toolKBRead(db *sql.DB, id json.RawMessage, args json.RawMessage, accessible
 
 func toolKBList(db *sql.DB, id json.RawMessage, args json.RawMessage, accessible map[int64]bool) rpcResponse {
 	var a struct {
-		FolderID int64 `json:"folder_id"`
+		FolderID    int64 `json:"folder_id"`
+		IncludeDocs bool  `json:"include_docs"`
 	}
 	_ = json.Unmarshal(args, &a)
 	folders, err := serverstore.ListKBFolders(db)
@@ -200,8 +201,20 @@ func toolKBList(db *sql.DB, id json.RawMessage, args json.RawMessage, accessible
 		if a.FolderID > 0 && f.ID != a.FolderID {
 			continue
 		}
-		if accessible[f.ID] {
-			lines = append(lines, fmt.Sprintf("#%d %s (parent %d)", f.ID, f.Name, f.ParentID))
+		if !accessible[f.ID] {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("#%d %s (parent %d)", f.ID, f.Name, f.ParentID))
+		// include_docs: enumerate documents in accessible folders so the LLM
+		// can pick a document by title before searching (A3).
+		if a.IncludeDocs {
+			docs, _, derr := serverstore.ListKBDocumentsPaged(db, f.ID, 0, 50)
+			if derr != nil {
+				continue
+			}
+			for _, d := range docs {
+				lines = append(lines, fmt.Sprintf("  doc #%d %s (%s)", d.ID, d.Title, d.Status))
+			}
 		}
 	}
 	if a.FolderID > 0 && !accessible[a.FolderID] {
@@ -325,11 +338,12 @@ func init() {
 		},
 		{
 			"name":        "kb_list",
-			"description": "List folders accessible to the caller (folder_id 0 lists all)",
+			"description": "List folders accessible to the caller (folder_id 0 lists all); include_docs=true also enumerates documents per folder",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"folder_id": map[string]any{"type": "integer", "description": "folder id, 0 for all"},
+					"folder_id":    map[string]any{"type": "integer", "description": "folder id, 0 for all"},
+					"include_docs": map[string]any{"type": "boolean", "description": "also list documents in each folder"},
 				},
 			},
 		},
