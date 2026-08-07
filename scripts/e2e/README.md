@@ -19,7 +19,7 @@ skills/mcp lists → knowledge-base `tools/list` (4 tools) → usage aggregation
 ```
 bash scripts/e2e/smoke.sh                 # SERVER_PORT=18080, MOCK_PORT=18081
 SERVER_PORT=19001 MOCK_PORT=19002 bash scripts/e2e/smoke.sh
-PICOAI_ADMIN_PASSWORD=Admin@123 bash scripts/e2e/smoke.sh
+PICOAI_ADMIN_PASSWORD=Admin@123456 bash scripts/e2e/smoke.sh
 ```
 
 Requires: `curl`, `jq`, `make`, Go toolchain (builds `bin/picoaide-server`

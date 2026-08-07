@@ -4,13 +4,13 @@
 #
 # Usage: bash scripts/e2e/smoke.sh
 # Env overrides: SERVER_PORT (default 18080), MOCK_PORT (default 18081),
-# PICOAI_ADMIN_PASSWORD (default Admin@123), PICOAI_SERVER_BIN, PICOAI_MOCK_BIN.
+# PICOAI_ADMIN_PASSWORD (default Admin@123456), PICOAI_SERVER_BIN, PICOAI_MOCK_BIN.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SERVER_PORT="${SERVER_PORT:-18080}"
 MOCK_PORT="${MOCK_PORT:-18081}"
-ADMIN_PASSWORD="${PICOAI_ADMIN_PASSWORD:-Admin@123}"
+ADMIN_PASSWORD="${PICOAI_ADMIN_PASSWORD:-Admin@123456}"
 SERVER_BIN="${PICOAI_SERVER_BIN:-$ROOT/bin/picoaide-server}"
 MOCK_BIN="${PICOAI_MOCK_BIN:-/tmp/picoaide-mock-upstream}"
 
@@ -82,9 +82,7 @@ echo "== 3. configure mock provider + model + default model =="
 curl -s -XPOST "$BASE/api/admin/providers" "${ADMIN_HDR[@]}" \
   -d "{\"name\":\"mock\",\"base_url\":\"http://127.0.0.1:$MOCK_PORT\",\"api_key\":\"sk-mock\",\"models\":[\"mock-chat\"]}" >"$WORK/provider.json"
 assert "provider created" '.provider.id == 1' "$WORK/provider.json"
-curl -s -XPOST "$BASE/api/admin/models" "${ADMIN_HDR[@]}" \
-  -d '{"name":"mock-chat","provider_id":1,"display_name":"Mock Chat"}' >"$WORK/model.json"
-assert "model created" '.model.id == 1' "$WORK/model.json"
+assert "provider models synced into models table" '.provider.models | index("mock-chat") != null' "$WORK/provider.json"
 curl -s -XPUT "$BASE/api/admin/gateway" "${ADMIN_HDR[@]}" \
   -d '{"default_model":"mock-chat","allow_private":true}' >"$WORK/gateway.json"
 assert "default model set" '.ok == true' "$WORK/gateway.json"

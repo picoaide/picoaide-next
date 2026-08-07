@@ -7,7 +7,7 @@ cd "$(dirname "$0")/../.."
 SERVER_PORT="${SERVER_PORT:-18080}"
 MOCK_PORT="${MOCK_PORT:-18081}"
 DATA_DIR="$(mktemp -d /tmp/pa-e2e-server-XXXXXX)"
-ADMIN_PASSWORD="${PICOAI_ADMIN_PASSWORD:-Admin@123}"
+ADMIN_PASSWORD="${PICOAI_ADMIN_PASSWORD:-Admin@123456}"
 
 cleanup() {
   kill "${SERVER_PID:-}" "${MOCK_PID:-}" 2>/dev/null || true
@@ -32,9 +32,6 @@ CSRF=$(curl -s -c /tmp/pa-e2e.jar -XPOST "localhost:$SERVER_PORT/api/admin/login
 curl -s -b /tmp/pa-e2e.jar -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' \
   -XPOST "localhost:$SERVER_PORT/api/admin/providers" \
   -d "{\"name\":\"mock\",\"base_url\":\"http://127.0.0.1:$MOCK_PORT\",\"api_key\":\"e2e-key\",\"models\":[\"mock-chat\"]}" >/dev/null
-curl -s -b /tmp/pa-e2e.jar -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' \
-  -XPOST "localhost:$SERVER_PORT/api/admin/models" \
-  -d '{"name":"mock-chat","provider_id":1,"display_name":"Mock Chat"}' >/dev/null
 curl -s -b /tmp/pa-e2e.jar -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' \
   -XPUT "localhost:$SERVER_PORT/api/admin/gateway" -d '{"default_model":"mock-chat"}' >/dev/null
 echo "== server ready on :$SERVER_PORT =="
