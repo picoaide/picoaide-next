@@ -36,18 +36,16 @@ func main() {
 			return
 		}
 		last := ""
-		hasTool := false
+		lastRole := ""
 		for _, m := range req.Messages {
 			last = m.Content
-			if m.Role == "tool" {
-				hasTool = true
-			}
+			lastRole = m.Role
 		}
 
-		// 脚本化工具调用(E2E 用):用户消息含 TOOLCALL:<name> 且本轮无 tool 结果 → 回工具调用;
-		// 下一轮(带 tool 结果)回正常文本。支持 file_write/file_delete(带参数模板)。
+		// 脚本化工具调用(E2E 用):最后一条是用户消息且含 TOOLCALL:<name> → 回工具调用;
+		// 工具结果回传轮(lastRole=tool/assistant)回正常文本。支持 file_write/file_delete/command_exec。
 		var scriptedTool *map[string]any
-		if !hasTool {
+		if lastRole == "user" {
 			switch {
 			case strings.Contains(last, "TOOLCALL:file_write"):
 				scriptedTool = &map[string]any{

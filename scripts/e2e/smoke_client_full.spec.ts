@@ -9,7 +9,7 @@ import { tmpdir } from 'os'
 
 const SERVER_URL = process.env.PICOAI_SERVER_URL || 'http://127.0.0.1:18080'
 const USERNAME = process.env.PICOAI_E2E_USER || 'admin'
-const PASSWORD = process.env.PICOAI_E2E_PASSWORD || 'Admin@123'
+const PASSWORD = process.env.PICOAI_E2E_PASSWORD || 'Admin@123456'
 
 test.setTimeout(120_000)
 
@@ -48,10 +48,10 @@ test('登录 → Ask 对话 → Craft 工具循环 → 产物落盘', async () =
     // 3. Ask 对话
     await page.getByPlaceholder(/输入消息|请输入/).fill('你好')
     await page.keyboard.press('Enter')
-    await page.getByText(/mock upstream echo/).waitFor({ timeout: 30000 })
+    await page.getByText(/mock upstream echo/).first().waitFor({ timeout: 30000 })
 
     // 4. 切 Craft 模式 → 触发 file_write 工具(脚本化 TOOLCALL)
-    await page.getByRole('button', { name: 'Craft' }).click()
+    await page.getByRole('tab', { name: '执行' }).click()
     await page.getByPlaceholder(/输入消息|请输入/).fill('TOOLCALL:file_write')
     await page.keyboard.press('Enter')
     // 工具卡片出现(工具名 file_write)
@@ -85,7 +85,7 @@ test('审批拒绝路径:auto-approve=0 时 file_delete 被拒绝且任务继续
     await page.getByText('新建会话').waitFor({ timeout: 20000 })
 
     // 先写一个 delete-me.txt(经 file_write 工具)
-    await page.getByRole('button', { name: 'Craft' }).click()
+    await page.getByRole('tab', { name: '执行' }).click()
     await page.getByPlaceholder(/输入消息|请输入/).fill('TOOLCALL:file_write')
     await page.keyboard.press('Enter')
     await page.getByText('test.txt', { exact: false }).first().waitFor({ timeout: 30000 })
