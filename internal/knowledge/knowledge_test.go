@@ -259,43 +259,6 @@ func TestSearchLargePagination(t *testing.T) {
 	}
 }
 
-// C-5b: FTS hits (bm25-ordered) stay ahead of LIKE-only hits across page
-// boundaries — the offset must count FTS hits first.
-func TestSearchLikeOnlyHitsAfterFTSAcrossPages(t *testing.T) {
-	db := kbDB(t)
-	aliceFolder, _ := seedDocs(t, db)
-	for i := 0; i < 5; i++ {
-		if _, err := serverstore.CreateKBDocument(db, aliceFolder,
-			fmt.Sprintf("f%d", i), "知识内容", "text", 0, "upload", "alice"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// mid-token "知识": FTS prefix misses, LIKE catches it
-	likeID, err := serverstore.CreateKBDocument(db, aliceFolder, "like-only", "手册知识", "text", 0, "upload", "alice")
-	if err != nil {
-		t.Fatal(err)
-	}
-	res, total, err := Search(db, "alice", nil, "知识", 1, 6)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if total != 7 || len(res) != 6 {
-		t.Fatalf("page1: total=%d len=%d, want 7/6", total, len(res))
-	}
-	for _, r := range res {
-		if r.ID == likeID {
-			t.Fatal("LIKE-only hit appeared before FTS hits")
-		}
-	}
-	res, total, err = Search(db, "alice", nil, "知识", 2, 6)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if total != 7 || len(res) != 1 || res[0].ID != likeID {
-		t.Fatalf("page2: total=%d len=%d res=%v, want the LIKE-only hit", total, len(res), res)
-	}
-}
-
 // C-4: a pending row whose raw upload file never landed (INSERT/Rename race,
 // manual deletion) is skipped — not marked error, not extracted.
 func TestProcessPendingSkipsMissingFile(t *testing.T) {

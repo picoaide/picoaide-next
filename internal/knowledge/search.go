@@ -3,8 +3,10 @@ package knowledge
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
@@ -19,7 +21,7 @@ type SearchResult struct {
 	Size        int64   `json:"size"`
 	Source      string  `json:"source"`
 	CreatedBy   string  `json:"created_by"`
-	Score       float64 `json:"score"` // bm25 for FTS hits, 0 for LIKE-only hits
+	Score       float64 `json:"score"` // lexical relevance in [0,1]
 }
 
 // sanitizeWord strips FTS5 syntax characters and control chars so a raw
@@ -35,11 +37,13 @@ func sanitizeWord(w string) string {
 
 // Search queries the knowledge base for docs the user can access.
 //
-// FTS5 unicode61 treats a run of hanzi as a single token, so a phrase query
-// only matches when the phrase is a prefix of that token. Search therefore
-// runs an FTS5 prefix MATCH ("word"*) plus a LIKE fallback over title/content
-// for recall; hits are deduped, FTS hits first ordered by bm25, LIKE-only
-// hits appended after.
+// Two tokenizers back the index (migration 0013): trigram matches any
+// substring >= 3 runes (CJK-safe); unicode61 prefix matches token-initial
+// words of any length. Query words are dispatched by length — >= 3 runes
+// go to the trigram index, 1-2 rune words to the unicode61 prefix index
+// plus a LIKE fallback (trigram needs 3 runes). Candidates are then
+// re-scored in Go with weighted Jaccard similarity (lexical.go) and
+// ordered by relevance; pagination and totals are computed in memory.
 func Search(db *sql.DB, username string, groups []string, query string, page, pageSize int) ([]SearchResult, int64, error) {
 	folders, err := serverstore.GetAccessibleFolderIDs(db, username, groups)
 	if err != nil {
@@ -83,63 +87,97 @@ func searchInFolders(db *sql.DB, folders []int64, query string, page, pageSize i
 		return []SearchResult{}, 0, nil
 	}
 
+	// Dispatch by rune length: >= 3 runes can ride the trigram index;
+	// shorter words fall back to unicode61 prefix + LIKE.
+	var longWords, shortWords []string
+	for _, w := range words {
+		if utf8.RuneCountInString(w) >= 3 {
+			longWords = append(longWords, w)
+		} else {
+			shortWords = append(shortWords, w)
+		}
+	}
+
 	// ponytail: folder list is small; IN (...) built from placeholders
 	in := strings.TrimSuffix(strings.Repeat("?,", len(folders)), ",")
-	inArgs := func() []any {
-		a := make([]any, len(folders))
-		for i, f := range folders {
-			a[i] = f
+	conds := make([]string, 0, 2)
+	args := make([]any, 0, len(folders)+2)
+	for _, f := range folders {
+		args = append(args, f)
+	}
+	if len(longWords) > 0 {
+		// trigram substrings AND-combined: `"a" "b"` requires both.
+		fts := make([]string, len(longWords))
+		for i, w := range longWords {
+			fts[i] = `"` + w + `"`
 		}
-		return a
+		conds = append(conds, "d.id IN (SELECT rowid FROM kb_fts_trigram WHERE kb_fts_trigram MATCH ?)")
+		args = append(args, strings.Join(fts, " "))
 	}
-
-	ftsQuery := make([]string, len(words))
-	for i, w := range words {
-		ftsQuery[i] = `"` + w + `"*`
+	if len(shortWords) > 0 {
+		// unicode61 prefix (indexed, token-initial) OR LIKE (mid-token).
+		// LIKE has no index on %w%, but trigram needs >= 3 runes so this
+		// bounded fallback is the only mid-token path for short words.
+		prefix := make([]string, len(shortWords))
+		for i, w := range shortWords {
+			prefix[i] = `"` + w + `"*`
+		}
+		like := make([]string, 0, len(shortWords))
+		likeArgs := make([]any, 0, len(shortWords)*2)
+		for _, w := range shortWords {
+			like = append(like, "(d.title LIKE ? OR d.content LIKE ?)")
+			likeArgs = append(likeArgs, "%"+w+"%", "%"+w+"%")
+		}
+		conds = append(conds, "(d.id IN (SELECT rowid FROM kb_fts WHERE kb_fts MATCH ?) OR "+strings.Join(like, " AND ")+")")
+		// placeholder order: MATCH first, LIKE args after
+		args = append(args, strings.Join(prefix, " "))
+		args = append(args, likeArgs...)
 	}
-	ftsMatch := strings.Join(ftsQuery, " ")
+	where := fmt.Sprintf("d.folder_id IN (%s) AND d.status = 'ready' AND %s", in, strings.Join(conds, " AND "))
 
-	// One deduped predicate drives both the COUNT and the page query (C-5):
-	// a doc matches when it hits the FTS query (subquery on rowid) or LIKE
-	// matches every word. Pagination and total therefore agree exactly.
-	conds := make([]string, len(words))
-	likeArgs := make([]any, 0, len(words)*2)
-	for i, w := range words {
-		conds[i] = "(d.title LIKE ? OR d.content LIKE ?)"
-		likeArgs = append(likeArgs, "%"+w+"%", "%"+w+"%")
-	}
-	where := fmt.Sprintf(`d.folder_id IN (%s) AND d.status = 'ready' AND (
-		d.id IN (SELECT rowid FROM kb_fts WHERE kb_fts MATCH ?) OR %s)`, in, strings.Join(conds, " AND "))
-	whereArgs := append(append([]any{}, inArgs()...), append([]any{ftsMatch}, likeArgs...)...)
-
-	var total int64
-	if err := db.QueryRow("SELECT COUNT(*) FROM kb_documents d WHERE "+where, whereArgs...).Scan(&total); err != nil {
-		return nil, 0, err
-	}
-
-	// FTS hits first ordered by bm25, LIKE-only hits appended (NULL score).
-	// bm25() is NULL for joined FTS rows outside the MATCH result set.
-	rows, err := db.Query(`SELECT d.id, d.folder_id, d.title, d.content, d.content_type, d.size, d.source, d.created_by,
-			COALESCE(bm25(kb_fts), 0)
-		FROM kb_documents d LEFT JOIN kb_fts f ON f.rowid = d.id
-		WHERE `+where+`
-		ORDER BY (d.id IN (SELECT rowid FROM kb_fts WHERE kb_fts MATCH ?)) DESC, bm25(kb_fts) ASC
-		LIMIT ? OFFSET ?`,
-		append(append(whereArgs, ftsMatch), pageSize, (page-1)*pageSize)...)
+	// Candidate generation is SQL; ranking is Go. Fetch every matching doc
+	// (a few thousand at most), score, sort, page in memory — one pass, no
+	// separate COUNT, ordering and totals always agree.
+	rows, err := db.Query(`SELECT d.id, d.folder_id, d.title, d.content, d.content_type, d.size, d.source, d.created_by
+		FROM kb_documents d WHERE `+where+` ORDER BY d.id`, args...)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer rows.Close()
-	out := make([]SearchResult, 0, pageSize)
+	all := make([]SearchResult, 0, 64)
 	for rows.Next() {
 		var r SearchResult
-		if err := rows.Scan(&r.ID, &r.FolderID, &r.Title, &r.Content, &r.ContentType, &r.Size, &r.Source, &r.CreatedBy, &r.Score); err != nil {
+		if err := rows.Scan(&r.ID, &r.FolderID, &r.Title, &r.Content, &r.ContentType, &r.Size, &r.Source, &r.CreatedBy); err != nil {
 			return nil, 0, err
 		}
-		out = append(out, r)
+		all = append(all, r)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, 0, err
 	}
-	return out, total, nil
+	if len(all) == 0 {
+		return []SearchResult{}, 0, nil
+	}
+
+	qsim := newLexicalSim(strings.Join(words, " "))
+	for i := range all {
+		all[i].Score = qsim.similarity(all[i].Title, all[i].Content)
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].Score != all[j].Score {
+			return all[i].Score > all[j].Score
+		}
+		return all[i].ID < all[j].ID
+	})
+
+	total := int64(len(all))
+	start := (page - 1) * pageSize
+	if start >= len(all) {
+		return []SearchResult{}, total, nil
+	}
+	end := start + pageSize
+	if end > len(all) {
+		end = len(all)
+	}
+	return all[start:end], total, nil
 }
