@@ -3,6 +3,7 @@ package knowledge
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -133,6 +134,51 @@ func TestMCPKBRead(t *testing.T) {
 	}
 	if !strings.Contains(reply.Result.Content[0].Text, "alice 文档") {
 		t.Errorf("kb_read text: %s", reply.Result.Content[0].Text)
+	}
+}
+
+func TestMCPKBReadChunkIDs(t *testing.T) {
+	r, db, token, _ := mcpSetup(t)
+	aliceFolder, err := serverstore.CreateKBFolder(db, "alice-docs", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.GrantFolderUser(db, aliceFolder, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	docID, err := IndexDocument(db, aliceFolder, "长文档", strings.Repeat("第一章节内容。", 100)+"\n"+strings.Repeat("第二章节内容。", 100), "text", "upload", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunks, err := serverstore.ListChunksByDoc(db, docID)
+	if err != nil || len(chunks) < 2 {
+		t.Fatalf("want >= 2 chunks: %d %v", len(chunks), err)
+	}
+	// targeted read: chunk 1 only — no chapter-2 content may leak in
+	reply := callTool(t, r, token, "kb_read", fmt.Sprintf(`{"doc_id":%d,"chunk_ids":[%d]}`, docID, chunks[0].ID))
+	if reply.Result == nil || reply.Result.IsError {
+		t.Fatalf("kb_read chunk_ids: %+v", reply)
+	}
+	text := reply.Result.Content[0].Text
+	if !strings.Contains(text, chunks[0].Content[:20]) {
+		t.Fatalf("kb_read chunk_ids missing target chunk: %s", text)
+	}
+	if strings.Contains(text, "第二章节内容") {
+		t.Fatalf("kb_read chunk_ids leaked chunk 2: %s", text)
+	}
+	// chunk from another doc -> isError
+	other, err := IndexDocument(db, aliceFolder, "另一篇", "其他内容", "text", "upload", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = other
+	otherChunks, err := serverstore.ListChunksByDoc(db, other)
+	if err != nil || len(otherChunks) == 0 {
+		t.Fatalf("other doc chunks: %v", err)
+	}
+	reply = callTool(t, r, token, "kb_read", fmt.Sprintf(`{"doc_id":%d,"chunk_ids":[%d]}`, docID, otherChunks[0].ID))
+	if reply.Result == nil || !reply.Result.IsError {
+		t.Fatalf("cross-doc chunk read should be isError: %+v", reply)
 	}
 }
 

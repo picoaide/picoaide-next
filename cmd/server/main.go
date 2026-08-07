@@ -96,6 +96,12 @@ func main() {
 	knowledge.RegisterRoutes(r, db)
 	uploadsDir := filepath.Join(*dataDir, "kb_uploads")
 	knowledge.StartUploadQueue(db, uploadsDir, 2)
+	// 0014 迁移窗口:为存量 ready 文档补分块(幂等,后台执行)
+	go func() {
+		if err := knowledge.BackfillChunks(db); err != nil {
+			log.Printf("kb backfill chunks: %v", err)
+		}
+	}()
 	knowledge.RegisterAdminRoutes(r, db, uploadsDir)
 	bootstrap.RegisterRoutes(r, db)
 	// 渠道模型自动同步(固定间隔 1 小时;拉取上游 /models 自动上架/下架,

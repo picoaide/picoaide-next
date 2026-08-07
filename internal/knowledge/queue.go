@@ -58,7 +58,7 @@ func processNextPending(db *sql.DB, uploadsDir string) bool {
 		}
 		return true
 	}
-	if uerr := serverstore.CompleteKBDocument(db, doc.ID, content, ""); uerr != nil {
+	if uerr := serverstore.CompleteKBDocumentWithChunks(db, doc.ID, content, "", ChunkText(content)); uerr != nil {
 		log.Printf("kb queue: doc %d complete: %v", doc.ID, uerr)
 	}
 	os.Remove(path) // success: extracted text is in the DB
