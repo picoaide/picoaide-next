@@ -41,6 +41,53 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, uploadsDir string) {
 	g.GET("/folders/:id/grants", func(c *gin.Context) { listGrants(c, db) })
 	g.GET("/search", func(c *gin.Context) { search(c, db) })
 	g.GET("/audit", func(c *gin.Context) { listAudit(c, db) })
+	g.GET("/embedding-model", func(c *gin.Context) { getEmbeddingModel(c, db) })
+	g.PUT("/embedding-model", func(c *gin.Context) { setEmbeddingModel(c, db) })
+	g.POST("/embedding-reindex", func(c *gin.Context) { reindexEmbeddings(c, db) })
+}
+
+// getEmbeddingModel returns the configured embedding model ("" = disabled).
+func getEmbeddingModel(c *gin.Context, db *sql.DB) {
+	v, ok, err := GetEmbeddingModel(db)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if !ok {
+		v = ""
+	}
+	c.JSON(http.StatusOK, gin.H{"model": v})
+}
+
+// setEmbeddingModel stores the embedding model name; chunks already
+// indexed keep old vectors until a reindex (dims mismatch is skipped by
+// the vector scan automatically).
+func setEmbeddingModel(c *gin.Context, db *sql.DB) {
+	var req struct {
+		Model string `json:"model"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求格式错误")
+		return
+	}
+	req.Model = strings.TrimSpace(req.Model)
+	if err := serverstore.SetSetting(db, EmbeddingModelSetting, req.Model); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+		return
+	}
+	_ = serverstore.AuditLog(db, adminUsername(c), "kb_embedding_model", req.Model)
+	c.JSON(http.StatusOK, gin.H{"ok": true, "model": req.Model})
+}
+
+// reindexEmbeddings clears all chunk vectors; the background embedding
+// loop rebuilds them (model change / corrupted index recovery).
+func reindexEmbeddings(c *gin.Context, db *sql.DB) {
+	if err := serverstore.ClearChunkEmbeddings(db); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "重建失败")
+		return
+	}
+	_ = serverstore.AuditLog(db, adminUsername(c), "kb_embedding_reindex", "")
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func adminUsername(c *gin.Context) string {

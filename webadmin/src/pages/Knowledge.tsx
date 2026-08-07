@@ -87,6 +87,7 @@ export default function Knowledge() {
   const [editId, setEditId] = useState(0)
   const [editTitle, setEditTitle] = useState('')
   const [editContent, setEditContent] = useState('')
+  const [embedModel, setEmbedModel] = useState('')
 
   const loadFolders = useCallback(async () => {
     try {
@@ -118,7 +119,37 @@ export default function Knowledge() {
     }
   }, [])
 
-  useEffect(() => { loadFolders(); loadImportStatus() }, [loadFolders, loadImportStatus])
+  const loadEmbedModel = useCallback(async () => {
+    try {
+      const data = await request('/api/admin/kb/embedding-model')
+      setEmbedModel(data.model ?? '')
+    } catch {
+      // silent: vector search is optional
+    }
+  }, [])
+
+  async function saveEmbedModel() {
+    try {
+      await request('/api/admin/kb/embedding-model', {
+        method: 'PUT',
+        body: JSON.stringify({ model: embedModel.trim() }),
+      })
+      setError('')
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
+  async function reindexEmbeddings() {
+    if (!window.confirm('重建向量索引?现有向量将清空并在后台重新生成。')) return
+    try {
+      await request('/api/admin/kb/embedding-reindex', { method: 'POST' })
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
+  useEffect(() => { loadFolders(); loadImportStatus(); loadEmbedModel() }, [loadFolders, loadImportStatus])
   useEffect(() => { loadDocs(1, selected) }, [loadDocs, selected])
   // poll while uploads are still being extracted
   useEffect(() => {
@@ -426,6 +457,25 @@ export default function Knowledge() {
           </CardContent>
         </Card>
       </div>
+
+      <Card className="grid gap-3 p-4 sm:col-span-2">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="space-y-1">
+            <Label>向量检索模型(留空 = 纯关键词检索)</Label>
+            <Input
+              className="w-72"
+              placeholder="如 bge-m3 / text-embedding-3-small"
+              value={embedModel}
+              onChange={(e) => setEmbedModel(e.target.value)}
+            />
+          </div>
+          <Button size="sm" variant="outline" onClick={saveEmbedModel}>保存</Button>
+          <Button size="sm" variant="ghost" onClick={reindexEmbeddings}>重建向量索引</Button>
+          <span className="text-xs text-muted-foreground">
+            模型名须已存在于网关模型列表中;保存后后台自动为文档分块生成向量,搜索自动切换为混合检索
+          </span>
+        </div>
+      </Card>
 
       <Dialog open={folderDialog} onOpenChange={setFolderDialog}>
         <DialogContent>
