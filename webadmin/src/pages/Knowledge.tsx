@@ -24,6 +24,8 @@ interface Document {
   content_type: string
   size: number
   created_by: string
+  status?: string
+  error?: string
 }
 
 interface SearchHit {
@@ -33,7 +35,21 @@ interface SearchHit {
   content_type: string
 }
 
+interface ImportStatus {
+  pending: number
+  ready: number
+  error: number
+  total: number
+}
+
+interface ImportErr {
+  id: number
+  title: string
+  error: string
+}
+
 const CT_LABEL: Record<string, string> = { text: '文本', markdown: 'Markdown', docx: 'Word', pdf: 'PDF' }
+const STATUS_LABEL: Record<string, string> = { pending: '待处理', ready: '就绪', error: '失败' }
 
 function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`
@@ -56,6 +72,12 @@ export default function Knowledge() {
   const [file, setFile] = useState<File | null>(null)
   const [title, setTitle] = useState('')
   const [uploadFolder, setUploadFolder] = useState(0)
+  const [zipDialog, setZipDialog] = useState(false)
+  const [zipFile, setZipFile] = useState<File | null>(null)
+  const [zipFolder, setZipFolder] = useState(0)
+  const [importMsg, setImportMsg] = useState('')
+  const [importStatus, setImportStatus] = useState<ImportStatus | null>(null)
+  const [importErrors, setImportErrors] = useState<ImportErr[]>([])
   const [grantDialog, setGrantDialog] = useState(false)
   const [grantFolder, setGrantFolder] = useState<Folder | null>(null)
   const [grantTarget, setGrantTarget] = useState('')
@@ -86,10 +108,54 @@ export default function Knowledge() {
     }
   }, [])
 
-  useEffect(() => { loadFolders() }, [loadFolders])
+  const loadImportStatus = useCallback(async () => {
+    try {
+      const data = await request('/api/admin/kb/import-status')
+      setImportStatus(data.status)
+      setImportErrors(data.errors ?? [])
+    } catch {
+      // polling must not flap the error banner
+    }
+  }, [])
+
+  useEffect(() => { loadFolders(); loadImportStatus() }, [loadFolders, loadImportStatus])
   useEffect(() => { loadDocs(1, selected) }, [loadDocs, selected])
+  // poll while uploads are still being extracted
+  useEffect(() => {
+    if (!importStatus || importStatus.pending <= 0) return
+    const t = setInterval(loadImportStatus, 2000)
+    return () => clearInterval(t)
+  }, [importStatus, loadImportStatus])
 
   const searching = query.trim() !== ''
+
+  async function importZip() {
+    if (!zipFile) return
+    const fd = new FormData()
+    fd.append('file', zipFile)
+    fd.append('folder_id', String(zipFolder))
+    setImportMsg('')
+    try {
+      const data = await request('/api/admin/kb/import-zip', { method: 'POST', body: fd })
+      setImportMsg(`已接受 ${data.accepted} 个文件,跳过 ${data.skipped?.length ?? 0} 个`)
+      setZipDialog(false)
+      setZipFile(null)
+      loadImportStatus()
+      loadDocs(1, selected)
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
+  async function retryDoc(id: number) {
+    try {
+      await request(`/api/admin/kb/documents/${id}/retry`, { method: 'POST' })
+      loadImportStatus()
+      loadDocs(docPage, selected)
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
 
   async function doSearch() {
     try {
@@ -265,8 +331,29 @@ export default function Knowledge() {
                 onKeyDown={(e) => e.key === 'Enter' && doSearch()}
               />
               <Button variant="outline" onClick={doSearch}>搜索</Button>
+              <Button size="sm" variant="outline" onClick={() => { setZipDialog(true); setZipFolder(selected) }}>批量导入</Button>
               <Button size="sm" onClick={() => { setUploadDialog(true); setUploadFolder(selected) }}>上传文档</Button>
             </div>
+            {importMsg && <div className="text-xs text-muted-foreground">{importMsg}</div>}
+            {importStatus && importStatus.total > 0 && (
+              <div className="flex flex-wrap items-center gap-3 text-xs">
+                <span className="text-muted-foreground">导入进度:</span>
+                <Badge variant="secondary">{importStatus.ready} 就绪</Badge>
+                <Badge variant="outline">{importStatus.pending} 待处理</Badge>
+                {importStatus.error > 0 && <Badge variant="destructive">{importStatus.error} 失败</Badge>}
+                <span className="text-muted-foreground">共 {importStatus.total} 篇</span>
+                {importErrors.length > 0 && (
+                  <div className="w-full space-y-1">
+                    {importErrors.map((e) => (
+                      <div key={e.id} className="flex items-center justify-between gap-2 rounded-md border border-destructive/40 px-2 py-1">
+                        <span className="truncate">「{e.title}」: {e.error}</span>
+                        <Button size="sm" variant="outline" className="h-6 shrink-0" onClick={() => retryDoc(e.id)}>重试</Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </CardHeader>
           <CardContent>
             <Table>
@@ -300,12 +387,21 @@ export default function Knowledge() {
                   ))
                   : docs.map((d) => (
                     <TableRow key={d.id}>
-                      <TableCell>{d.title}</TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          {d.title}
+                          {d.status && d.status !== 'ready' && (
+                            <Badge variant={d.status === 'error' ? 'destructive' : 'outline'}>{STATUS_LABEL[d.status] ?? d.status}</Badge>
+                          )}
+                        </div>
+                        {d.status === 'error' && d.error && <div className="text-xs text-destructive">{d.error}</div>}
+                      </TableCell>
                       <TableCell><Badge variant="secondary">{CT_LABEL[d.content_type] ?? d.content_type}</Badge></TableCell>
                       <TableCell>{fmtSize(d.size)}</TableCell>
                       <TableCell>{d.created_by}</TableCell>
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-2">
+                          {d.status === 'error' && <Button size="sm" variant="outline" onClick={() => retryDoc(d.id)}>重试</Button>}
                           <Button size="sm" variant="outline" onClick={() => openEdit(d.id, d.title)}>编辑</Button>
                           <Button size="sm" variant="destructive" onClick={() => deleteDoc(d.id, d.title)}>删除</Button>
                         </div>
@@ -367,6 +463,32 @@ export default function Knowledge() {
               </Select>
             </div>
             <Button className="w-full" disabled={!file} onClick={uploadDoc}>上传</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={zipDialog} onOpenChange={setZipDialog}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>批量导入</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label>zip 压缩包(txt / md / docx / pdf,≤200 个文件)</Label>
+              <Input type="file" accept=".zip" onChange={(e) => setZipFile(e.target.files?.[0] ?? null)} />
+            </div>
+            <div className="space-y-1">
+              <Label>目标文件夹</Label>
+              <Select value={String(zipFolder)} onValueChange={(v) => setZipFolder(Number(v))}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="0">全部 / 根目录</SelectItem>
+                  {folders.map((f) => <SelectItem key={f.id} value={String(f.id)}>{f.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="text-xs text-muted-foreground">
+              上传后自动异步解析并分块建索引;可在上方进度条查看状态,失败的文件可单独重试。
+            </div>
+            <Button className="w-full" disabled={!zipFile} onClick={importZip}>导入</Button>
           </div>
         </DialogContent>
       </Dialog>

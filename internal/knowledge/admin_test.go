@@ -15,10 +15,14 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"sync/atomic"
 
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
+
+// counter derives unique source IPs for admin login requests (rate limiter).
+var counter atomic.Int64
 
 func kbAdminSetup(t *testing.T) (http.Handler, *sql.DB, map[string]string, string) {
 	t.Helper()
@@ -43,6 +47,9 @@ func kbAdminSetup(t *testing.T) (http.Handler, *sql.DB, map[string]string, strin
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/admin/login", strings.NewReader(`{"username":"boss","password":"pw123456"}`))
 	req.Header.Set("Content-Type", "application/json")
+	// per-setup source IP keeps the login rate limiter from tripping when
+	// many tests log in as boss within the same window
+	req.RemoteAddr = fmt.Sprintf("10.9.9.%d:1234", counter.Add(1))
 	r.ServeHTTP(w, req)
 	var out map[string]any
 	json.Unmarshal(w.Body.Bytes(), &out)

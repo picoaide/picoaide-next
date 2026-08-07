@@ -3,7 +3,6 @@ package knowledge
 import (
 	"database/sql"
 	"errors"
-	"io"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -28,6 +27,8 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, uploadsDir string) {
 	_ = serverstore.PurgeOldAuditLogs(db, time.Now().Add(-auditLogRetention))
 	g := r.Group("/api/admin/kb", serverauth.AdminAuth(db))
 	g.POST("/upload", func(c *gin.Context) { uploadDoc(c, db, uploadsDir) })
+	g.POST("/import-zip", func(c *gin.Context) { importZip(c, db, uploadsDir) })
+	g.GET("/import-status", func(c *gin.Context) { importStatus(c, db) })
 	g.POST("/folders", func(c *gin.Context) { createFolder(c, db) })
 	g.GET("/folders", func(c *gin.Context) { listFolders(c, db) })
 	g.GET("/documents", func(c *gin.Context) { listDocuments(c, db) })
@@ -74,6 +75,8 @@ type kbUploadReq struct {
 	FolderID    int64  `json:"folder_id"`
 	ContentType string `json:"content_type"`
 }
+
+// uploadDoc uploads a single file (multipart) or JSON text (sync path).
 
 func uploadDoc(c *gin.Context, db *sql.DB, uploadsDir string) {
 	title := ""
@@ -156,37 +159,6 @@ func uploadDoc(c *gin.Context, db *sql.DB, uploadsDir string) {
 	}
 	_ = serverstore.AuditLog(db, adminUsername(c), "kb_upload", "doc#"+strconv.FormatInt(id, 10)+" "+title)
 	c.JSON(http.StatusOK, gin.H{"doc": gin.H{"id": id, "title": title, "status": "ready"}})
-}
-
-// saveUpload streams a multipart file to a temp file in dir, rejecting
-// anything over maxUploadBytes; returns the temp path and byte count.
-func saveUpload(fh *multipart.FileHeader, dir string) (path string, size int64, err error) {
-	src, err := fh.Open()
-	if err != nil {
-		return "", 0, errors.New("读取文件失败")
-	}
-	defer src.Close()
-	dst, err := os.CreateTemp(dir, "kb-*")
-	if err != nil {
-		return "", 0, errors.New("保存文件失败")
-	}
-	defer func() {
-		if err != nil {
-			dst.Close()
-			os.Remove(dst.Name())
-		}
-	}()
-	n, err := io.Copy(dst, io.LimitReader(src, maxUploadBytes+1))
-	if err != nil {
-		return "", 0, errors.New("读取文件失败")
-	}
-	if n > maxUploadBytes {
-		return "", 0, errors.New("文件超过 16MB 上限")
-	}
-	if err := dst.Close(); err != nil {
-		return "", 0, errors.New("保存文件失败")
-	}
-	return dst.Name(), n, nil
 }
 
 func retryDoc(c *gin.Context, db *sql.DB) {

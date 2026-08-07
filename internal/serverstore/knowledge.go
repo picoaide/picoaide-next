@@ -342,6 +342,56 @@ func ListKBDocuments(db *sql.DB, folderID int64) ([]KBDocument, error) {
 	return docs, err
 }
 
+// CountKBDocumentsByStatus returns per-status document counts for a folder
+// (folderID 0 = all folders) plus the newest error rows (maxErrors <= 0: 20)
+// — the ingestion progress dashboard (batch import).
+func CountKBDocumentsByStatus(db *sql.DB, folderID int64, maxErrors int) (map[string]int64, []KBDocument, error) {
+	if maxErrors <= 0 {
+		maxErrors = 20
+	}
+	where := ""
+	args := []any{}
+	if folderID > 0 {
+		where = " WHERE folder_id = ?"
+		args = append(args, folderID)
+	}
+	rows, err := db.Query("SELECT status, COUNT(*) FROM kb_documents"+where+" GROUP BY status", args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	counts := map[string]int64{}
+	for rows.Next() {
+		var status string
+		var n int64
+		if err := rows.Scan(&status, &n); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		counts[status] = n
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	rows, err = db.Query(`SELECT id, folder_id, title, content, content_type, size, source, created_by, created_at, status, error
+		FROM kb_documents WHERE status = 'error'`+where+` ORDER BY id DESC LIMIT ?`, append(args, maxErrors)...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var errs []KBDocument
+	for rows.Next() {
+		var d KBDocument
+		var created string
+		if err := rows.Scan(&d.ID, &d.FolderID, &d.Title, &d.Content, &d.ContentType, &d.Size, &d.Source, &d.CreatedBy, &created, &d.Status, &d.Error); err != nil {
+			return nil, nil, err
+		}
+		d.CreatedAt = parseSQLTime(created)
+		errs = append(errs, d)
+	}
+	return counts, errs, rows.Err()
+}
+
 // ListKBDocumentsPaged returns one page of documents (newest first) and the
 // total count for the folder.
 func ListKBDocumentsPaged(db *sql.DB, folderID int64, offset, limit int) ([]KBDocument, int64, error) {
