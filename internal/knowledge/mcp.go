@@ -128,23 +128,59 @@ func toolKBSearch(db *sql.DB, id json.RawMessage, args json.RawMessage, username
 	if a.Query == "" {
 		return textResponse(id, "query is required", true)
 	}
-	res, total, err := Search(db, username, groups, a.Query, a.Page, a.PageSize)
+	res, total, err := SearchChunks(db, username, groups, a.Query, a.Page, a.PageSize)
 	if err != nil {
 		return textResponse(id, "search failed: "+err.Error(), true)
 	}
-	return textResponse(id, fmt.Sprintf("total %d\n%s", total, formatResults(res)), false)
+	if total == 0 {
+		// migration window: docs without chunks (pre-0014, not yet
+		// backfilled) fall back to doc-level search
+		docRes, docTotal, derr := Search(db, username, groups, a.Query, a.Page, a.PageSize)
+		if derr == nil && docTotal > 0 {
+			return textResponse(id, fmt.Sprintf("total %d\n%s", docTotal, formatDocResults(docRes)), false)
+		}
+	}
+	return textResponse(id, fmt.Sprintf("total %d\n%s", total, formatChunkResults(res)), false)
 }
 
 func toolKBRead(db *sql.DB, id json.RawMessage, args json.RawMessage, accessible map[int64]bool) rpcResponse {
 	var a struct {
-		DocID int64 `json:"doc_id"`
+		DocID    int64   `json:"doc_id"`
+		ChunkIDs []int64 `json:"chunk_ids"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return rpcErrorResponse(id, -32602, "invalid arguments")
 	}
+	if a.DocID == 0 {
+		return textResponse(id, "doc_id is required", true)
+	}
 	doc, err := serverstore.GetKBDocument(db, a.DocID)
 	if err != nil || !accessible[doc.FolderID] {
 		return textResponse(id, "document not found or not accessible", true)
+	}
+	// chunk_ids: passage-level read, returns only the requested chunks —
+	// the LLM picks them from kb_search results instead of pulling the
+	// whole document into context.
+	if len(a.ChunkIDs) > 0 {
+		chunks, err := serverstore.GetChunksByIDs(db, a.ChunkIDs)
+		if err != nil {
+			return textResponse(id, "read failed: "+err.Error(), true)
+		}
+		if len(chunks) == 0 {
+			return textResponse(id, "no such chunks", true)
+		}
+		var lines []string
+		for _, c := range chunks {
+			if c.DocID != a.DocID {
+				return textResponse(id, fmt.Sprintf("chunk %d belongs to another document", c.ID), true)
+			}
+			head := "#" + c.TitlePath
+			if head == "#" {
+				head = "#" + doc.Title
+			}
+			lines = append(lines, fmt.Sprintf("--- %s\n%s", head, c.Content))
+		}
+		return textResponse(id, strings.Join(lines, "\n"), false)
 	}
 	return textResponse(id, fmt.Sprintf("#%d [folder %d] %s (%s):\n%s",
 		doc.ID, doc.FolderID, doc.Title, doc.ContentType, doc.Content), false)
@@ -214,15 +250,37 @@ func accessibleFolders(db *sql.DB, username string, groups []string) (map[int64]
 	return m, nil
 }
 
-// formatResults renders search hits compactly (content truncated for the LLM).
-func formatResults(res []SearchResult) string {
+// formatDocResults renders doc-level hits (fallback path for un-chunked
+// legacy documents).
+func formatDocResults(res []SearchResult) string {
 	lines := make([]string, 0, len(res))
 	for _, r := range res {
 		content := r.Content
-		if len(content) > 200 {
-			content = content[:200] + "…"
+		if len(content) > 400 {
+			content = content[:400] + "…"
 		}
-		lines = append(lines, fmt.Sprintf("#%d [folder %d] %s: %s", r.ID, r.FolderID, r.Title, content))
+		lines = append(lines, fmt.Sprintf("#doc:%d [folder %d] %s score %.2f: %s",
+			r.ID, r.FolderID, r.Title, r.Score, content))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// formatChunkResults renders passage-level hits compactly (content truncated
+// for the LLM). Each line carries the doc and chunk ids so kb_read can do a
+// targeted passage read.
+func formatChunkResults(res []ChunkResult) string {
+	lines := make([]string, 0, len(res))
+	for _, r := range res {
+		content := r.Content
+		if len(content) > 400 {
+			content = content[:400] + "…"
+		}
+		path := r.TitlePath
+		if path == "" {
+			path = "-"
+		}
+		lines = append(lines, fmt.Sprintf("#doc:%d #chunk:%d [folder %d] %s (%s) score %.2f: %s",
+			r.DocID, r.ChunkID, r.FolderID, r.Title, path, r.Score, content))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -242,7 +300,7 @@ func init() {
 	tools := []map[string]any{
 		{
 			"name":        "kb_search",
-			"description": "Search documents in the knowledge base (filtered by the caller's folder permissions)",
+			"description": "Search passages in the knowledge base (filtered by the caller's folder permissions); returns doc/chunk ids, title paths and snippets",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -255,11 +313,12 @@ func init() {
 		},
 		{
 			"name":        "kb_read",
-			"description": "Read one document by id (the folder must be accessible to the caller)",
+			"description": "Read a document by id; pass chunk_ids from kb_search to read only the relevant passages (recommended for long documents)",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"doc_id": map[string]any{"type": "integer", "description": "document id"},
+					"doc_id":    map[string]any{"type": "integer", "description": "document id"},
+					"chunk_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "chunk ids from kb_search results (optional)"},
 				},
 				"required": []string{"doc_id"},
 			},

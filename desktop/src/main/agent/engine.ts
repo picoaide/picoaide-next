@@ -1024,7 +1024,7 @@ function approvalTarget(toolName: string, input: unknown): string {
 export function createKbTools(session: Session): { tools: Record<string, Tool>; highRisk: string[] } {
   const tools: Record<string, Tool> = {
     kb_search: tool({
-      description: '在企业知识库中按关键词搜索文档,返回标题/摘要/文档ID列表',
+      description: '在企业知识库中按关键词搜索,返回文档ID/分块ID/标题路径/摘要(按相关性排序)',
       inputSchema: z.object({
         query: z.string(),
         page: z.number().optional(),
@@ -1033,9 +1033,12 @@ export function createKbTools(session: Session): { tools: Record<string, Tool>; 
       execute: ({ query, page, page_size }) => kbSearch(session, query, page, page_size),
     }),
     kb_read: tool({
-      description: '按文档ID读取企业知识库中的文档正文',
-      inputSchema: z.object({ doc_id: z.number() }),
-      execute: ({ doc_id }) => kbRead(session, doc_id),
+      description: '按文档ID读取企业知识库中的文档正文;长文档建议传 chunk_ids(来自 kb_search 结果)只读相关分块,避免整篇超长',
+      inputSchema: z.object({
+        doc_id: z.number(),
+        chunk_ids: z.array(z.number()).optional(),
+      }),
+      execute: ({ doc_id, chunk_ids }) => kbRead(session, doc_id, chunk_ids),
     }),
     kb_list: tool({
       description: '列出企业知识库目录结构(folder_id 为空时列根目录)',

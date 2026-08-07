@@ -41,7 +41,10 @@ export function kbSearch(session: Session, query: string, page = 1, pageSize = 1
   return callTool(session, 'kb_search', { query, page, page_size: pageSize })
 }
 
-export function kbRead(session: Session, docId: number | string): Promise<string> {
+export function kbRead(session: Session, docId: number | string, chunkIds?: Array<number>): Promise<string> {
+  if (chunkIds && chunkIds.length > 0) {
+    return callTool(session, 'kb_read', { doc_id: docId, chunk_ids: chunkIds })
+  }
   return callTool(session, 'kb_read', { doc_id: docId })
 }
 
