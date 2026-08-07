@@ -28,7 +28,7 @@ async function launchApp(autoApprove: boolean): Promise<{ app: ElectronApplicati
   return { app, page, home }
 }
 
-test('登录 → Ask 对话 → Craft 工具循环 → 产物落盘', async () => {
+test('登录 → 对话 → 执行模式工具循环 → 产物落盘', async () => {
   const { app, page, home } = await launchApp(true)
   try {
     // 0. 样式加载检查:Tailwind 编译产物生效(body 背景非透明,regression:css 未加载)
@@ -50,7 +50,7 @@ test('登录 → Ask 对话 → Craft 工具循环 → 产物落盘', async () =
     await page.keyboard.press('Enter')
     await page.getByText(/mock upstream echo/).first().waitFor({ timeout: 30000 })
 
-    // 4. 切 Craft 模式 → 触发 file_write 工具(脚本化 TOOLCALL)
+    // 4. 切执行模式 → 触发 file_write 工具(脚本化 TOOLCALL)
     await page.getByRole('tab', { name: '执行' }).click()
     await page.getByPlaceholder(/输入消息|请输入/).fill('TOOLCALL:file_write')
     await page.keyboard.press('Enter')
