@@ -221,11 +221,17 @@ func deepMerge(dst, src map[string]any) {
 // upstreamURL joins an upstream base URL with the OpenAI chat endpoint.
 // Base URLs may or may not carry the /v1 prefix (admin enters either form).
 func upstreamURL(base string) string {
+	return upstreamURLFor(base, "/chat/completions")
+}
+
+// upstreamURLFor joins a base URL with an OpenAI endpoint (/chat/completions,
+// /embeddings), tolerating bases with or without the /v1 prefix.
+func upstreamURLFor(base, endpoint string) string {
 	base = strings.TrimSuffix(base, "/")
 	if strings.HasSuffix(base, "/v1") {
-		return base + "/chat/completions"
+		return base + endpoint
 	}
-	return base + "/v1/chat/completions"
+	return base + "/v1" + endpoint
 }
 
 // forward sends the raw body to the upstream, replacing Authorization with
