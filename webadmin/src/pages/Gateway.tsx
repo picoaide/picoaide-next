@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
+import { Badge } from '../components/ui/badge'
 
 interface Provider {
   id: number
@@ -16,6 +17,12 @@ interface Provider {
   api_key: string
   models: string[]
   enabled: boolean
+  channel: string
+}
+
+interface Channel {
+  name: string
+  base_url: string
 }
 
 interface Model {
@@ -46,7 +53,7 @@ function formatCaps(defaultParams: string): string {
 export default function Gateway() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [models, setModels] = useState<Model[]>([])
-  const [channels, setChannels] = useState<string[]>([])
+  const [channels, setChannels] = useState<Channel[]>([])
   const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', allow_private: false, search_endpoint: '', server_base_url: '' })
   const [error, setError] = useState('')
   const [okMsg, setOkMsg] = useState('')
@@ -88,7 +95,7 @@ export default function Gateway() {
 
   async function createProvider() {
     try {
-      await request('/api/admin/providers', {
+      const r = await request('/api/admin/providers', {
         method: 'POST',
         body: JSON.stringify({
           name: provForm.name,
@@ -98,6 +105,16 @@ export default function Gateway() {
           models: provForm.models.split(',').map((s) => s.trim()).filter(Boolean),
         }),
       })
+      const sync = r.sync
+      if (sync?.error) {
+        setError(`已保存,但模型同步失败:${sync.error}(可稍后点"立即同步"重试)`)
+      } else if (sync && sync.added > 0) {
+        setSyncMsg(`已上架 ${sync.added} 个模型(移除 ${sync.removed ?? 0})`)
+      } else if (sync) {
+        setSyncMsg('已保存,上游未返回新模型')
+      } else {
+        setOkMsg('已保存')
+      }
       setProvDialog(false)
       setProvForm({ name: '', channel: '', base_url: '', api_key: '', models: '' })
       load()
@@ -221,6 +238,7 @@ export default function Gateway() {
             <TableHeader>
               <TableRow>
                 <TableHead>名称</TableHead>
+                <TableHead>渠道</TableHead>
                 <TableHead>Base URL</TableHead>
                 <TableHead>API Key</TableHead>
                 <TableHead>模型</TableHead>
@@ -231,9 +249,12 @@ export default function Gateway() {
               {providers.map((p) => (
                 <TableRow key={p.id}>
                   <TableCell>{p.name}</TableCell>
+                  <TableCell>{p.channel ? <Badge variant="secondary">{p.channel}</Badge> : '—'}</TableCell>
                   <TableCell className="font-mono text-xs">{p.base_url}</TableCell>
                   <TableCell>{p.api_key || '(未设置)'}</TableCell>
-                  <TableCell>{p.models.join(', ')}</TableCell>
+                  <TableCell>
+                    {p.channel ? <span className="text-xs text-muted-foreground">自动同步</span> : p.models.join(', ')}
+                  </TableCell>
                   <TableCell className="text-right">
                     <Button size="sm" variant="destructive" onClick={() => deleteProvider(p.id)}>删除</Button>
                   </TableCell>
@@ -285,30 +306,53 @@ export default function Gateway() {
           <div className="space-y-3">
             <div className="space-y-1">
               <Label>渠道</Label>
-              <Select value={provForm.channel} onValueChange={(v) => setProvForm({ ...provForm, channel: v })}>
-                <SelectTrigger><SelectValue placeholder="选择渠道" /></SelectTrigger>
+              <Select
+                value={provForm.channel}
+                onValueChange={(v) => {
+                  const ch = channels.find((c) => c.name === v)
+                  setProvForm((prev) => ({
+                    ...prev,
+                    channel: v,
+                    // 渠道默认地址自动回填(未手填时)
+                    base_url: prev.base_url === '' && ch ? ch.base_url : prev.base_url,
+                  }))
+                }}
+              >
+                <SelectTrigger><SelectValue placeholder="留空 = 手动型上游" /></SelectTrigger>
                 <SelectContent>
                   {channels.map((c) => (
-                    <SelectItem key={c} value={c}>{c}</SelectItem>
+                    <SelectItem key={c.name} value={c.name}>{c.name}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              <p className="text-xs text-muted-foreground">
+                渠道型(如 deepseek):模型自动从上游同步,无需手填;手动型:模型来自下方列表
+              </p>
             </div>
             <div className="space-y-1">
               <Label>名称(如 deepseek)</Label>
               <Input value={provForm.name} onChange={(e) => setProvForm({ ...provForm, name: e.target.value })} />
             </div>
             <div className="space-y-1">
-              <Label>Base URL(如 https://api.deepseek.com)</Label>
-              <Input value={provForm.base_url} onChange={(e) => setProvForm({ ...provForm, base_url: e.target.value })} />
+              <Label>Base URL(渠道型留空自动使用渠道默认地址)</Label>
+              <Input
+                value={provForm.base_url}
+                placeholder={provForm.channel ? channels.find((c) => c.name === provForm.channel)?.base_url ?? '' : 'https://api.example.com'}
+                onChange={(e) => setProvForm({ ...provForm, base_url: e.target.value })}
+              />
             </div>
             <div className="space-y-1">
               <Label>API Key</Label>
               <Input type="password" value={provForm.api_key} onChange={(e) => setProvForm({ ...provForm, api_key: e.target.value })} />
             </div>
             <div className="space-y-1">
-              <Label>模型(逗号分隔)</Label>
-              <Input value={provForm.models} onChange={(e) => setProvForm({ ...provForm, models: e.target.value })} />
+              <Label>模型(逗号分隔,渠道型自动同步无需填写)</Label>
+              <Input
+                value={provForm.models}
+                disabled={!!provForm.channel}
+                placeholder={provForm.channel ? '保存后自动同步' : 'deepseek-chat, deepseek-reasoner'}
+                onChange={(e) => setProvForm({ ...provForm, models: e.target.value })}
+              />
             </div>
             <Button className="w-full" onClick={createProvider}>添加</Button>
           </div>
