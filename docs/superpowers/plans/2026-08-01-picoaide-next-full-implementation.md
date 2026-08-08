@@ -1929,3 +1929,36 @@ git commit -m "docs: changelog for 0.4.0"
 - `toModelMessage`/`fromModelMessage`(Task 2.3 探针)→ 2.5/3.8/3.9 一致(含 tool_call_id/tool_name/is_error)
 - `store.*` 方法(任务 2.2)→ 2.5/3.9/3.10 一致
 - 服务端 Go 侧签名(阶段 1)不受客户端改动影响,保持任务 1.x 原文
+
+---
+
+## 知识库进化轮(2026-08,已合入主线)
+
+> 背景:需求升级为"几千文档 + AI 聊天实时检索总结"。市场调研(RAGFlow/QAnything/FastGPT/MaxKB 源码级研究)后按"借鉴模式、纯 Go 改造"推进,TDD 红-绿-commit。
+
+### A1 trigram 检索(commit 98087b1)
+- 迁移 0013 `kb_fts_trigram`(trigram tokenizer,modernc 内置免 CGO)+ 词长分流:≥3 rune 走 trigram 子串、1-2 rune 走 unicode61 前缀 + LIKE 兜底
+- `lexical.go`:fineTokens(单字+英文词)+ 0.4/0.6 加权 Jaccard;标题加权;Go 侧排序分页(单遍,COUNT 与结果天然一致)
+
+### A2 分块检索(commit bffc425)
+- 迁移 0014 `kb_chunks`(800 rune + 100 重叠、标题路径 第X章>第X条、超长段句级硬切、代码围栏、有序列表防误判)+ `kb_chunks_fts`
+- `kb_search` 返回块级命中(doc/chunk id、标题路径、score);`kb_read(chunk_ids)` 定点读取;create/update/queue-complete 原子写块;启动补分块
+
+### A3 批量导入(commit 188ff94)
+- `POST /api/admin/kb/import-zip`(≤200 文件/≤512MB 解压,文件名消毒,异步队列)
+- `GET /api/admin/kb/import-status`(pending/ready/error + 错误明细 + embed_missing);webadmin 进度条 + 单文件重试
+- `kb_list(include_docs)` 文档枚举
+
+### B1 网关 embeddings(commit f232a68)
+- `POST /v1/embeddings`(Bearer 认证 + 限流 + usage 计量,string/数组 input)
+- `llmgateway.Embedder` 进程内客户端(渠道故障转移,4xx 停链/5xx 换路)
+
+### B2 混合检索(commit 21ca12d)
+- 迁移 0015 `kb_chunk_embeddings`(归一化 BLOB);后台向量化循环 + 启动回填(批量 32,幂等)
+- SearchChunks 两阶段:词法 top-100 ‖ 向量 top-100 → RRF(k=60)融合 → 分页;双路命中排前;dims 不匹配 SQL 过滤;退化链完整(无模型/上游失败 → 纯词法)
+- admin:embedding-model GET/PUT、embedding-reindex;webadmin 向量模型配置卡 + 命中测试(块级结果 + score + hybrid/lexical 徽标)
+
+### 反思轮(commit 47a75ff)
+- 分块器误判修复(第X条句式/列表级联/ASCII 句切分/代码围栏)
+- 词法深命中锚点窗口;块级检索补文档标题召回(kb_fts_trigram OR + d.title LIKE)
+- 向量路径超时/并发删除零值防护;zip 解压总量上限
