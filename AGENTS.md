@@ -76,7 +76,8 @@ data/                  # 服务端运行时数据(0700,gitignore)
 - **REST 错误**:`{"error":{"code":"ERR_CODE","message":"..."}}`;`AUTH_REQUIRED`/`AUTH_FAILED`/`FORBIDDEN`(管理端)/`NOT_FOUND`/`VALIDATION`/`UPSTREAM`/`RATE_LIMITED`/`INTERNAL`
 - **bootstrap**:`{default_model, models, skills, mcp, web}`(1.16b 服务端 ↔ 2.4 客户端 `BootstrapConfig` 严格对齐)
 - **CDP 桥**:固定 `127.0.0.1:54321`,JSON-RPC:`browser.tabInfo`/`getContent`/`click`/`type`/`navigate`/`scroll`/`executeScript`
-- **DB**:客户端 5 表(conversations 含 status+project_id/messages 含 tool_call_id+tool_name+is_error/artifacts/settings/projects 迁移 0010);服务端 17 表(迁移 0001-0009,0007 废弃)
+- **DB**:客户端 5 表(conversations 含 status+project_id/messages 含 tool_call_id+tool_name+is_error/artifacts/settings/projects 迁移 0010);服务端 20+ 表(迁移 0001-0015,0007 废弃;0013 trigram FTS、0014 kb_chunks、0015 kb_chunk_embeddings)
+- **知识库检索契约**:块级检索(kb_chunks 800 rune+标题路径);`kb_search` 返回 doc/chunk id、标题路径、snippet 与 score,混合检索 = trigram/unicode61 词法 + 向量余弦(网关 /v1/embeddings,模型名存 settings `kb.embedding_model`)→ RRF(k=60)融合,无向量时纯词法降级;`kb_read(doc_id, chunk_ids?)` 支持分块定点读取;长词(≥3 rune)走 trigram、短词走 unicode61 前缀 + LIKE(含 d.title)
 - **项目体系**:项目 = 命名工作目录;项目内会话 workspace = `<项目目录>/<会话id>/`(chat:new 自动 mkdir),引擎工具 cwd/allowedDirs 以会话 workspace 为基准,无项目会话回退全局工作目录;删除项目仅解绑会话(移入未分类),不删文件
 - **自动标题**:首轮对话 done 后后台调网关默认模型生成 ≤20 字标题(15s 超时),失败兜底截取首条用户消息 20 字;仅 title 为空时触发
 - **Portable(仅 Windows/Linux)**:exe 同目录存在 `portable.txt` → 数据目录 = exe 同目录/data(不可写回退系统目录);macOS 一律走 `~/Library/Application Support/picoaide`(dmg 拖入 Applications 即用,标准 HIG:原生菜单 Cmd+Q/+/N、深色模式跟随系统)

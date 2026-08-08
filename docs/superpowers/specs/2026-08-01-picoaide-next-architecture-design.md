@@ -741,7 +741,9 @@ PUT/DELETE /api/admin/mcp/:id                 # 编辑/下架
 
 - 文档/文件夹/权限/审计:SQLite(表结构参考旧 knowledge 域,全新实现;标签表本期不建)
 - 全文检索:**SQLite FTS5**(unicode61,连续汉字为单 token,**前缀查询 `"词"*` + LIKE 兜底**;分词扩展二期评估——注意 modernc 纯 Go 驱动不支持 C 扩展加载,若需 jieba 类分词须换 CGO 驱动)
+  - ✅ 已落地(2026-08):FTS5 **trigram** 索引(modernc 内置,免 CGO)+ 词长分流;中文子串命中;Go 侧加权 Jaccard 相关性打分(0.4 单字 + 0.6 二元组,标题 40%/正文 60%,正文窗口锚定首个命中位)
 - 向量检索(二期可选):纯 Go 嵌入模型(m3e/bge-small 经 ONNX)或调用服务端网关 embedding API
+  - ✅ 已落地(2026-08):网关 `/v1/embeddings` 代理 + 进程内 Embedder(渠道故障转移);`kb_chunk_embeddings`(L2 归一化 float32 BLOB)+ 暴力余弦扫描(上限 5 万块);混合 = 词法 top-100 ‖ 向量 top-100 → **RRF(k=60)融合**;无模型/上游失败自动降级纯词法
 - 上传:管理页/API 导入(txt/md/docx/pdf → 文本抽取)
 
 #### 4.5.2 远程 MCP 暴露

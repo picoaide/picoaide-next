@@ -6,6 +6,7 @@
 package main
 
 import (
+	"math"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -131,6 +132,48 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
+	})
+
+	// /v1/embeddings: deterministic hash-based vectors so the knowledge
+	// base hybrid search can be verified offline (bge-m3 等模型名均可)
+	http.HandleFunc("/v1/embeddings", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model string          `json:"model"`
+			Input json.RawMessage `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":{"message":"bad request"}}`, 400)
+			return
+		}
+		var texts []string
+		var single string
+		if json.Unmarshal(req.Input, &single) == nil {
+			texts = []string{single}
+		} else {
+			json.Unmarshal(req.Input, &texts)
+		}
+		const dims = 32
+		data := make([]map[string]any, 0, len(texts))
+		for i, t := range texts {
+			vec := make([]float64, dims)
+			s := 0.0
+			for j, ru := range []rune(t) {
+				s = s*1.31 + float64(ru)
+				vec[j%dims] += float64(ru)
+			}
+			for j := range vec {
+				vec[j] = math.Mod(vec[j]*math.Sin(s+float64(j)), 1.0)
+			}
+			data = append(data, map[string]any{
+				"object": "embedding", "index": i,
+				"embedding": vec,
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"object": "list", "model": req.Model, "data": data,
+			"usage": map[string]int{"prompt_tokens": 1, "total_tokens": 1},
+		})
 	})
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
