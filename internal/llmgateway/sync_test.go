@@ -3,6 +3,7 @@ package llmgateway
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +27,35 @@ func syncTestDB(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	return db
+}
+
+// 无渠道(手动型)provider 不该被自动同步,但 sync-all 必须给出明确原因
+// 而不是静默跳过——否则管理员点"立即同步"不知道发生了什么。
+func TestSyncOnceReportsUnchanneled(t *testing.T) {
+	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/sync.db", t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	t.Setenv("PICOAI_MASTER_KEY", "0123456789abcdef0123456789abcdef")
+	enc, err := encryptSecret("sk-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &serverstore.GatewayProvider{Name: "manual", BaseURL: "https://custom.example.com", APIKeyEnc: enc, Channel: "", Enabled: 1}
+	if _, err := serverstore.AddGatewayProvider(db, p); err != nil {
+		t.Fatal(err)
+	}
+	results, err := SyncOnce(db, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Error == "" {
+		t.Fatalf("unchanneled provider must report a reason: %+v", results)
+	}
+	if !strings.Contains(results[0].Error, "手动") {
+		t.Fatalf("error should explain the manual path: %q", results[0].Error)
+	}
 }
 
 func TestSyncOnceAddsNewModels(t *testing.T) {

@@ -3,6 +3,7 @@ package llmgateway
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +24,13 @@ func adminTestSetup(t *testing.T) (http.Handler, *sql.DB, map[string]string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// channel-type provider creation now syncs immediately: default the
+	// fetchFn to a canned catalog so tests never hit the real upstream
+	prev := syncFetchFn
+	syncFetchFn = func(url string) ([]byte, error) {
+		return []byte(`{"data":[{"id":"deepseek-chat"},{"id":"deepseek-reasoner"}]}`), nil
+	}
+	t.Cleanup(func() { syncFetchFn = prev })
 	// admin user
 	if _, err := serverstore.CreateUserWithPassword(db, "boss", "pw123456"); err != nil {
 		t.Fatal(err)
@@ -172,6 +180,11 @@ func TestAdminChannelProviderUpdateKeepsSyncedModels(t *testing.T) {
 	r, db, hdr := adminTestSetup(t)
 	defer db.Close()
 
+	// sync must not add models in this test (assertion counts them)
+	prev := syncFetchFn
+	syncFetchFn = func(url string) ([]byte, error) { return []byte(`{"data":[]}`), nil }
+	t.Cleanup(func() { syncFetchFn = prev })
+
 	// create channel provider with models=[]
 	w, out := adminReq(t, r, "POST", "/api/admin/providers",
 		`{"name":"deepseek","base_url":"https://api.deepseek.com","api_key":"sk","models":[],"channel":"deepseek"}`, hdr)
@@ -193,6 +206,79 @@ func TestAdminChannelProviderUpdateKeepsSyncedModels(t *testing.T) {
 	models, _ := ListModels(db)
 	if len(models) != 1 || models[0].ID != "deepseek-v4-flash" {
 		t.Fatalf("synced model wiped by update: %+v", models)
+	}
+}
+
+// 渠道型 provider 创建后立即同步上游模型,响应与 models 表都要反映出来。
+func TestCreateProviderChannelSyncsImmediately(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+		`{"name":"deepseek","api_key":"sk","channel":"deepseek"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create channel provider: %d %s", w.Code, w.Body.String())
+	}
+	sync := out["sync"].(map[string]any)
+	if int(sync["added"].(float64)) != 2 {
+		t.Fatalf("sync.added = %v, want 2", sync["added"])
+	}
+	models, _ := ListModels(db)
+	if len(models) != 2 {
+		t.Fatalf("models = %+v, want the 2 synced models", models)
+	}
+	names := []string{models[0].ID, models[1].ID}
+	if names[0] != "deepseek-chat" && names[1] != "deepseek-chat" {
+		t.Fatalf("deepseek-chat missing: %v", names)
+	}
+}
+
+// 上游同步失败不阻塞创建:provider 保存成功,响应带 sync.error 供页面提示。
+func TestCreateProviderSyncFailureKeepsProvider(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+	prev := syncFetchFn
+	syncFetchFn = func(url string) ([]byte, error) { return nil, errors.New("upstream 500") }
+	t.Cleanup(func() { syncFetchFn = prev })
+
+	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+		`{"name":"deepseek","api_key":"sk","channel":"deepseek"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create must not fail on sync error: %d %s", w.Code, w.Body.String())
+	}
+	p := out["provider"].(map[string]any)
+	if p["channel"] != "deepseek" {
+		t.Fatalf("provider channel = %v", p["channel"])
+	}
+	sync, ok := out["sync"].(map[string]any)
+	if !ok || sync["error"] == nil || sync["error"] == "" {
+		t.Fatalf("sync.error missing: %v", out["sync"])
+	}
+	// provider row exists, models table empty (sync never ran)
+	providers, _ := serverstore.ListGatewayProviders(db)
+	if len(providers) != 1 {
+		t.Fatalf("providers = %+v", providers)
+	}
+	models, _ := ListModels(db)
+	if len(models) != 0 {
+		t.Fatalf("models should be empty after failed sync: %+v", models)
+	}
+}
+
+// 渠道列表返回 name + 默认 base_url,页面据此自动回填。
+func TestChannelsListDetailed(t *testing.T) {
+	r, _, hdr := adminTestSetup(t)
+	w, out := adminReq(t, r, "GET", "/api/admin/channels", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("channels: %d %s", w.Code, w.Body.String())
+	}
+	arr, ok := out["channels"].([]any)
+	if !ok || len(arr) == 0 {
+		t.Fatalf("channels = %v", out)
+	}
+	first := arr[0].(map[string]any)
+	if first["name"] == nil || first["base_url"] == nil {
+		t.Fatalf("channel entry lacks name/base_url: %v", first)
 	}
 }
 

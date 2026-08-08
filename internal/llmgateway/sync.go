@@ -29,7 +29,13 @@ func SyncOnce(db *sql.DB, fetchFn func(url string) ([]byte, error)) ([]SyncResul
 	var results []SyncResult
 	for i := range providers {
 		p := &providers[i]
-		if p.Enabled != 1 || p.APIKeyEnc == "" || p.Channel == "" {
+		if p.Enabled != 1 || p.APIKeyEnc == "" {
+			continue
+		}
+		if p.Channel == "" {
+			// 手动型上游:模型来自创建时填写的列表,无需也绝不能自动同步;
+			// 但 sync-all 必须明确说明,否则管理员以为同步无效
+			results = append(results, SyncResult{Provider: p.Name, Error: "手动型上游无需同步(模型来自模型列表)"})
 			continue
 		}
 		ch, ok := channels.Get(p.Channel)

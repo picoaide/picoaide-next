@@ -33,8 +33,44 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	g.POST("/providers/sync-all", func(c *gin.Context) { syncAllAdmin(c, db) })
 }
 
+// syncFetchFn is the fetchFn used by immediate post-save syncs; nil uses
+// the channel's real HTTP fetch. Test-injectable (never hit real upstreams
+// in unit tests).
+var syncFetchFn func(url string) ([]byte, error)
+
+// syncProviderNow runs one channel-model sync right after save so the
+// catalog is usable immediately instead of waiting for the hourly loop.
+// Failures are non-fatal: the provider stays saved and the caller retries
+// via sync-all / the per-provider sync button.
+func syncProviderNow(db *sql.DB, p *serverstore.GatewayProvider) *SyncResult {
+	if p.Channel == "" {
+		return nil
+	}
+	ch, ok := channels.Get(p.Channel)
+	if !ok {
+		return &SyncResult{Provider: p.Name, Error: "unknown channel"}
+	}
+	key, err := DecryptSecret(p.APIKeyEnc)
+	if err != nil {
+		return &SyncResult{Provider: p.Name, Error: err.Error()}
+	}
+	res := SyncProvider(db, ch, p, key, syncFetchFn)
+	return &res
+}
+
 func listChannelsAdmin(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"channels": channels.All()})
+	type entry struct {
+		Name    string `json:"name"`
+		BaseURL string `json:"base_url"`
+	}
+	names := channels.All()
+	out := make([]entry, 0, len(names))
+	for _, n := range names {
+		if ch, ok := channels.Get(n); ok {
+			out = append(out, entry{Name: n, BaseURL: ch.BaseURL()})
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"channels": out})
 }
 
 func syncAllAdmin(c *gin.Context, db *sql.DB) {
@@ -160,7 +196,12 @@ func createProvider(c *gin.Context, db *sql.DB) {
 			return
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(*p)})
+	// 渠道型:保存后立即同步一次,模型即刻上架(失败不阻塞,可重试)
+	var syncRes *SyncResult
+	if p.Channel != "" {
+		syncRes = syncProviderNow(db, p)
+	}
+	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(*p), "sync": syncRes})
 }
 
 func updateProvider(c *gin.Context, db *sql.DB) {
@@ -220,7 +261,12 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 			return
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(*p)})
+	// 渠道型:更新后也立即同步,模型列表保持新鲜
+	var syncRes *SyncResult
+	if p.Channel != "" {
+		syncRes = syncProviderNow(db, p)
+	}
+	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(*p), "sync": syncRes})
 }
 
 func deleteProvider(c *gin.Context, db *sql.DB) {
