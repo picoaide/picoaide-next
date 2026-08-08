@@ -132,6 +132,16 @@ func NextDocMissingChunkEmbeddings(db *sql.DB) (int64, error) {
 	return id, err
 }
 
+// CountChunksMissingEmbeddings returns how many chunks still lack vectors
+// (embedding pipeline progress; -1 on query error is caller-handled).
+func CountChunksMissingEmbeddings(db *sql.DB) (int64, error) {
+	var n int64
+	err := db.QueryRow(`SELECT COUNT(*) FROM kb_chunks c
+		LEFT JOIN kb_chunk_embeddings ce ON ce.chunk_id = c.id
+		WHERE ce.chunk_id IS NULL`).Scan(&n)
+	return n, err
+}
+
 // ClearChunkEmbeddings deletes all chunk vectors (model change / reindex).
 func ClearChunkEmbeddings(db *sql.DB) error {
 	_, err := db.Exec("DELETE FROM kb_chunk_embeddings")

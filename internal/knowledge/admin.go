@@ -482,10 +482,21 @@ func search(c *gin.Context, db *sql.DB) {
 	if size < 1 || size > 100 {
 		size = 20
 	}
-	results, total, err := SearchAll(db, q, page, size)
+	// hit-test: passage-level results exactly as the LLM would see them,
+	// content truncated to the snippet (full text lives in the doc API)
+	results, total, err := SearchChunksAll(db, q, page, size)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "搜索失败")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"results": results, "total": total})
+	out := make([]gin.H, 0, len(results))
+	for _, r := range results {
+		content := r.Content
+		if len(content) > 400 {
+			content = content[:400] + "…"
+		}
+		out = append(out, gin.H{"chunk_id": r.ChunkID, "doc_id": r.DocID, "folder_id": r.FolderID,
+			"title": r.Title, "title_path": r.TitlePath, "content": content, "score": r.Score})
+	}
+	c.JSON(http.StatusOK, gin.H{"results": out, "total": total, "mode": SearchMode(db)})
 }

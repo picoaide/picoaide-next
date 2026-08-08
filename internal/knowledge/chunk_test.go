@@ -154,3 +154,70 @@ func TestChunkTextNoHeadingLines(t *testing.T) {
 		}
 	}
 }
+
+func TestChunkTextListItemsNotHeadings(t *testing.T) {
+	// long numbered list items stay content; short numbered headings still
+	// become headings
+	content := "第一章 操作说明\n1. 检查电源线是否插紧并确认开关已关闭\n2. 按下启动按钮\n1. 适用范围\n本规定适用于全体员工。\n"
+	chunks := ChunkText(content)
+	var listPath, headingPath bool
+	for _, c := range chunks {
+		if strings.Contains(c.Content, "检查电源线") {
+			// the long list item must NOT be promoted to a heading: its
+			// chunk stays under 操作说明, path unchanged
+			if c.TitlePath != "第一章 操作说明" {
+				t.Fatalf("list item promoted to heading: %q", c.TitlePath)
+			}
+			listPath = true
+		}
+		if c.TitlePath == "第一章 操作说明 > 1. 适用范围" {
+			headingPath = true
+		}
+	}
+	if !listPath {
+		t.Fatal("list item content missing")
+	}
+	if !headingPath {
+		t.Fatal("short numbered heading lost")
+	}
+}
+
+func TestChunkTextCodeFence(t *testing.T) {
+	// "# 标题" inside a code fence must not become a heading
+	content := "# 第一章 概览\n```\n# 这是代码注释\n1. 列表代码\n```\n# 第二章 细节\n"
+	chunks := ChunkText(content)
+	for _, c := range chunks {
+		if strings.Contains(c.Content, "代码注释") && strings.Contains(c.TitlePath, "代码注释") {
+			t.Fatalf("code fence content leaked into title path: %q", c.TitlePath)
+		}
+	}
+	if !strings.Contains(chunks[0].TitlePath, "概览") {
+		t.Fatalf("first heading lost: %q", chunks[0].TitlePath)
+	}
+}
+
+func TestChunkTextStatuteSentencesNotHeadings(t *testing.T) {
+	// "第一条需求是..." style statute sentences are content, not headings
+	// (the 第X条 rule requires a separator + short length)
+	content := "第一条需求是支持多文件上传。\n第二条审批流程如下。\n第三条适用范围。\n"
+	chunks := ChunkText(content)
+	for _, c := range chunks {
+		if c.TitlePath != "" {
+			t.Fatalf("statute sentence became a heading: %q", c.TitlePath)
+		}
+	}
+}
+
+func TestChunkTextASCIISentenceSplit(t *testing.T) {
+	// an ASCII paragraph without newlines must still split at sentence ends
+	content := strings.Repeat("This is a long sentence with many words. ", 60)
+	chunks := ChunkText(content)
+	if len(chunks) < 2 {
+		t.Fatalf("got %d chunks, want >= 2", len(chunks))
+	}
+	for _, c := range chunks {
+		if n := len([]rune(c.Content)); n > maxChunkRunes+overlapRunes {
+			t.Fatalf("ASCII chunk size %d exceeds cap", n)
+		}
+	}
+}
