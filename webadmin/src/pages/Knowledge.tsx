@@ -29,10 +29,12 @@ interface Document {
 }
 
 interface SearchHit {
-  id: number
+  chunk_id: number
+  doc_id: number
   title: string
+  title_path: string
   content: string
-  content_type: string
+  score: number
 }
 
 interface ImportStatus {
@@ -40,6 +42,7 @@ interface ImportStatus {
   ready: number
   error: number
   total: number
+  embed_missing?: number
 }
 
 interface ImportErr {
@@ -64,6 +67,7 @@ export default function Knowledge() {
   const [docPage, setDocPage] = useState(1)
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<SearchHit[]>([])
+  const [hitMode, setHitMode] = useState('lexical')
   const [error, setError] = useState('')
 
   const [folderDialog, setFolderDialog] = useState(false)
@@ -192,6 +196,7 @@ export default function Knowledge() {
     try {
       const data = await request(`/api/admin/kb/search?q=${encodeURIComponent(query)}`)
       setHits(data.results)
+      setHitMode(data.mode ?? 'lexical')
       setError('')
     } catch (err: any) {
       setError(err.message)
@@ -362,6 +367,11 @@ export default function Knowledge() {
                 onKeyDown={(e) => e.key === 'Enter' && doSearch()}
               />
               <Button variant="outline" onClick={doSearch}>搜索</Button>
+              {searching && (
+                <Badge variant={hitMode === 'hybrid' ? 'default' : 'outline'}>
+                  {hitMode === 'hybrid' ? '混合检索' : '纯关键词检索'}
+                </Badge>
+              )}
               <Button size="sm" variant="outline" onClick={() => { setZipDialog(true); setZipFolder(selected) }}>批量导入</Button>
               <Button size="sm" onClick={() => { setUploadDialog(true); setUploadFolder(selected) }}>上传文档</Button>
             </div>
@@ -372,6 +382,9 @@ export default function Knowledge() {
                 <Badge variant="secondary">{importStatus.ready} 就绪</Badge>
                 <Badge variant="outline">{importStatus.pending} 待处理</Badge>
                 {importStatus.error > 0 && <Badge variant="destructive">{importStatus.error} 失败</Badge>}
+                {typeof importStatus.embed_missing === 'number' && importStatus.embed_missing > 0 && (
+                  <Badge variant="outline">向量化中 {importStatus.embed_missing} 个分块</Badge>
+                )}
                 <span className="text-muted-foreground">共 {importStatus.total} 篇</span>
                 {importErrors.length > 0 && (
                   <div className="w-full space-y-1">
@@ -400,18 +413,21 @@ export default function Knowledge() {
               <TableBody>
                 {searching
                   ? hits.map((h) => (
-                    <TableRow key={h.id}>
+                    <TableRow key={h.chunk_id}>
                       <TableCell>
-                        <div className="font-medium">{h.title}</div>
-                        <div className="text-xs text-muted-foreground">{h.content.slice(0, 80)}…</div>
+                        <div className="font-medium">
+                          {h.title}
+                          {h.title_path && <span className="text-muted-foreground"> › {h.title_path}</span>}
+                        </div>
+                        <div className="text-xs text-muted-foreground">{h.content.slice(0, 120)}…</div>
                       </TableCell>
-                      <TableCell><Badge variant="secondary">{CT_LABEL[h.content_type] ?? h.content_type}</Badge></TableCell>
-                      <TableCell className="text-muted-foreground">{fmtSize(h.content.length)}</TableCell>
+                      <TableCell><Badge variant="secondary">分块</Badge></TableCell>
+                      <TableCell className="text-muted-foreground">score {h.score.toFixed(2)}</TableCell>
                       <TableCell />
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-2">
-                          <Button size="sm" variant="outline" onClick={() => openEdit(h.id, h.title)}>编辑</Button>
-                          <Button size="sm" variant="destructive" onClick={() => deleteDoc(h.id, h.title)}>删除</Button>
+                          <Button size="sm" variant="outline" onClick={() => openEdit(h.doc_id, h.title)}>编辑</Button>
+                          <Button size="sm" variant="destructive" onClick={() => deleteDoc(h.doc_id, h.title)}>删除</Button>
                         </div>
                       </TableCell>
                     </TableRow>

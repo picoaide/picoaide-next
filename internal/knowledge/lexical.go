@@ -3,7 +3,6 @@ package knowledge
 import (
 	"strings"
 	"unicode"
-	"unicode/utf8"
 )
 
 // contentScoreWindow caps the content window used for lexical scoring: a
@@ -84,7 +83,9 @@ func newLexicalSim(query string) *lexicalSim {
 }
 
 // similarity returns query-vs-document relevance in [0,1]: content window
-// 60% + title 40% (title weighting), 0 when nothing matches.
+// 60% + title 40% (title weighting), 0 when nothing matches. The content
+// window is anchored at the first query-term occurrence so hits deep in a
+// long document still score (a fixed prefix window would give them 0).
 func (l *lexicalSim) similarity(title, content string) float64 {
 	if len(l.uni) == 0 {
 		return 0
@@ -93,12 +94,34 @@ func (l *lexicalSim) similarity(title, content string) float64 {
 		u, b := grams(fineTokens(text))
 		return 0.4*jaccard(l.uni, u) + 0.6*jaccard(l.bi, b)
 	}
-	return 0.6*score(truncateForScore(content)) + 0.4*score(title)
+	return 0.6*score(contentWindow(content, l)) + 0.4*score(title)
 }
 
-func truncateForScore(s string) string {
-	if utf8.RuneCountInString(s) <= contentScoreWindow {
-		return s
+// contentWindow returns the scoring window of a document body: a segment
+// around the first occurrence of any query unigram, or the leading
+// contentScoreWindow runes when nothing matches.
+func contentWindow(content string, l *lexicalSim) string {
+	runes := []rune(content)
+	if len(runes) <= contentScoreWindow {
+		return content
 	}
-	return string([]rune(s)[:contentScoreWindow])
+	first := -1
+	for i, r := range runes {
+		if l.uni[string(r)] {
+			first = i
+			break
+		}
+	}
+	if first < 0 {
+		return string(runes[:contentScoreWindow])
+	}
+	start := first - contentScoreWindow/4
+	if start < 0 {
+		start = 0
+	}
+	end := start + contentScoreWindow
+	if end > len(runes) {
+		end = len(runes)
+	}
+	return string(runes[start:end])
 }

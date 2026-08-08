@@ -19,16 +19,24 @@ const (
 )
 
 // heading rules, coarsest to finest. Levels are 1-based path depth.
+// Fine-grained rules carry per-rule length caps (below): numbered list
+// items like "1. 检查电源线" must not become headings, so level-3 lines
+// are only headings when very short.
 var headingRules = []struct {
 	re    *regexp.Regexp
 	level int
+	max   int
 }{
-	{regexp.MustCompile(`^第[0-9一二三四五六七八九十百千两]+[章节篇部]`), 1},
-	{regexp.MustCompile(`^[一二三四五六七八九十]+、`), 1},
-	{regexp.MustCompile(`^第[0-9一二三四五六七八九十百千两]+[条款项]`), 2},
-	{regexp.MustCompile(`^\d+\.\d+\s`), 2},
-	{regexp.MustCompile(`^[（(][一二三四五六七八九十0-9]+[）)]`), 2},
-	{regexp.MustCompile(`^\d+[、.]\s`), 3},
+	{regexp.MustCompile(`^第[0-9一二三四五六七八九十百千两]+[章节篇部]`), 1, 0},
+	{regexp.MustCompile(`^[一二三四五六七八九十]+、`), 1, 0},
+	// 第X条 headings require a separator and stay short: "第一条 适用范围"
+	// is a heading, "第一条需求是支持多文件上传" is a full sentence
+	{regexp.MustCompile(`^第[0-9一二三四五六七八九十百千两]+[条款项][ 、]`), 2, 16},
+	{regexp.MustCompile(`^\d+\.\d+\s`), 2, 16},
+	{regexp.MustCompile(`^[（(][一二三四五六七八九十0-9]+[）)]`), 2, 16},
+	// numbered rule carries a length cap: short numbered lines are
+	// headings, longer ones are list items
+	{regexp.MustCompile(`^\d+[、.]\s`), 3, 12},
 }
 
 // headingLevel returns the path level of a heading line (0 = not a heading).
@@ -50,7 +58,17 @@ func headingLevel(line string) int {
 		}
 		return 0
 	}
+	n := utf8.RuneCountInString(line)
+	if n > titleMaxRunes {
+		return 0
+	}
+	if r, _ := utf8.DecodeLastRuneInString(line); strings.ContainsRune("。；！？.!?", r) {
+		return 0 // a full sentence is content, not a heading
+	}
 	for _, h := range headingRules {
+		if h.max > 0 && n > h.max {
+			continue
+		}
 		if h.re.MatchString(line) {
 			return h.level
 		}
@@ -58,8 +76,8 @@ func headingLevel(line string) int {
 	return 0
 }
 
-// sentenceSplit splits an oversized paragraph at CJK sentence ends
-// (。；！？), keeping the delimiter; segments stay contiguous.
+// sentenceSplit splits an oversized paragraph at sentence ends (CJK and
+// ASCII), keeping the delimiter; segments stay contiguous.
 func sentenceSplit(line string) []string {
 	var out []string
 	var cur []rune
@@ -71,7 +89,7 @@ func sentenceSplit(line string) []string {
 	}
 	for _, r := range line {
 		cur = append(cur, r)
-		if strings.ContainsRune("。；！？", r) {
+		if strings.ContainsRune("。；！？.!?", r) {
 			flush()
 		}
 	}
@@ -153,17 +171,40 @@ func ChunkText(content string) []serverstore.KBChunk {
 		curRunes += sep + u
 	}
 
-	for _, raw := range strings.Split(content, "\n") {
+	inFence := false // markdown ``` code fence: no heading detection inside
+	lines := strings.Split(content, "\n")
+	for i, raw := range lines {
 		line := strings.TrimSpace(raw)
 		offset += utf8.RuneCountInString(line) + 1
 		if line == "" {
 			continue
 		}
-		if lvl := headingLevel(line); lvl > 0 && utf8.RuneCountInString(line) <= titleMaxRunes {
+		if strings.HasPrefix(line, "```") {
+			inFence = !inFence // toggle; fences always start a content line
+			addUnit(line)
+			continue
+		}
+		isHeading := false
+		if !inFence {
+			if lvl := headingLevel(line); lvl > 0 {
+				isHeading = true
+				// consecutive short numbered lines are a list, not a
+				// heading cascade ("1. x\n2. y"): the first one only
+				// becomes a heading when the next line is not numbered
+				if lvl == 3 && i+1 < len(lines) {
+					next := strings.TrimSpace(lines[i+1])
+					if next != "" && headingLevel(next) == 3 {
+						isHeading = false
+					}
+				}
+			}
+		}
+		if isHeading {
 			flush()
 			// heading starts a new section: no overlap carry, path updated
 			parts = nil
 			curRunes = 0
+			lvl := headingLevel(line)
 			if lvl <= len(path) {
 				path = path[:lvl-1]
 			}

@@ -1,6 +1,7 @@
 package knowledge
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
@@ -52,6 +53,20 @@ func TestLexicalSimilarity(t *testing.T) {
 	b := q.similarity("操作手册", "一篇关于操作流程的文档")
 	if a <= b {
 		t.Fatalf("title match %f should outrank title miss %f", a, b)
+	}
+}
+
+func TestLexicalDeepHitWindow(t *testing.T) {
+	// a query term 10k+ runes into a long doc must still score (window is
+	// anchored at the first occurrence, not the prefix)
+	lead := strings.Repeat("无关填充内容。", 2000)
+	doc := lead + "客户满意度调研报告的核心结论"
+	q := newLexicalSim("客户满意度")
+	if s := q.similarity("标题", doc); s <= 0 {
+		t.Fatalf("deep hit scored 0 (window miss): %f", s)
+	}
+	if s := q.similarity("标题", lead+"完全没有相关内容"); s != 0 {
+		t.Fatalf("no-hit doc scored %f, want 0", s)
 	}
 }
 

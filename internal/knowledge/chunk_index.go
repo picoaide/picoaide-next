@@ -76,6 +76,37 @@ func SearchChunks(db *sql.DB, username string, groups []string, query string, pa
 	if err != nil {
 		return nil, 0, err
 	}
+	return searchChunksInFolders(db, folders, query, page, pageSize)
+}
+
+// SearchChunksAll searches every folder (admin hit-test).
+func SearchChunksAll(db *sql.DB, query string, page, pageSize int) ([]ChunkResult, int64, error) {
+	folders, err := serverstore.ListKBFolders(db)
+	if err != nil {
+		return nil, 0, err
+	}
+	ids := make([]int64, 0, len(folders)+1)
+	ids = append(ids, 0) // global root
+	for _, f := range folders {
+		ids = append(ids, f.ID)
+	}
+	return searchChunksInFolders(db, ids, query, page, pageSize)
+}
+
+// SearchMode reports whether the vector path is currently active ("hybrid")
+// or the search is pure lexical ("lexical") — admin visibility for tuning.
+func SearchMode(db *sql.DB) string {
+	if currentEmbedder() == nil {
+		return "lexical"
+	}
+	model, ok, err := GetEmbeddingModel(db)
+	if err != nil || !ok || model == "" {
+		return "lexical"
+	}
+	return "hybrid"
+}
+
+func searchChunksInFolders(db *sql.DB, folders []int64, query string, page, pageSize int) ([]ChunkResult, int64, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -182,7 +213,10 @@ func SearchChunks(db *sql.DB, username string, groups []string, query string, pa
 	}
 	all := make([]ChunkResult, 0, len(order))
 	for _, s := range order {
-		r := byID[s.chunkID]
+		r, ok := byID[s.chunkID]
+		if !ok {
+			continue // chunk deleted between retrieval and fusion
+		}
 		if maxScore > 0 {
 			r.Score = s.score / maxScore
 		} else {
@@ -244,7 +278,10 @@ type vecHit struct {
 // vectorHits brute-force scans chunk embeddings of accessible docs (capped
 // by embedScanLimit, newest first) and returns the top embedVecTopK by
 // cosine similarity. Stored vectors are L2-normalized, so cosine = dot.
+// Rows with stale dims (model changed before reindex) are filtered in SQL.
 func vectorHits(ctx context.Context, db *sql.DB, e Embedder, model, query string, folders []int64) ([]vecHit, error) {
+	ctx, cancel := context.WithTimeout(ctx, vectorQueryTimeout)
+	defer cancel()
 	vecs, _, err := e.Embed(ctx, model, []string{query})
 	if err != nil {
 		return nil, errEmbedUpstream
@@ -252,14 +289,15 @@ func vectorHits(ctx context.Context, db *sql.DB, e Embedder, model, query string
 	q := normalize(vecs[0])
 
 	in := strings.TrimSuffix(strings.Repeat("?,", len(folders)), ",")
-	args := make([]any, 0, len(folders)+1)
+	args := make([]any, 0, len(folders)+2)
 	for _, f := range folders {
 		args = append(args, f)
 	}
+	args = append(args, len(q))
 	args = append(args, embedScanLimit)
 	rows, err := db.Query(`SELECT e.chunk_id, e.vector, e.dims
 		FROM kb_chunk_embeddings e JOIN kb_documents d ON d.id = e.doc_id
-		WHERE d.folder_id IN (`+in+`) AND d.status = 'ready'
+		WHERE d.folder_id IN (`+in+`) AND d.status = 'ready' AND e.dims = ?
 		ORDER BY e.chunk_id DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
@@ -274,7 +312,7 @@ func vectorHits(ctx context.Context, db *sql.DB, e Embedder, model, query string
 			return nil, err
 		}
 		if dims != len(q) || len(raw) != dims*4 {
-			continue // stale model dims until reindex
+			continue // defensive: SQL filtered, but never trust the blob
 		}
 		v := decodeF32(raw)
 		var dot float64
@@ -317,25 +355,31 @@ func lexicalCandidates(db *sql.DB, folders []int64, words []string) ([]ChunkResu
 		args = append(args, f)
 	}
 	if len(longWords) > 0 {
+		// chunk trigram MATCH, OR'd with the doc-level trigram index so a
+		// query that only hits the doc title (or a part of the doc the
+		// chunk boundaries missed) still recalls — kb_fts_trigram covers
+		// title+content of every doc
 		fts := make([]string, len(longWords))
 		for i, w := range longWords {
 			fts[i] = `"` + w + `"`
 		}
-		conds = append(conds, "c.id IN (SELECT rowid FROM kb_chunks_fts WHERE kb_chunks_fts MATCH ?)")
-		args = append(args, strings.Join(fts, " "))
+		ftsMatch := strings.Join(fts, " ")
+		conds = append(conds, `(c.id IN (SELECT rowid FROM kb_chunks_fts WHERE kb_chunks_fts MATCH ?)
+			OR c.doc_id IN (SELECT rowid FROM kb_fts_trigram WHERE kb_fts_trigram MATCH ?))`)
+		args = append(args, ftsMatch, ftsMatch)
 	}
 	if len(shortWords) > 0 {
 		// doc-level unicode61 prefix narrows the candidate set cheaply;
-		// LIKE covers mid-token short words inside a chunk
+		// LIKE covers mid-token short words inside a chunk or the doc title
 		prefix := make([]string, len(shortWords))
 		for i, w := range shortWords {
 			prefix[i] = `"` + w + `"*`
 		}
 		like := make([]string, 0, len(shortWords))
-		likeArgs := make([]any, 0, len(shortWords)*2)
+		likeArgs := make([]any, 0, len(shortWords)*3)
 		for _, w := range shortWords {
-			like = append(like, "(c.title_path LIKE ? OR c.content LIKE ?)")
-			likeArgs = append(likeArgs, "%"+w+"%", "%"+w+"%")
+			like = append(like, "(c.title_path LIKE ? OR c.content LIKE ? OR d.title LIKE ?)")
+			likeArgs = append(likeArgs, "%"+w+"%", "%"+w+"%", "%"+w+"%")
 		}
 		conds = append(conds, `(c.doc_id IN (SELECT rowid FROM kb_fts WHERE kb_fts MATCH ?) OR `+strings.Join(like, " AND ")+`)`)
 		args = append(args, strings.Join(prefix, " "))

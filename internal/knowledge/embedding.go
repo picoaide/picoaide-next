@@ -25,10 +25,12 @@ type Embedder interface {
 const EmbeddingModelSetting = "kb.embedding_model"
 
 const (
-	embedBatchSize = 32    // texts per upstream call
-	embedScanLimit = 50000 // brute-force scan cap (chunks)
-	embedVecTopK   = 100   // vector candidates fed into fusion
-	rrfK           = 60    // RRF smoothing (Cormack et al., k=60)
+	embedBatchSize     = 32    // texts per upstream call
+	embedScanLimit     = 50000 // brute-force scan cap (chunks)
+	embedVecTopK       = 100   // vector candidates fed into fusion
+	rrfK               = 60    // RRF smoothing (Cormack et al., k=60)
+	vectorQueryTimeout = 10 * time.Second
+	embedDocTimeout    = 60 * time.Second
 )
 
 var (
@@ -201,7 +203,10 @@ func StartEmbeddingLoop(db *sql.DB, e Embedder, idle time.Duration) {
 				time.Sleep(idle)
 				continue
 			}
-			if _, err := embedMissingChunks(context.Background(), db, e, model, docID); err != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), embedDocTimeout)
+			_, err = embedMissingChunks(ctx, db, e, model, docID)
+			cancel()
+			if err != nil {
 				// transient upstream failure: back off and retry the doc
 				log.Printf("kb embeddings: doc %d: %v", docID, err)
 				time.Sleep(idle)

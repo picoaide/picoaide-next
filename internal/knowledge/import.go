@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	maxZipBytes = 64 << 20 // whole-zip cap
-	maxZipFiles = 200      // per-zip entry cap (zip bomb / batch sanity)
+	maxZipBytes        = 64 << 20          // whole-zip cap
+	maxZipFiles        = 200               // per-zip entry cap (zip bomb / batch sanity)
+	maxZipUncompressed = uint64(512 << 20) // total uncompressed cap across entries
 )
 
 // importZip accepts a zip of txt/md/docx/pdf files, enqueues each entry as a
@@ -67,11 +68,17 @@ func importZip(c *gin.Context, db *sql.DB, uploadsDir string) {
 
 	username := adminUsername(c)
 	accepted := 0
+	var totalSize uint64
 	skipped := make([]gin.H, 0, 4)
 	for _, e := range zr.File {
 		if e.FileInfo().IsDir() {
 			continue
 		}
+		if totalSize+e.UncompressedSize64 > maxZipUncompressed {
+			skipped = append(skipped, gin.H{"name": e.Name, "reason": "解压总量超过 512MB 上限"})
+			continue
+		}
+		totalSize += e.UncompressedSize64
 		title := filepath.Base(filepath.Clean(e.Name)) // no traversal, no dirs
 		if title == "." || title == "/" || strings.HasPrefix(title, ".") {
 			continue
@@ -130,6 +137,11 @@ func importStatus(c *gin.Context, db *sql.DB) {
 	}
 	total := status["pending"].(int64) + status["ready"].(int64) + status["error"].(int64)
 	status["total"] = total
+	missing, err := serverstore.CountChunksMissingEmbeddings(db)
+	if err != nil {
+		missing = -1
+	}
+	status["embed_missing"] = missing
 	errorsOut := make([]gin.H, 0, len(errs))
 	for _, d := range errs {
 		errorsOut = append(errorsOut, gin.H{"id": d.ID, "title": d.Title, "error": d.Error})
