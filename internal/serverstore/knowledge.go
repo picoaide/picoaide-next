@@ -94,17 +94,33 @@ func CreatePendingKBDocument(db *sql.DB, folderID int64, title, contentType stri
 }
 
 // ClaimPendingKBDocument exclusively claims the oldest upload awaiting
-// extraction: the row moves pending → processing atomically (SQLite
-// UPDATE...RETURNING), so concurrent workers can never extract the same
-// document twice — each claimed row has exactly one owner. Returns
-// ErrNotFound when the queue is empty.
+// extraction: the row moves pending → processing atomically, so concurrent
+// workers can never extract the same document twice — each claimed row has
+// exactly one owner. Returns ErrNotFound when the queue is empty.
+//
+// Atomicity comes from SQLite's single-writer semantics: the UPDATE picks
+// the oldest pending row; a concurrent worker's identical UPDATE either
+// waits (busy_timeout) and then affects 0 rows (the row is claimed) or
+// claims the next pending row. No RETURNING dependency (modernc driver
+// compatibility).
 func ClaimPendingKBDocument(db *sql.DB) (*KBDocument, error) {
-	row := db.QueryRow(`UPDATE kb_documents SET status = 'processing'
-		WHERE id = (SELECT id FROM kb_documents WHERE status = 'pending' ORDER BY id LIMIT 1)
-		RETURNING id, folder_id, title, content, content_type, size, source, created_by, created_at, status, error`)
+	res, err := db.Exec(`UPDATE kb_documents SET status = 'processing'
+		WHERE id = (SELECT id FROM kb_documents WHERE status = 'pending' ORDER BY id LIMIT 1)`)
+	if err != nil {
+		return nil, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		return nil, ErrNotFound
+	}
+	row := db.QueryRow(`SELECT id, folder_id, title, content, content_type, size, source, created_by, created_at, status, error
+		FROM kb_documents WHERE status = 'processing' ORDER BY id LIMIT 1`)
 	var d KBDocument
 	var created string
-	err := row.Scan(&d.ID, &d.FolderID, &d.Title, &d.Content, &d.ContentType, &d.Size, &d.Source, &d.CreatedBy, &created, &d.Status, &d.Error)
+	err = row.Scan(&d.ID, &d.FolderID, &d.Title, &d.Content, &d.ContentType, &d.Size, &d.Source, &d.CreatedBy, &created, &d.Status, &d.Error)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
