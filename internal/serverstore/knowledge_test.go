@@ -3,6 +3,7 @@ package serverstore
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -299,6 +300,61 @@ func TestKBClaimIsExclusive(t *testing.T) {
 	doc, _ = GetKBDocument(db, id2)
 	if doc.Status != "pending" {
 		t.Fatalf("reset doc status = %q, want pending", doc.Status)
+	}
+}
+
+// concurrent claims must never produce orphans: each worker gets a distinct
+// row (the UPDATE + re-SELECT pair is serialized)
+func TestKBConcurrentClaimsNoOrphans(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20; i++ {
+		if _, err := CreatePendingKBDocument(db, 0, "并发文档", "text", 10, "upload", "admin"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids := map[int64]bool{}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				d, err := ClaimPendingKBDocument(db)
+				if errors.Is(err, ErrNotFound) {
+					return
+				}
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				mu.Lock()
+				if ids[d.ID] {
+					t.Errorf("doc %d claimed twice", d.ID)
+				}
+				ids[d.ID] = true
+				mu.Unlock()
+				if err := CompleteKBDocument(db, d.ID, "ok", ""); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if len(ids) != 20 {
+		t.Fatalf("claimed %d distinct docs, want 20 (orphans left)", len(ids))
+	}
+	var n int64
+	if err := db.QueryRow("SELECT COUNT(*) FROM kb_documents WHERE status='processing'").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("%d orphan processing rows", n)
 	}
 }
 

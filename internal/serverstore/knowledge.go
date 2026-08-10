@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -93,17 +94,19 @@ func CreatePendingKBDocument(db *sql.DB, folderID int64, title, contentType stri
 	return res.LastInsertId()
 }
 
+// claimMu serializes the two-step claim (UPDATE + re-SELECT). Without it,
+// concurrent workers can claim different rows but both re-select the oldest
+// processing row, leaving later claims as unowned orphans that never get
+// completed.
+var claimMu sync.Mutex
+
 // ClaimPendingKBDocument exclusively claims the oldest upload awaiting
 // extraction: the row moves pending → processing atomically, so concurrent
 // workers can never extract the same document twice — each claimed row has
 // exactly one owner. Returns ErrNotFound when the queue is empty.
-//
-// Atomicity comes from SQLite's single-writer semantics: the UPDATE picks
-// the oldest pending row; a concurrent worker's identical UPDATE either
-// waits (busy_timeout) and then affects 0 rows (the row is claimed) or
-// claims the next pending row. No RETURNING dependency (modernc driver
-// compatibility).
 func ClaimPendingKBDocument(db *sql.DB) (*KBDocument, error) {
+	claimMu.Lock()
+	defer claimMu.Unlock()
 	res, err := db.Exec(`UPDATE kb_documents SET status = 'processing'
 		WHERE id = (SELECT id FROM kb_documents WHERE status = 'pending' ORDER BY id LIMIT 1)`)
 	if err != nil {
