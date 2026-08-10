@@ -49,7 +49,12 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 	r.GET("/api/config/bootstrap", serverauth.BearerAuth(db), func(c *gin.Context) {
-		resp, err := Build(db)
+		u := serverauth.CurrentUser(c)
+		if u == nil {
+			serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+			return
+		}
+		resp, err := Build(db, u)
 		if err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "启动配置生成失败")
 			return
@@ -58,9 +63,15 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB) {
 	})
 }
 
-// Build assembles the bootstrap payload.
-func Build(db *sql.DB) (*Response, error) {
+// Build assembles the bootstrap payload for a specific user: models are
+// global, skill/mcp suggestions are filtered by the caller's grants
+// (admins see everything; everyone else only granted resources — 部门隔离).
+func Build(db *sql.DB, user *serverstore.User) (*Response, error) {
 	models, err := llmgateway.ListModels(db)
+	if err != nil {
+		return nil, err
+	}
+	groups, err := serverstore.UserGroups(db, user.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -68,11 +79,25 @@ func Build(db *sql.DB) (*Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	var allowedSkills map[string]bool
+	if !user.IsAdmin {
+		names, err := serverstore.AccessibleSkillNames(db, user.Username, groups)
+		if err != nil {
+			return nil, err
+		}
+		allowedSkills = make(map[string]bool, len(names))
+		for _, n := range names {
+			allowedSkills[n] = true
+		}
+	}
 	skillItems := make([]SkillItem, 0, len(skills))
 	for _, sk := range skills {
+		if !user.IsAdmin && !allowedSkills[sk.Name] {
+			continue
+		}
 		skillItems = append(skillItems, SkillItem{Name: sk.Name, Version: sk.Version, Description: sk.Description})
 	}
-	mcp, err := marketplace.SuggestedMCP(db)
+	mcp, err := marketplace.SuggestedMCPForUser(db, user.Username, groups, user.IsAdmin)
 	if err != nil {
 		return nil, err
 	}

@@ -56,6 +56,13 @@ func setup(t *testing.T) (*gin.Engine, *sql.DB) {
 	if _, err := serverstore.CreateUserWithPassword(db, "alice", "pw123456"); err != nil {
 		t.Fatal(err)
 	}
+	// 严格授权:alice 可见被授权的技能/MCP;未授权的不可见
+	if err := serverstore.GrantSkill(db, "ppt-gen", "alice", serverstore.GranteeUser); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.GrantMCP(db, 1, "alice", serverstore.GranteeUser); err != nil {
+		t.Fatal(err)
+	}
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -166,5 +173,33 @@ func TestHealthzNoAuth(t *testing.T) {
 	r.ServeHTTP(w, httptest.NewRequest("GET", "/healthz", nil))
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("healthz with closed db = %d, body=%s", w.Code, w.Body.String())
+	}
+}
+
+// 严格授权:未授权用户 bootstrap 的技能/MCP 建议清单为空(部门隔离)
+func TestBootstrapStrictDefault(t *testing.T) {
+	r, db := setup(t)
+	if _, err := serverstore.CreateUserWithPassword(db, "nobody", "pw123456"); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := serverstore.GetUserByUsername(db, "nobody")
+	token, _ := serverauth.IssueToken(db, u.ID)
+
+	w, out := getJSON(t, r, "/api/config/bootstrap", token)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	skills := out["skills"].([]any)
+	if len(skills) != 0 {
+		t.Fatalf("nobody skills = %v, want empty", skills)
+	}
+	mcp := out["mcp"].([]any)
+	if len(mcp) != 0 {
+		t.Fatalf("nobody mcp = %v, want empty", mcp)
+	}
+	// models remain visible to everyone
+	models := out["models"].([]any)
+	if len(models) != 1 {
+		t.Fatalf("models = %v, want the enabled model", models)
 	}
 }

@@ -60,8 +60,76 @@ func (a *API) RegisterRoutes(r *gin.Engine) {
 	g.GET("/mcp/:id/config", a.getMCPConfig)
 }
 
-func (a *API) listSkills(c *gin.Context) {
+// viewer resolves the calling user's permission view: admins are implicitly
+// allowed everywhere; everyone else sees only granted resources (strict
+// default). Returns ok=false when unauthenticated.
+func (a *API) viewer(c *gin.Context) (u *serverstore.User, groups []string, ok bool) {
+	u = serverauth.CurrentUser(c)
+	if u == nil {
+		return nil, nil, false
+	}
+	groups, err := serverstore.UserGroups(a.DB, u.ID)
+	if err != nil {
+		return nil, nil, false
+	}
+	return u, groups, true
+}
+
+// accessibleSkills returns enabled skills the caller may use (admin: all).
+func (a *API) accessibleSkills(u *serverstore.User, groups []string) ([]serverstore.Skill, error) {
 	list, err := serverstore.ListSkills(a.DB, true)
+	if err != nil {
+		return nil, err
+	}
+	if u.IsAdmin {
+		return list, nil
+	}
+	names, err := serverstore.AccessibleSkillNames(a.DB, u.Username, groups)
+	if err != nil {
+		return nil, err
+	}
+	allowed := make(map[string]bool, len(names))
+	for _, n := range names {
+		allowed[n] = true
+	}
+	out := make([]serverstore.Skill, 0, len(list))
+	for _, s := range list {
+		if allowed[s.Name] {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+// accessibleMCPs returns enabled MCP servers the caller may use (admin: all).
+func (a *API) accessibleMCPs(u *serverstore.User, groups []string) ([]serverstore.MCPServer, error) {
+	list, err := serverstore.ListMCPServers(a.DB, true)
+	if err != nil {
+		return nil, err
+	}
+	if u.IsAdmin {
+		return list, nil
+	}
+	set, err := serverstore.AccessibleMCPSet(a.DB, u.Username, groups)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]serverstore.MCPServer, 0, len(list))
+	for _, m := range list {
+		if set[m.ID] {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+func (a *API) listSkills(c *gin.Context) {
+	u, groups, ok := a.viewer(c)
+	if !ok {
+		serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+		return
+	}
+	list, err := a.accessibleSkills(u, groups)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "技能列表读取失败")
 		return
@@ -74,6 +142,11 @@ func (a *API) listSkills(c *gin.Context) {
 }
 
 func (a *API) getSkill(c *gin.Context) {
+	u, groups, ok := a.viewer(c)
+	if !ok {
+		serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+		return
+	}
 	s, err := serverstore.GetSkill(a.DB, c.Param("name"))
 	if errors.Is(err, serverstore.ErrNotFound) {
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
@@ -83,10 +156,32 @@ func (a *API) getSkill(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "技能读取失败")
 		return
 	}
+	if !u.IsAdmin {
+		names, err := serverstore.AccessibleSkillNames(a.DB, u.Username, groups)
+		if err != nil || !containsName(names, s.Name) {
+			// 未授权与不存在同响应:不泄露资源存在性
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+			return
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{"skill": skillJSON(*s)})
 }
 
+func containsName(names []string, want string) bool {
+	for _, n := range names {
+		if n == want {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *API) downloadArchive(c *gin.Context) {
+	u, groups, ok := a.viewer(c)
+	if !ok {
+		serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+		return
+	}
 	s, err := serverstore.GetSkill(a.DB, c.Param("name"))
 	if errors.Is(err, serverstore.ErrNotFound) {
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
@@ -100,6 +195,14 @@ func (a *API) downloadArchive(c *gin.Context) {
 		// C-10: 下架即不可下载,与不存在同响应(与 MCP 插件一致)
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能已下架")
 		return
+	}
+	if !u.IsAdmin {
+		names, err := serverstore.AccessibleSkillNames(a.DB, u.Username, groups)
+		if err != nil || !containsName(names, s.Name) {
+			// 未授权与不存在/下架同响应:不泄露资源存在性
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+			return
+		}
 	}
 	if !util.SafePathSegment(s.Name) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能名不合法")
@@ -171,7 +274,12 @@ func skillJSON(s serverstore.Skill) gin.H {
 }
 
 func (a *API) listMCP(c *gin.Context) {
-	list, err := serverstore.ListMCPServers(a.DB, true)
+	u, groups, ok := a.viewer(c)
+	if !ok {
+		serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+		return
+	}
+	list, err := a.accessibleMCPs(u, groups)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "插件列表读取失败")
 		return
@@ -207,6 +315,19 @@ func (a *API) getMCPConfig(c *gin.Context) {
 		// 建议安装制:下架即不可拉取,与不存在同响应
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "插件已下架")
 		return
+	}
+	// 严格授权:未授权用户与不存在同响应,不泄露存在性
+	if !u.IsAdmin {
+		groups, gerr := serverstore.UserGroups(a.DB, u.ID)
+		if gerr != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "插件读取失败")
+			return
+		}
+		set, serr := serverstore.AccessibleMCPSet(a.DB, u.Username, groups)
+		if serr != nil || !set[id] {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "插件不存在")
+			return
+		}
 	}
 	if !a.configTake(u.ID) {
 		serverauth.WriteError(c, http.StatusTooManyRequests, "RATE_LIMITED", "拉取过于频繁,请稍后再试")

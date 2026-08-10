@@ -30,6 +30,144 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g.PUT("/mcp/:id", func(c *gin.Context) { updateMCPAdmin(c, db) })
 	g.DELETE("/mcp/:id", func(c *gin.Context) { deleteMCPAdmin(c, db) })
 	g.GET("/mcp-downloads", func(c *gin.Context) { listDownloads(c, db) })
+	// 授权管理(严格默认:未授权不可见/不可下载)
+	g.GET("/skills/:name/grants", func(c *gin.Context) { listSkillGrants(c, db) })
+	g.PUT("/skills/:name/grant", func(c *gin.Context) { setSkillGrant(c, db, true) })
+	g.DELETE("/skills/:name/grant", func(c *gin.Context) { setSkillGrant(c, db, false) })
+	g.GET("/mcp/:id/grants", func(c *gin.Context) { listMCPGrants(c, db) })
+	g.PUT("/mcp/:id/grant", func(c *gin.Context) { setMCPGrant(c, db, true) })
+	g.DELETE("/mcp/:id/grant", func(c *gin.Context) { setMCPGrant(c, db, false) })
+}
+
+// grantReq carries a subject: {username} or {group} (webadmin sends @group).
+type grantReq struct {
+	Username string `json:"username"`
+	Group    string `json:"group"`
+}
+
+func adminUsername(c *gin.Context) string {
+	u := serverauth.AdminUser(c)
+	if u == nil {
+		return "admin"
+	}
+	return u.Username
+}
+
+func parseGrantSubject(req grantReq) (string, serverstore.GranteeType, bool) {
+	if req.Username != "" && req.Group == "" {
+		return req.Username, serverstore.GranteeUser, true
+	}
+	if req.Group != "" && req.Username == "" {
+		return req.Group, serverstore.GranteeGroup, true
+	}
+	return "", "", false
+}
+
+func grantsJSON(grants []serverstore.Grant) gin.H {
+	if grants == nil {
+		grants = []serverstore.Grant{}
+	}
+	return gin.H{"grants": grants}
+}
+
+func listSkillGrants(c *gin.Context, db *sql.DB) {
+	name := c.Param("name")
+	if _, err := serverstore.GetSkill(db, name); errors.Is(err, serverstore.ErrNotFound) {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+		return
+	}
+	grants, err := serverstore.ListSkillGrants(db, name)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	c.JSON(http.StatusOK, grantsJSON(grants))
+}
+
+func setSkillGrant(c *gin.Context, db *sql.DB, grant bool) {
+	name := c.Param("name")
+	if _, err := serverstore.GetSkill(db, name); errors.Is(err, serverstore.ErrNotFound) {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+		return
+	}
+	var req grantReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
+		return
+	}
+	subject, t, ok := parseGrantSubject(req)
+	if !ok {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "username 或 group 必填且只能二选一")
+		return
+	}
+	if grant {
+		if err := serverstore.GrantSkill(db, name, subject, t); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "授权对象不合法")
+			return
+		}
+		_ = serverstore.AuditLog(db, adminUsername(c), "skill_grant", name+" "+string(t)+":"+subject)
+	} else {
+		if err := serverstore.RevokeSkill(db, name, subject, t); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "授权对象不合法")
+			return
+		}
+		_ = serverstore.AuditLog(db, adminUsername(c), "skill_revoke", name+" "+string(t)+":"+subject)
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func listMCPGrants(c *gin.Context, db *sql.DB) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
+		return
+	}
+	if _, err := serverstore.GetMCPServer(db, id); errors.Is(err, serverstore.ErrNotFound) {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "插件不存在")
+		return
+	}
+	grants, err := serverstore.ListMCPGrants(db, id)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	c.JSON(http.StatusOK, grantsJSON(grants))
+}
+
+func setMCPGrant(c *gin.Context, db *sql.DB, grant bool) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
+		return
+	}
+	if _, err := serverstore.GetMCPServer(db, id); errors.Is(err, serverstore.ErrNotFound) {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "插件不存在")
+		return
+	}
+	var req grantReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
+		return
+	}
+	subject, t, ok := parseGrantSubject(req)
+	if !ok {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "username 或 group 必填且只能二选一")
+		return
+	}
+	if grant {
+		if err := serverstore.GrantMCP(db, id, subject, t); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "授权对象不合法")
+			return
+		}
+		_ = serverstore.AuditLog(db, adminUsername(c), "mcp_grant", "mcp#"+strconv.FormatInt(id, 10)+" "+string(t)+":"+subject)
+	} else {
+		if err := serverstore.RevokeMCP(db, id, subject, t); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "授权对象不合法")
+			return
+		}
+		_ = serverstore.AuditLog(db, adminUsername(c), "mcp_revoke", "mcp#"+strconv.FormatInt(id, 10)+" "+string(t)+":"+subject)
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 // invalidateSkillCache removes the cached repo clone and built archives for a

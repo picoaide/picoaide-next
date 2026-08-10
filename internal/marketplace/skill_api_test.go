@@ -42,6 +42,13 @@ func newTestRouter(t *testing.T) (*gin.Engine, *sql.DB, string, *API) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// API-behavior tests use the admin view (permission filtering is covered
+	// separately in perm_test.go)
+	u, _ := serverstore.GetUserByUsername(db, "alice")
+	u.IsAdmin = true
+	if err := serverstore.UpdateUser(db, u); err != nil {
+		t.Fatal(err)
+	}
 	token, err := serverauth.IssueToken(db, uid)
 	if err != nil {
 		t.Fatal(err)
@@ -205,6 +212,13 @@ func TestSkillCacheInvalidatedOnUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// admin view for API-behavior assertions (permission filtering is
+	// covered in perm_test.go)
+	au, _ := serverstore.GetUserByUsername(db, "alice")
+	au.IsAdmin = true
+	if err := serverstore.UpdateUser(db, au); err != nil {
+		t.Fatal(err)
+	}
 	token, err := serverauth.IssueToken(db, uid)
 	if err != nil {
 		t.Fatal(err)
@@ -222,6 +236,10 @@ func TestSkillCacheInvalidatedOnUpdate(t *testing.T) {
 	if _, err := serverstore.AddSkill(db, &serverstore.Skill{
 		Name: "demo", Version: "1.0.0", GitURL: src, GitRef: "main", Enabled: 1,
 	}); err != nil {
+		t.Fatal(err)
+	}
+	// grant alice so the admin-view archive download is unambiguous
+	if err := serverstore.GrantSkill(db, "demo", "alice", serverstore.GranteeUser); err != nil {
 		t.Fatal(err)
 	}
 	w := doReq(r, "GET", "/api/marketplace/skills/demo/archive", token)
