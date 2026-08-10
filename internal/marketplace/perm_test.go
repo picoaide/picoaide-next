@@ -227,6 +227,9 @@ func TestMarketplaceAdminSeesAll(t *testing.T) {
 // admin grant API: grant / list / revoke with audit trail
 func TestAdminGrantAPI(t *testing.T) {
 	r, db, hdr := marketAdminSetup(t)
+	if _, err := serverstore.CreateUserWithPassword(db, "alice", "pw123456"); err != nil {
+		t.Fatal(err)
+	}
 	// seed a skill + mcp
 	if _, err := serverstore.AddSkill(db, &serverstore.Skill{
 		Name: "data-extract", Version: "1.0.0", GitURL: "https://x/data-extract", Enabled: 1,
@@ -286,5 +289,9 @@ func TestAdminGrantAPI(t *testing.T) {
 	// grants on unknown resources → 404
 	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/nope/grant", `{"username":"alice"}`, hdr); w.Code != http.StatusNotFound {
 		t.Fatalf("unknown skill grant = %d, want 404", w.Code)
+	}
+	// grants to a non-existent user → 400 (typos must not silently persist)
+	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/data-extract/grant", `{"username":"no-such-user"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown user grant = %d, want 400", w.Code)
 	}
 }

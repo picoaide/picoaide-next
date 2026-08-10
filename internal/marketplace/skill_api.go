@@ -156,6 +156,11 @@ func (a *API) getSkill(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "技能读取失败")
 		return
 	}
+	if s.Enabled != 1 {
+		// 与 downloadArchive 一致:下架即不可读,不泄露元数据
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能已下架")
+		return
+	}
 	if !u.IsAdmin {
 		names, err := serverstore.AccessibleSkillNames(a.DB, u.Username, groups)
 		if err != nil || !containsName(names, s.Name) {

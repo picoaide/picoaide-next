@@ -3,6 +3,7 @@ package knowledge
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -340,6 +341,16 @@ func grantFolder(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
 		return
 	}
+	// 校验 folder 存在(防孤儿授权落库)
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM kb_folders WHERE id = ?", folderID).Scan(&n); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if n == 0 {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "文件夹不存在")
+		return
+	}
 	var req struct {
 		Username string `json:"username"`
 		Group    string `json:"group"`
@@ -349,15 +360,22 @@ func grantFolder(c *gin.Context, db *sql.DB) {
 		return
 	}
 	if req.Username != "" {
+		// 拼错的用户名不应静默落库:用户必须存在
+		if _, err := serverstore.GetUserByUsername(db, req.Username); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "用户不存在: "+req.Username)
+			return
+		}
 		if err := serverstore.GrantFolderUser(db, folderID, req.Username); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "授权失败")
 			return
 		}
+		_ = serverstore.AuditLog(db, adminUsername(c), "kb_grant", fmt.Sprintf("folder#%d user:%s", folderID, req.Username))
 	} else {
 		if err := serverstore.GrantFolderGroup(db, folderID, req.Group); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "授权失败")
 			return
 		}
+		_ = serverstore.AuditLog(db, adminUsername(c), "kb_grant", fmt.Sprintf("folder#%d group:%s", folderID, req.Group))
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

@@ -100,6 +100,13 @@ func setSkillGrant(c *gin.Context, db *sql.DB, grant bool) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "username 或 group 必填且只能二选一")
 		return
 	}
+	// 主体存在性校验:拼错的用户名不应静默落库永不生效
+	if t == serverstore.GranteeUser {
+		if _, err := serverstore.GetUserByUsername(db, subject); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "用户不存在: "+subject)
+			return
+		}
+	}
 	if grant {
 		if err := serverstore.GrantSkill(db, name, subject, t); err != nil {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "授权对象不合法")
@@ -153,6 +160,12 @@ func setMCPGrant(c *gin.Context, db *sql.DB, grant bool) {
 	if !ok {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "username 或 group 必填且只能二选一")
 		return
+	}
+	if t == serverstore.GranteeUser {
+		if _, err := serverstore.GetUserByUsername(db, subject); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "用户不存在: "+subject)
+			return
+		}
 	}
 	if grant {
 		if err := serverstore.GrantMCP(db, id, subject, t); err != nil {
@@ -228,6 +241,7 @@ func createSkillAdmin(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 		return
 	}
+	_ = serverstore.AuditLog(db, adminUsername(c), "skill_create", s.Name+" v"+s.Version)
 	c.JSON(http.StatusOK, gin.H{"skill": skillJSON(*s)})
 }
 
@@ -274,6 +288,7 @@ func updateSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 	if sourceChanged {
 		invalidateSkillCache(cacheDir, s.Name)
 	}
+	_ = serverstore.AuditLog(db, adminUsername(c), "skill_update", s.Name+" v"+s.Version)
 	c.JSON(http.StatusOK, gin.H{"skill": skillJSON(*s)})
 }
 
@@ -349,6 +364,7 @@ func createMCPAdmin(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 		return
 	}
+	_ = serverstore.AuditLog(db, adminUsername(c), "mcp_create", "mcp#"+strconv.FormatInt(m.ID,10)+" "+m.Name)
 	c.JSON(http.StatusOK, gin.H{"mcp": mcpJSON(*m, maskValues(m.Env), maskValues(m.Headers))})
 }
 
@@ -408,6 +424,7 @@ func updateMCPAdmin(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 		return
 	}
+	_ = serverstore.AuditLog(db, adminUsername(c), "mcp_update", "mcp#"+strconv.FormatInt(m.ID,10)+" "+m.Name)
 	c.JSON(http.StatusOK, gin.H{"mcp": mcpJSON(*m, maskValues(m.Env), maskValues(m.Headers))})
 }
 
@@ -426,6 +443,7 @@ func deleteMCPAdmin(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "下架失败")
 		return
 	}
+	_ = serverstore.AuditLog(db, adminUsername(c), "mcp_disable", "mcp#"+strconv.FormatInt(id,10))
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 

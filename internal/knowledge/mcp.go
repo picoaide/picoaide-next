@@ -235,9 +235,8 @@ func toolKBUpload(db *sql.DB, id json.RawMessage, args json.RawMessage, accessib
 	if a.Title == "" || a.Content == "" {
 		return textResponse(id, "title and content are required", true)
 	}
-	// folder 0 is the global root and is always in the accessible set, so a
-	// global upload is allowed for every authenticated user; any other folder
-	// must be explicitly granted.
+	// folder 0(根目录)不再隐式可写:与可读性一致,必须显式授权后才可
+	// 上传(严格授权制);无授权返回拒绝
 	if !accessible[a.FolderID] {
 		return textResponse(id, fmt.Sprintf("no permission for folder %d", a.FolderID), true)
 	}
@@ -349,7 +348,7 @@ func init() {
 		},
 		{
 			"name":        "kb_upload",
-			"description": "Upload a text document into an authorized folder (folder 0 is the global root)",
+			"description": "Upload a text document into a folder the caller is authorized for (root requires explicit grant too)",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{

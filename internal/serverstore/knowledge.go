@@ -222,9 +222,11 @@ func DeleteKBDocument(db *sql.DB, id int64) error {
 	return nil
 }
 
-// GrantFolderUser grants folder access to a username (idempotent).
+// GrantFolderUser grants folder access to a username (idempotent). An '@'
+// group prefix (webadmin convention) is stripped for consistency with the
+// marketplace grant API.
 func GrantFolderUser(db *sql.DB, folderID int64, username string) error {
-	_, err := db.Exec("INSERT OR IGNORE INTO kb_folder_users (folder_id, username) VALUES (?, ?)", folderID, username)
+	_, err := db.Exec("INSERT OR IGNORE INTO kb_folder_users (folder_id, username) VALUES (?, ?)", folderID, strings.TrimPrefix(username, "@"))
 	return err
 }
 

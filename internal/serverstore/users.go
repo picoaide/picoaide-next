@@ -229,6 +229,13 @@ func DeleteUser(db *sql.DB, id int64) error {
 	if _, err := tx.Exec("DELETE FROM kb_folder_users WHERE username = ?", username); err != nil {
 		return err
 	}
+	// 同名用户重建不得继承旧授权(权限体系:用户级授权随用户删除级联)
+	if _, err := tx.Exec("DELETE FROM skill_grants WHERE grantee_type = 'user' AND grantee = ?", username); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("DELETE FROM mcp_grants WHERE grantee_type = 'user' AND grantee = ?", username); err != nil {
+		return err
+	}
 	res, err := tx.Exec("DELETE FROM users WHERE id = ?", id)
 	if err != nil {
 		return err

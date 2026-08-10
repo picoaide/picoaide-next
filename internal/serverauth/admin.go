@@ -285,6 +285,7 @@ func (a *AdminAPI) createUser(c *gin.Context) {
 			return
 		}
 	}
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_create", u.Username)
 	c.JSON(http.StatusOK, gin.H{"user": userJSON(u)})
 }
 
@@ -315,6 +316,8 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 		return
 	}
 	me := currentAdmin(c)
+	wasAdmin := u.IsAdmin
+	wasStatus := u.Status
 	// guard: cannot disable/remove admin rights of yourself or the last admin
 	if req.IsAdmin != nil && !*req.IsAdmin && u.IsAdmin && me != nil && me.ID == u.ID {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "不能取消自己的管理员权限")
@@ -353,6 +356,18 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 		return
 	}
+	// 权限敏感变更:改密 / 取消管理员 / 禁用 → 吊销全部 API token,
+	// 旧凭证立即失效(防已登录客户端继续以旧权限访问)
+	demote := (req.Password != nil && *req.Password != "") || (req.IsAdmin != nil && !*req.IsAdmin && wasAdmin) ||
+		(req.Status != nil && *req.Status != 1 && wasStatus == 1)
+	if demote {
+		if err := serverstore.RevokeAllUserTokens(a.DB, id); err != nil {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "令牌吊销失败")
+			return
+		}
+		_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_tokens_revoked", u.Username)
+	}
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_update", u.Username)
 	c.JSON(http.StatusOK, gin.H{"user": userJSON(u)})
 }
 
@@ -386,6 +401,7 @@ func (a *AdminAPI) deleteUser(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
 		return
 	}
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_delete", u.Username)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 

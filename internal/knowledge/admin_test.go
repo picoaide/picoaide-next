@@ -121,10 +121,21 @@ func TestAdminKB(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("delete: %d", w.Code)
 	}
-	// audit log written
+	// audit log written (grant/upload/delete all audited)
 	logs, err := serverstore.ListAuditLogs(db, 10)
-	if err != nil || len(logs) != 2 {
+	if err != nil || len(logs) != 3 {
 		t.Fatalf("audit logs = %v %v", logs, err)
+	}
+	for _, want := range []string{"kb_grant", "kb_upload", "kb_delete"} {
+		found := false
+		for _, l := range logs {
+			if l.Action == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("audit missing %s: %v", want, logs)
+		}
 	}
 	// non-admin → 401 on login, and direct kb call without session → 401
 	if w, _ := kbReq(t, r, "GET", "/api/admin/kb/folders", "", nil); w.Code != http.StatusUnauthorized {
