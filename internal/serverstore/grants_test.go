@@ -162,3 +162,35 @@ func TestGetAccessibleFolderIDsNoImplicitRoot(t *testing.T) {
 		t.Fatalf("nobody sees: %v, want empty", ids)
 	}
 }
+
+// 组名大小写归一:授权 "Finance",用户组 "finance" 必须解析到
+func TestGrantGroupCaseInsensitive(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := GrantSkill(db, "data-extract", "Finance", GranteeGroup); err != nil {
+		t.Fatal(err)
+	}
+	names, err := AccessibleSkillNames(db, "alice", []string{"finance"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 || names[0] != "data-extract" {
+		t.Fatalf("case-insensitive group grant failed: %v", names)
+	}
+	// GetOrCreateGroup 不新建大小写变体
+	gid, err := GetOrCreateGroup(db, "FINANCE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM groups WHERE name COLLATE NOCASE = 'finance'").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("groups rows = %d, want 1 (no casing variant)", count)
+	}
+	_ = gid
+}

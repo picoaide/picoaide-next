@@ -12,21 +12,27 @@ type queryer interface {
 }
 
 // GetOrCreateGroup returns a group id by name, creating it if missing.
+// Lookup is case-insensitive (COLLATE NOCASE): LDAP cn "Finance" and a
+// hand-typed "finance" are the same group, so grants never silently fail
+// to resolve. The stored name keeps its first-seen casing.
 func GetOrCreateGroup(db queryer, name string) (int64, error) {
 	var id int64
-	err := db.QueryRow("SELECT id FROM groups WHERE name = ?", name).Scan(&id)
-	if err == sql.ErrNoRows {
-		res, err := db.Exec("INSERT INTO groups (name) VALUES (?)", name)
-		if err != nil {
-			// concurrent insert; re-read
-			if err2 := db.QueryRow("SELECT id FROM groups WHERE name = ?", name).Scan(&id); err2 == nil {
-				return id, nil
-			}
-			return 0, err
-		}
-		return res.LastInsertId()
+	err := db.QueryRow("SELECT id FROM groups WHERE name = ? COLLATE NOCASE", name).Scan(&id)
+	if err == nil {
+		return id, nil
 	}
-	return id, err
+	if err != sql.ErrNoRows {
+		return 0, err
+	}
+	res, err := db.Exec("INSERT INTO groups (name) VALUES (?)", name)
+	if err != nil {
+		// concurrent insert or a historical casing variant; re-read nocase
+		if err2 := db.QueryRow("SELECT id FROM groups WHERE name = ? COLLATE NOCASE", name).Scan(&id); err2 == nil {
+			return id, nil
+		}
+		return 0, err
+	}
+	return res.LastInsertId()
 }
 
 // UserGroups returns the group names for a user.

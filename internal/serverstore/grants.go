@@ -78,12 +78,13 @@ func AccessibleSkillNames(db *sql.DB, username string, groups []string) ([]strin
 	sb.WriteString("SELECT DISTINCT skill_name FROM skill_grants WHERE (grantee_type = 'user' AND grantee = ?)")
 	args := []any{username}
 	if len(groups) > 0 {
-		sb.WriteString(" OR (grantee_type = 'group' AND grantee IN (")
+		// COLLATE NOCASE: LDAP 组名与手输组名大小写差异不得导致授权静默失效
+		sb.WriteString(" OR (grantee_type = 'group' AND (")
 		for i, g := range groups {
 			if i > 0 {
-				sb.WriteString(",")
+				sb.WriteString(" OR ")
 			}
-			sb.WriteString("?")
+			sb.WriteString("grantee = ? COLLATE NOCASE")
 			args = append(args, g)
 		}
 		sb.WriteString("))")
@@ -151,12 +152,12 @@ func AccessibleMCPSet(db *sql.DB, username string, groups []string) (map[int64]b
 	sb.WriteString("SELECT DISTINCT mcp_id FROM mcp_grants WHERE (grantee_type = 'user' AND grantee = ?)")
 	args := []any{username}
 	if len(groups) > 0 {
-		sb.WriteString(" OR (grantee_type = 'group' AND grantee IN (")
+		sb.WriteString(" OR (grantee_type = 'group' AND (")
 		for i, g := range groups {
 			if i > 0 {
-				sb.WriteString(",")
+				sb.WriteString(" OR ")
 			}
-			sb.WriteString("?")
+			sb.WriteString("grantee = ? COLLATE NOCASE")
 			args = append(args, g)
 		}
 		sb.WriteString("))")
