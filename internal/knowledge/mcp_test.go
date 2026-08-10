@@ -203,7 +203,7 @@ func TestMCPKBList(t *testing.T) {
 
 func TestMCPKBUpload(t *testing.T) {
 	r, db, token, _ := mcpSetup(t)
-	_, bobFolder := seedDocs(t, db)
+	aliceFolder, bobFolder := seedDocs(t, db)
 
 	// unauthorized folder -> isError
 	reply := callTool(t, r, token, "kb_upload", `{"title":"x","content":"y","folder_id":`+itoa(bobFolder)+`}`)
@@ -211,10 +211,16 @@ func TestMCPKBUpload(t *testing.T) {
 		t.Fatalf("kb_upload unauthorized should be isError: %+v", reply.Result)
 	}
 
-	// folder 0 is the global root, always in the accessible set -> allowed
-	reply = callTool(t, r, token, "kb_upload", `{"title":"新知识文档","content":"这是新知识文档的内容","folder_id":0}`)
+	// folder 0 is no longer implicitly writable (strict default)
+	reply = callTool(t, r, token, "kb_upload", `{"title":"x","content":"y","folder_id":0}`)
+	if reply.Result == nil || !reply.Result.IsError {
+		t.Fatalf("kb_upload to global root should be isError: %+v", reply.Result)
+	}
+
+	// an authorized folder (alice granted in seedDocs) allows upload
+	reply = callTool(t, r, token, "kb_upload", `{"title":"新知识文档","content":"这是新知识文档的内容","folder_id":`+itoa(aliceFolder)+`}`)
 	if reply.Result == nil || reply.Result.IsError {
-		t.Fatalf("kb_upload to global folder: %+v", reply.Result)
+		t.Fatalf("kb_upload to granted folder: %+v", reply.Result)
 	}
 
 	// upload lands in search results

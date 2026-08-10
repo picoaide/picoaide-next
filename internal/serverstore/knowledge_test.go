@@ -74,10 +74,13 @@ func TestKBPermissions(t *testing.T) {
 	for _, id := range ids {
 		acc[id] = true
 	}
-	for _, want := range []int64{0, f1, f2} {
+	for _, want := range []int64{f1, f2} {
 		if !acc[want] {
 			t.Errorf("folder %d not accessible", want)
 		}
+	}
+	if acc[0] {
+		t.Errorf("folder 0 implicitly accessible (strict default)")
 	}
 	if acc[f3] {
 		t.Errorf("folder %d should not be accessible", f3)
@@ -92,14 +95,17 @@ func TestKBPermissions(t *testing.T) {
 	if acc[f2] {
 		t.Errorf("folder %d accessible without group", f2)
 	}
-	if !acc[f1] || !acc[0] {
-		t.Errorf("direct grant or global folder lost")
+	if !acc[f1] {
+		t.Errorf("direct grant lost")
+	}
+	if acc[0] {
+		t.Errorf("folder 0 implicitly accessible (strict default)")
 	}
 
-	// different user without grants only sees the global folder
+	// different user without grants sees nothing (no implicit global root)
 	ids, _ = GetAccessibleFolderIDs(db, "bob", nil)
-	if len(ids) != 1 || ids[0] != 0 {
-		t.Fatalf("bob accessible = %v, want [0]", ids)
+	if len(ids) != 0 {
+		t.Fatalf("bob accessible = %v, want empty", ids)
 	}
 }
 

@@ -301,10 +301,13 @@ func UpdateKBDocument(db *sql.DB, id int64, title, content, contentType string) 
 }
 
 // GetAccessibleFolderIDs returns folder ids the user can access: direct user
-// grants, grants through the given groups, and always folder 0 (global root).
+// grants and grants through the given groups. Strict default: folder 0
+// (global root) is NOT implicitly accessible — every folder, root included,
+// must be explicitly granted (permission round: 部门隔离). Admins bypass
+// this via the admin search/upload APIs, not through this helper.
 func GetAccessibleFolderIDs(db *sql.DB, username string, groups []string) ([]int64, error) {
 	var sb strings.Builder
-	sb.WriteString("SELECT folder_id FROM kb_folder_users WHERE username = ? UNION SELECT 0")
+	sb.WriteString("SELECT folder_id FROM kb_folder_users WHERE username = ?")
 	args := []any{username}
 	if len(groups) > 0 {
 		sb.WriteString(" UNION SELECT folder_id FROM kb_folder_groups WHERE group_id IN (SELECT id FROM groups WHERE name IN (")

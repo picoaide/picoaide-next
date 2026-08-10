@@ -97,7 +97,7 @@ func TestAdminKB(t *testing.T) {
 		t.Fatalf("grant: %d", w.Code)
 	}
 	accessible, err := serverstore.GetAccessibleFolderIDs(db, "alice", nil)
-	if err != nil || len(accessible) != 2 { // folder 0 global + granted folder
+	if err != nil || len(accessible) != 1 || accessible[0] != folderID { // only the granted folder (strict default)
 		t.Fatalf("accessible = %v %v", accessible, err)
 	}
 	// upload doc
