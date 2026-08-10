@@ -1,6 +1,9 @@
 package serverstore
 
-import "database/sql"
+import (
+	"database/sql"
+	"strings"
+)
 
 // queryer matches both *sql.DB and *sql.Tx.
 type queryer interface {
@@ -42,6 +45,37 @@ func UserGroups(db *sql.DB, userID int64) ([]string, error) {
 			return nil, err
 		}
 		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// UserGroupsBatch returns user_id → group names for a set of users in one
+// query (admin user listing; avoids N+1).
+func UserGroupsBatch(db *sql.DB, users []User) (map[int64][]string, error) {
+	out := make(map[int64][]string, len(users))
+	if len(users) == 0 {
+		return out, nil
+	}
+	ids := make([]any, len(users))
+	for i, u := range users {
+		ids[i] = u.ID
+		out[u.ID] = nil
+	}
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	rows, err := db.Query(`SELECT ug.user_id, g.name FROM user_groups ug
+		JOIN groups g ON g.id = ug.group_id
+		WHERE ug.user_id IN (`+ph+`) ORDER BY g.name`, ids...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var uid int64
+		var name string
+		if err := rows.Scan(&uid, &name); err != nil {
+			return nil, err
+		}
+		out[uid] = append(out[uid], name)
 	}
 	return out, rows.Err()
 }

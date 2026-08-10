@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -40,6 +41,8 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	g.POST("/users", AdminAuth(db), a.createUser)
 	g.PUT("/users/:id", AdminAuth(db), a.updateUser)
 	g.DELETE("/users/:id", AdminAuth(db), a.deleteUser)
+	g.GET("/users/:id/groups", AdminAuth(db), a.getUserGroups)
+	g.PUT("/users/:id/groups", AdminAuth(db), a.setUserGroups)
 	g.GET("/users/:id/tokens", AdminAuth(db), a.listUserTokens)
 	g.POST("/tokens/:id/revoke", AdminAuth(db), a.revokeToken)
 	g.GET("/usage", AdminAuth(db), a.usage)
@@ -157,11 +160,88 @@ func (a *AdminAPI) listUsers(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
+	// 批量附组(部门归属):单条 SQL 避免 N+1
+	groupsByUser, err := serverstore.UserGroupsBatch(a.DB, users)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
 	out := make([]gin.H, 0, len(users))
 	for _, u := range users {
-		out = append(out, userJSON(&u))
+		uj := userJSON(&u)
+		uj["groups"] = groupsByUser[u.ID]
+		if uj["groups"] == nil {
+			uj["groups"] = []string{}
+		}
+		out = append(out, uj)
 	}
 	c.JSON(http.StatusOK, gin.H{"users": out, "total": total, "page": page, "size": size})
+}
+
+// getUserGroups returns the group names a user belongs to.
+func (a *AdminAPI) getUserGroups(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "非法用户 ID")
+		return
+	}
+	if _, err := serverstore.GetUserByID(a.DB, id); errors.Is(err, serverstore.ErrNotFound) {
+		writeError(c, http.StatusNotFound, "NOT_FOUND", "用户不存在")
+		return
+	} else if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	groups, err := serverstore.UserGroups(a.DB, id)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if groups == nil {
+		groups = []string{}
+	}
+	c.JSON(http.StatusOK, gin.H{"groups": groups})
+}
+
+// setUserGroups replaces a user's group membership (部门归属)——本地账号
+// 进入部门组的唯一入口(LDAP 登录自动同步,不受此接口影响)。
+func (a *AdminAPI) setUserGroups(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "非法用户 ID")
+		return
+	}
+	u, err := serverstore.GetUserByID(a.DB, id)
+	if errors.Is(err, serverstore.ErrNotFound) {
+		writeError(c, http.StatusNotFound, "NOT_FOUND", "用户不存在")
+		return
+	} else if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	var req struct {
+		Groups []string `json:"groups"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+		return
+	}
+	clean := make([]string, 0, len(req.Groups))
+	for _, g := range req.Groups {
+		g = strings.TrimSpace(g)
+		if g == "" || strings.ContainsAny(g, "/\\\t\n") {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "组名不合法: "+g)
+			return
+		}
+		clean = append(clean, g)
+	}
+	if err := serverstore.SyncUserGroups(a.DB, id, clean); err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+		return
+	}
+	// 权限变更必须审计(误授权恢复靠审计)
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_groups", u.Username+" "+strings.Join(clean, ","))
+	c.JSON(http.StatusOK, gin.H{"ok": true, "groups": clean})
 }
 
 func (a *AdminAPI) createUser(c *gin.Context) {
@@ -387,4 +467,11 @@ func currentAdmin(c *gin.Context) *serverstore.User {
 	v, _ := c.Get("admin_user")
 	u, _ := v.(*serverstore.User)
 	return u
+}
+
+func currentAdminUsername(c *gin.Context) string {
+	if u := currentAdmin(c); u != nil {
+		return u.Username
+	}
+	return "admin"
 }

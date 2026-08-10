@@ -2,8 +2,10 @@ package serverauth
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -442,4 +444,89 @@ func recordUsage(t *testing.T, db *sql.DB, userID int64, model string, pt, ct in
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// 用户组管理:部门归属的闭环入口(本地账号进组)
+func TestAdminUserGroupsAPI(t *testing.T) {
+	db := mustDB(t)
+	uid, err := createUserDB(db, "boss", "pw123456", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, csrf, err := CreateAdminSession(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdr := map[string]string{"Cookie": "picoaide_session=" + sess.ID, "X-CSRF-Token": csrf}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	RegisterAdminRoutes(r, db)
+
+	// 创建普通用户
+	var out map[string]any
+	w, out := doAdmin(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"pw12345678"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create user: %d %s", w.Code, w.Body.String())
+	}
+	aliceID := int64(out["user"].(map[string]any)["id"].(float64))
+
+	// 设置部门组
+	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d/groups", aliceID), `{"groups":["研发部","安全组"]}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("set groups: %d %s", w.Code, w.Body.String())
+	}
+	// 读取
+	w, out = doAdmin(t, r, "GET", fmt.Sprintf("/api/admin/users/%d/groups", aliceID), "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get groups: %d %s", w.Code, w.Body.String())
+	}
+	groups := out["groups"].([]any)
+	if len(groups) != 2 {
+		t.Fatalf("groups = %v", groups)
+	}
+	// 用户列表附带组
+	w, out = doAdmin(t, r, "GET", "/api/admin/users", "", hdr)
+	users := out["users"].([]any)
+	found := false
+	for _, u := range users {
+		um := u.(map[string]any)
+		if um["username"] == "alice" {
+			if gs := um["groups"].([]any); len(gs) != 2 {
+				t.Fatalf("list users groups = %v", gs)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("alice missing from user list")
+	}
+	// 非法组名拒绝
+	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d/groups", aliceID), `{"groups":["a/b"]}`, hdr)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("bad group name = %d, want 400", w.Code)
+	}
+	// 不存在用户 → 404
+	w, _ = doAdmin(t, r, "PUT", "/api/admin/users/99999/groups", `{"groups":["x"]}`, hdr)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("unknown user = %d, want 404", w.Code)
+	}
+	// 审计记录
+	logs, err := serverstore.ListAuditLogs(db, 5)
+	if err != nil || len(logs) == 0 || logs[0].Action != "user_groups" {
+		t.Fatalf("audit = %+v %v", logs, err)
+	}
+}
+
+func doAdmin(t *testing.T, r http.Handler, method, path, body string, hdr map[string]string) (*httptest.ResponseRecorder, map[string]any) {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	var out map[string]any
+	json.Unmarshal(w.Body.Bytes(), &out)
+	return w, out
 }
