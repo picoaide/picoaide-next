@@ -94,43 +94,43 @@ func CreatePendingKBDocument(db *sql.DB, folderID int64, title, contentType stri
 	return res.LastInsertId()
 }
 
-// claimMu serializes the two-step claim (UPDATE + re-SELECT). Without it,
-// concurrent workers can claim different rows but both re-select the oldest
-// processing row, leaving later claims as unowned orphans that never get
-// completed.
+// claimMu serializes claims: SELECT + UPDATE + return must be one critical
+// section so each claimed row has exactly one owner (see ClaimPendingKBDocument).
 var claimMu sync.Mutex
 
 // ClaimPendingKBDocument exclusively claims the oldest upload awaiting
 // extraction: the row moves pending → processing atomically, so concurrent
 // workers can never extract the same document twice — each claimed row has
 // exactly one owner. Returns ErrNotFound when the queue is empty.
+//
+// The whole claim runs under claimMu: SELECT the oldest pending row, then
+// UPDATE it to processing, then return that exact row. Re-selecting the
+// "oldest processing" row after the UPDATE would race — another worker may
+// have claimed a different row whose processing timestamp is older, and
+// this worker would steal it, orphaning its own claim.
 func ClaimPendingKBDocument(db *sql.DB) (*KBDocument, error) {
 	claimMu.Lock()
 	defer claimMu.Unlock()
-	res, err := db.Exec(`UPDATE kb_documents SET status = 'processing'
-		WHERE id = (SELECT id FROM kb_documents WHERE status = 'pending' ORDER BY id LIMIT 1)`)
-	if err != nil {
-		return nil, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return nil, err
-	}
-	if n == 0 {
-		return nil, ErrNotFound
-	}
 	row := db.QueryRow(`SELECT id, folder_id, title, content, content_type, size, source, created_by, created_at, status, error
-		FROM kb_documents WHERE status = 'processing' ORDER BY id LIMIT 1`)
+		FROM kb_documents WHERE status = 'pending' ORDER BY id LIMIT 1`)
 	var d KBDocument
 	var created string
-	err = row.Scan(&d.ID, &d.FolderID, &d.Title, &d.Content, &d.ContentType, &d.Size, &d.Source, &d.CreatedBy, &created, &d.Status, &d.Error)
+	err := row.Scan(&d.ID, &d.FolderID, &d.Title, &d.Content, &d.ContentType, &d.Size, &d.Source, &d.CreatedBy, &created, &d.Status, &d.Error)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
+	res, err := db.Exec("UPDATE kb_documents SET status = 'processing' WHERE id = ?", d.ID)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrNotFound // defensive: row state changed outside the claim path
+	}
 	d.CreatedAt = parseSQLTime(created)
+	d.Status = "processing"
 	return &d, nil
 }
 
