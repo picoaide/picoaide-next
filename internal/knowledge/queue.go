@@ -62,9 +62,16 @@ func processNextPending(db *sql.DB, uploadsDir string) bool {
 		}
 		return true
 	}
+	// complete 失败:行保持 processing 且文件绝不能删(否则永久 pending)。
+	// 释放 claim 回队列 + 退避重试;事务(trigram 索引写放大)偶发 busy。
 	if uerr := serverstore.CompleteKBDocumentWithChunks(db, doc.ID, content, "", ChunkText(content)); uerr != nil {
-		log.Printf("kb queue: doc %d complete: %v", doc.ID, uerr)
+		log.Printf("kb queue: doc %d complete: %v (file kept, retry)", doc.ID, uerr)
+		if rerr := serverstore.ReleaseClaim(db, doc.ID); rerr != nil {
+			log.Printf("kb queue: doc %d release claim: %v", doc.ID, rerr)
+		}
+		time.Sleep(500 * time.Millisecond)
+		return true
 	}
-	os.Remove(path) // success: extracted text is in the DB
+	os.Remove(path) // success only: extracted text is in the DB, raw file gone
 	return true
 }
