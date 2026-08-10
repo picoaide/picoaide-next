@@ -364,7 +364,7 @@ func createMCPAdmin(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 		return
 	}
-	_ = serverstore.AuditLog(db, adminUsername(c), "mcp_create", "mcp#"+strconv.FormatInt(m.ID,10)+" "+m.Name)
+	_ = serverstore.AuditLog(db, adminUsername(c), "mcp_create", "mcp#"+strconv.FormatInt(m.ID, 10)+" "+m.Name)
 	c.JSON(http.StatusOK, gin.H{"mcp": mcpJSON(*m, maskValues(m.Env), maskValues(m.Headers))})
 }
 
@@ -424,7 +424,7 @@ func updateMCPAdmin(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 		return
 	}
-	_ = serverstore.AuditLog(db, adminUsername(c), "mcp_update", "mcp#"+strconv.FormatInt(m.ID,10)+" "+m.Name)
+	_ = serverstore.AuditLog(db, adminUsername(c), "mcp_update", "mcp#"+strconv.FormatInt(m.ID, 10)+" "+m.Name)
 	c.JSON(http.StatusOK, gin.H{"mcp": mcpJSON(*m, maskValues(m.Env), maskValues(m.Headers))})
 }
 
@@ -443,7 +443,7 @@ func deleteMCPAdmin(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "下架失败")
 		return
 	}
-	_ = serverstore.AuditLog(db, adminUsername(c), "mcp_disable", "mcp#"+strconv.FormatInt(id,10))
+	_ = serverstore.AuditLog(db, adminUsername(c), "mcp_disable", "mcp#"+strconv.FormatInt(id, 10))
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
