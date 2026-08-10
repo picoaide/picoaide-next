@@ -14,7 +14,7 @@
 4. **高危操作必须人确认**——删除/截屏/剪贴板读/命令/浏览器操作/kb_upload 等 → 引擎层审批门控(60s 超时拒绝),不依赖任何 SDK 的审批 API。
 5. **不可信代码必须隔离**——Agent 生成脚本/技能脚本在**本地受限会话**(`@ai-sdk/sandbox-just-bash`)执行,无用户文件权限、数据不出本机;不用 Vercel 云端沙盒。
 6. **消息即状态**——不做状态机级 durable;任务中断 = `status` 标记 + 从最后一条 user 消息重跑(截断重放),零额外运行时。
-7. **商城是建议安装制,不是授权制**——管理员上架/配置,客户端展示建议清单,员工自装;无 grants 表,凭证拉取用限流+审计兜底。
+7. **商城与知识库均为管理员授权制(严格默认)**——资源(知识库文件夹/技能/MCP)上架/创建后**未授权用户一律不可见不可用**(404 不泄露存在性);授权对象 = 用户或部门组(@组名约定,组名大小写不敏感);admin 恒全量不落表;授权变更必审计(kb_audit_logs);本地账号经 `PUT /api/admin/users/:id/groups` 进部门组,LDAP 登录每次全量同步组(空组即回收);改密/降权/禁用自动吊销全部 API token。
 8. **浏览器操作 = 员工自己的浏览器**——客户端主进程固定监听 `127.0.0.1:54321`,Chrome/Edge 插件默认直连即装即用;纯本地 WebSocket 通道,不经服务端、离线可用。
 9. **UI 不自写、函数不复刻**——见 §3 工程原则。
 
@@ -76,8 +76,8 @@ data/                  # 服务端运行时数据(0700,gitignore)
 - **REST 错误**:`{"error":{"code":"ERR_CODE","message":"..."}}`;`AUTH_REQUIRED`/`AUTH_FAILED`/`FORBIDDEN`(管理端)/`NOT_FOUND`/`VALIDATION`/`UPSTREAM`/`RATE_LIMITED`/`INTERNAL`
 - **bootstrap**:`{default_model, models, skills, mcp, web}`(1.16b 服务端 ↔ 2.4 客户端 `BootstrapConfig` 严格对齐)
 - **CDP 桥**:固定 `127.0.0.1:54321`,JSON-RPC:`browser.tabInfo`/`getContent`/`click`/`type`/`navigate`/`scroll`/`executeScript`
-- **DB**:客户端 5 表(conversations 含 status+project_id/messages 含 tool_call_id+tool_name+is_error/artifacts/settings/projects 迁移 0010);服务端 20+ 表(迁移 0001-0015,0007 废弃;0013 trigram FTS、0014 kb_chunks、0015 kb_chunk_embeddings)
-- **知识库检索契约**:块级检索(kb_chunks 800 rune+标题路径);`kb_search` 返回 doc/chunk id、标题路径、snippet 与 score,混合检索 = trigram/unicode61 词法 + 向量余弦(网关 /v1/embeddings,模型名存 settings `kb.embedding_model`)→ RRF(k=60)融合,无向量时纯词法降级;`kb_read(doc_id, chunk_ids?)` 支持分块定点读取;长词(≥3 rune)走 trigram、短词走 unicode61 前缀 + LIKE(含 d.title)
+- **DB**:客户端 5 表(conversations 含 status+project_id/messages 含 tool_call_id+tool_name+is_error/artifacts/settings/projects 迁移 0010);服务端 20+ 表(迁移 0001-0016,0007 废弃;0013 trigram FTS、0014 kb_chunks、0015 kb_chunk_embeddings、0016 skill_grants/mcp_grants)
+- **知识库检索契约**:块级检索(kb_chunks 800 rune+标题路径);`kb_search` 返回 doc/chunk id、标题路径、snippet 与 score,混合检索 = trigram/unicode61 词法 + 向量余弦(网关 /v1/embeddings,模型名存 settings `kb.embedding_model`)→ RRF(k=60)融合,无向量时纯词法降级;`kb_read(doc_id, chunk_ids?)` 支持分块定点读取;长词(≥3 rune)走 trigram、短词走 unicode61 前缀 + LIKE(含 d.title);所有 folder(含根目录)须显式授权(`GetAccessibleFolderIDs` 严格模式)
 - **项目体系**:项目 = 命名工作目录;项目内会话 workspace = `<项目目录>/<会话id>/`(chat:new 自动 mkdir),引擎工具 cwd/allowedDirs 以会话 workspace 为基准,无项目会话回退全局工作目录;删除项目仅解绑会话(移入未分类),不删文件
 - **自动标题**:首轮对话 done 后后台调网关默认模型生成 ≤20 字标题(15s 超时),失败兜底截取首条用户消息 20 字;仅 title 为空时触发
 - **Portable(仅 Windows/Linux)**:exe 同目录存在 `portable.txt` → 数据目录 = exe 同目录/data(不可写回退系统目录);macOS 一律走 `~/Library/Application Support/picoaide`(dmg 拖入 Applications 即用,标准 HIG:原生菜单 Cmd+Q/+/N、深色模式跟随系统)
