@@ -318,7 +318,7 @@ export default function Knowledge() {
         <Card>
           <CardHeader>
             <CardTitle>文件夹</CardTitle>
-            <CardDescription>根目录对所有用户可见;授权范围仅作用于已授权用户</CardDescription>
+            <CardDescription>授权制:所有文件夹(含根目录)须显式授权用户/部门组后才可见;公共文档请建「公共」文件夹并授权全员组</CardDescription>
             <div className="flex justify-end">
               <Button size="sm" onClick={() => setFolderDialog(true)}>新建文件夹</Button>
             </div>

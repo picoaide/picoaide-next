@@ -36,6 +36,11 @@ interface Download {
   created_at: string
 }
 
+interface Grant {
+  grantee_type: string
+  grantee: string
+}
+
 export default function Marketplace() {
   const [skills, setSkills] = useState<Skill[]>([])
   const [mcps, setMcps] = useState<Mcp[]>([])
@@ -48,6 +53,9 @@ export default function Marketplace() {
   const [mcpForm, setMcpForm] = useState({
     name: '', description: '', transport: 'stdio', command: '', args: '', url: '', env: '', headers: '',
   })
+  const [grantDialog, setGrantDialog] = useState<{ kind: 'skill' | 'mcp'; name: string; id: number } | null>(null)
+  const [grants, setGrants] = useState<Grant[]>([])
+  const [grantTarget, setGrantTarget] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -131,6 +139,54 @@ export default function Marketplace() {
     }
   }
 
+  function grantPath(d: { kind: 'skill' | 'mcp'; name: string; id: number }): string {
+    return d.kind === 'skill' ? `/api/admin/skills/${encodeURIComponent(d.name)}/grant` : `/api/admin/mcp/${d.id}/grant`
+  }
+
+  function grantsPath(d: { kind: 'skill' | 'mcp'; name: string; id: number }): string {
+    return d.kind === 'skill' ? `/api/admin/skills/${encodeURIComponent(d.name)}/grants` : `/api/admin/mcp/${d.id}/grants`
+  }
+
+  async function openGrants(d: { kind: 'skill' | 'mcp'; name: string; id: number }) {
+    try {
+      const data = await request(grantsPath(d))
+      setGrants(data.grants ?? [])
+      setGrantTarget('')
+      setGrantDialog(d)
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
+  async function doGrant() {
+    if (!grantDialog || !grantTarget.trim()) return
+    const isGroup = grantTarget.trim().startsWith('@')
+    try {
+      await request(grantPath(grantDialog), {
+        method: 'PUT',
+        body: JSON.stringify(isGroup ? { group: grantTarget.trim().slice(1) } : { username: grantTarget.trim() }),
+      })
+      setGrantTarget('')
+      openGrants(grantDialog)
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
+  async function revokeGrant(g: Grant) {
+    if (!grantDialog) return
+    if (!window.confirm(`撤销「${g.grantee}」的授权?`)) return
+    try {
+      await request(grantPath(grantDialog), {
+        method: 'DELETE',
+        body: JSON.stringify(g.grantee_type === 'group' ? { group: g.grantee } : { username: g.grantee }),
+      })
+      openGrants(grantDialog)
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
   return (
     <div className="space-y-6">
       <h1 className="text-xl font-bold">商城管理</h1>
@@ -139,7 +195,7 @@ export default function Marketplace() {
       <Card>
         <CardHeader>
           <CardTitle>技能(Skill)</CardTitle>
-          <CardDescription>Git 源上架,客户端以建议清单形式展示,员工自装</CardDescription>
+          <CardDescription>Git 源上架 + 授权制:未授权用户不可见不可安装(授权用户或部门组)</CardDescription>
           <div className="flex justify-end">
             <Button size="sm" onClick={() => setSkillDialog(true)}>上架技能</Button>
           </div>
@@ -165,7 +221,10 @@ export default function Marketplace() {
                   <TableCell className="max-w-56 truncate font-mono text-xs">{s.git_url}</TableCell>
                   <TableCell>{s.enabled ? <Badge variant="success">上架</Badge> : <Badge variant="secondary">已下架</Badge>}</TableCell>
                   <TableCell className="text-right">
-                    {s.enabled && <Button size="sm" variant="destructive" onClick={() => disableSkill(s.name)}>下架</Button>}
+                    <div className="flex justify-end gap-2">
+                      <Button size="sm" variant="outline" onClick={() => openGrants({ kind: 'skill', name: s.name, id: 0 })}>授权</Button>
+                      {s.enabled && <Button size="sm" variant="destructive" onClick={() => disableSkill(s.name)}>下架</Button>}
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
@@ -177,7 +236,7 @@ export default function Marketplace() {
       <Card>
         <CardHeader>
           <CardTitle>MCP 插件</CardTitle>
-          <CardDescription>建议安装制:管理员上架/配置,员工自选安装(无授权表);凭证加密存储</CardDescription>
+          <CardDescription>管理员上架/授权,员工按授权使用;凭证加密存储,拉取限流+审计</CardDescription>
           <div className="flex justify-end">
             <Button size="sm" onClick={() => setMcpDialog(true)}>上架插件</Button>
           </div>
@@ -205,7 +264,10 @@ export default function Marketplace() {
                   <TableCell className="max-w-56 truncate font-mono text-xs">{m.transport === 'stdio' ? `${m.command} ${m.args}` : m.url}</TableCell>
                   <TableCell>{m.enabled ? <Badge variant="success">上架</Badge> : <Badge variant="secondary">已下架</Badge>}</TableCell>
                   <TableCell className="text-right">
-                    {m.enabled && <Button size="sm" variant="destructive" onClick={() => disableMcp(m.id)}>下架</Button>}
+                    <div className="flex justify-end gap-2">
+                      <Button size="sm" variant="outline" onClick={() => openGrants({ kind: 'mcp', name: m.name, id: m.id })}>授权</Button>
+                      {m.enabled && <Button size="sm" variant="destructive" onClick={() => disableMcp(m.id)}>下架</Button>}
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
@@ -327,6 +389,36 @@ export default function Marketplace() {
               <Input placeholder='{"Authorization":"Bearer x"}' value={mcpForm.headers} onChange={(e) => setMcpForm({ ...mcpForm, headers: e.target.value })} />
             </div>
             <Button className="w-full" onClick={createMcp}>上架</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={grantDialog !== null} onOpenChange={(v) => !v && setGrantDialog(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>授权「{grantDialog?.name}」</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            {grants.length > 0 && (
+              <div className="space-y-2 rounded-md border p-3">
+                {grants.map((g) => (
+                  <div key={`${g.grantee_type}:${g.grantee}`} className="flex items-center justify-between text-sm">
+                    <Badge variant={g.grantee_type === 'group' ? 'outline' : 'secondary'}>
+                      {g.grantee_type === 'group' ? `@${g.grantee}` : g.grantee}
+                    </Badge>
+                    <Button size="sm" variant="ghost" onClick={() => revokeGrant(g)}>撤销</Button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {grants.length === 0 && (
+              <div className="text-xs text-muted-foreground">未授权:所有用户均不可见(严格默认),请授权用户或部门组</div>
+            )}
+            <div className="space-y-1">
+              <Label>用户名或部门组(组名以 @ 开头,如 @研发部)</Label>
+              <Input value={grantTarget} onChange={(e) => setGrantTarget(e.target.value)} />
+            </div>
+            <Button className="w-full" disabled={!grantTarget.trim()} onClick={doGrant}>授权</Button>
           </div>
         </DialogContent>
       </Dialog>

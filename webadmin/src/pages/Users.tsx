@@ -13,6 +13,7 @@ interface User {
   username: string
   is_admin: boolean
   status: number
+  groups?: string[]
 }
 
 interface ApiToken {
@@ -40,6 +41,8 @@ export default function Users() {
   const [error, setError] = useState('')
   const [tokensUser, setTokensUser] = useState<User | null>(null)
   const [tokens, setTokens] = useState<ApiToken[]>([])
+  const [groupsUser, setGroupsUser] = useState<User | null>(null)
+  const [groupsInput, setGroupsInput] = useState('')
 
   const load = useCallback(async (p: number, search: string) => {
     try {
@@ -114,6 +117,26 @@ export default function Users() {
     }
   }
 
+  async function openGroups(u: User) {
+    setGroupsUser(u)
+    setGroupsInput((u.groups ?? []).join(', '))
+  }
+
+  async function saveGroups() {
+    if (!groupsUser) return
+    const groups = groupsInput.split(',').map((s) => s.trim()).filter(Boolean)
+    try {
+      await request(`/api/admin/users/${groupsUser.id}/groups`, {
+        method: 'PUT',
+        body: JSON.stringify({ groups }),
+      })
+      setGroupsUser(null)
+      load(page, q)
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
   const pages = Math.max(1, Math.ceil(total / 20))
 
   return (
@@ -138,6 +161,7 @@ export default function Users() {
           <TableRow>
             <TableHead>ID</TableHead>
             <TableHead>用户名</TableHead>
+            <TableHead>部门组</TableHead>
             <TableHead>角色</TableHead>
             <TableHead>状态</TableHead>
             <TableHead className="text-right">操作</TableHead>
@@ -148,10 +172,16 @@ export default function Users() {
             <TableRow key={u.id}>
               <TableCell>{u.id}</TableCell>
               <TableCell>{u.username}</TableCell>
+              <TableCell>
+                {(u.groups ?? []).length > 0
+                  ? u.groups!.map((g) => <Badge key={g} variant="outline" className="mr-1">@{g}</Badge>)
+                  : <span className="text-xs text-muted-foreground">—</span>}
+              </TableCell>
               <TableCell>{u.is_admin ? <Badge>管理员</Badge> : <Badge variant="secondary">员工</Badge>}</TableCell>
               <TableCell>{u.status === 1 ? <Badge variant="success">启用</Badge> : <Badge variant="destructive">禁用</Badge>}</TableCell>
               <TableCell className="text-right space-x-2">
                 <Button size="sm" variant="outline" onClick={() => openTokens(u)}>令牌</Button>
+                <Button size="sm" variant="outline" onClick={() => openGroups(u)}>部门组</Button>
                 <Button size="sm" variant="outline" onClick={() => toggleUser(u)}>
                   {u.status === 1 ? '禁用' : '启用'}
                 </Button>
@@ -187,6 +217,22 @@ export default function Users() {
               <Label>管理员</Label>
             </div>
             <Button onClick={create} className="w-full">创建</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!groupsUser} onOpenChange={(open) => { if (!open) setGroupsUser(null) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>部门组 · {groupsUser?.username}</DialogTitle>
+            <DialogDescription>组名以逗号分隔;部门组用于知识库/技能/MCP 授权(LDAP 登录自动同步,此处仅本地账号)</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-1">
+              <Label>部门组</Label>
+              <Input placeholder="研发部, 财务部" value={groupsInput} onChange={(e) => setGroupsInput(e.target.value)} />
+            </div>
+            <Button onClick={saveGroups} className="w-full">保存</Button>
           </div>
         </DialogContent>
       </Dialog>
