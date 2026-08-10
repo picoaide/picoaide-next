@@ -93,12 +93,15 @@ func CreatePendingKBDocument(db *sql.DB, folderID int64, title, contentType stri
 	return res.LastInsertId()
 }
 
-// ClaimPendingKBDocument returns the oldest upload awaiting extraction, or
-// ErrNotFound when the queue is empty. A claim is not exclusive; workers may
-// process the same doc twice, which is harmless (idempotent re-extraction).
+// ClaimPendingKBDocument exclusively claims the oldest upload awaiting
+// extraction: the row moves pending → processing atomically (SQLite
+// UPDATE...RETURNING), so concurrent workers can never extract the same
+// document twice — each claimed row has exactly one owner. Returns
+// ErrNotFound when the queue is empty.
 func ClaimPendingKBDocument(db *sql.DB) (*KBDocument, error) {
-	row := db.QueryRow(`SELECT id, folder_id, title, content, content_type, size, source, created_by, created_at, status, error
-		FROM kb_documents WHERE status = 'pending' ORDER BY id LIMIT 1`)
+	row := db.QueryRow(`UPDATE kb_documents SET status = 'processing'
+		WHERE id = (SELECT id FROM kb_documents WHERE status = 'pending' ORDER BY id LIMIT 1)
+		RETURNING id, folder_id, title, content, content_type, size, source, created_by, created_at, status, error`)
 	var d KBDocument
 	var created string
 	err := row.Scan(&d.ID, &d.FolderID, &d.Title, &d.Content, &d.ContentType, &d.Size, &d.Source, &d.CreatedBy, &created, &d.Status, &d.Error)
@@ -112,26 +115,41 @@ func ClaimPendingKBDocument(db *sql.DB) (*KBDocument, error) {
 	return &d, nil
 }
 
+// ReleaseClaim returns a claimed-but-unprocessable row to the queue
+// (pending) so another worker can pick it up; no-op when the row was
+// already completed by its owner.
+func ReleaseClaim(db *sql.DB, id int64) error {
+	_, err := db.Exec("UPDATE kb_documents SET status = 'pending' WHERE id = ? AND status = 'processing'", id)
+	return err
+}
+
+// ResetProcessingClaims moves every processing row back to pending —
+// called at startup so claims held by a crashed process are retried.
+func ResetProcessingClaims(db *sql.DB) error {
+	_, err := db.Exec("UPDATE kb_documents SET status = 'pending' WHERE status = 'processing'")
+	return err
+}
+
 // CompleteKBDocument finishes an async upload: errMsg == "" marks the doc
 // ready with extracted content (FTS synced by trigger kb_au); otherwise the
 // doc is marked error with the message and the raw file is kept for OCR.
-// Claims are non-exclusive, so completions are CAS-guarded on status:
-// a stale worker finishing a row another worker already completed is
-// ignored (C-3) — an error must never clobber a ready extraction and a
-// late success must never resurrect an error row.
+// Completions are CAS-guarded on the claimed state: a stale worker
+// finishing a row another worker already completed is ignored (C-3) — an
+// error must never clobber a ready extraction and a late success must
+// never resurrect an error row.
 func CompleteKBDocument(db *sql.DB, id int64, content, errMsg string) error {
 	if errMsg == "" {
-		_, err := db.Exec("UPDATE kb_documents SET content = ?, size = ?, status = 'ready', error = '' WHERE id = ? AND status = 'pending'", content, len(content), id)
+		_, err := db.Exec("UPDATE kb_documents SET content = ?, size = ?, status = 'ready', error = '' WHERE id = ? AND status = 'processing'", content, len(content), id)
 		return err
 	}
 	doc, err := GetKBDocument(db, id)
 	if err != nil {
 		return err
 	}
-	if doc.Status != "pending" {
+	if doc.Status != "processing" && doc.Status != "pending" {
 		return nil // already completed by another worker
 	}
-	_, err = db.Exec("UPDATE kb_documents SET status = 'error', error = ? WHERE id = ? AND status = 'pending'", errMsg, id)
+	_, err = db.Exec("UPDATE kb_documents SET status = 'error', error = ? WHERE id = ? AND status IN ('processing','pending')", errMsg, id)
 	return err
 }
 

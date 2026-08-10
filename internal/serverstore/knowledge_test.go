@@ -243,7 +243,68 @@ func TestKBDocumentsPaged(t *testing.T) {
 	}
 }
 
-func TestKBPendingDocLifecycle(t *testing.T) {
+// claim is exclusive: a second claim while one is outstanding finds nothing
+func TestKBClaimIsExclusive(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	id, err := CreatePendingKBDocument(db, 0, "独占文档", "text", 10, "upload", "admin")
+	if err != nil || id == 0 {
+		t.Fatalf("CreatePendingKBDocument: %d %v", id, err)
+	}
+	claimed, err := ClaimPendingKBDocument(db)
+	if err != nil || claimed.ID != id {
+		t.Fatalf("first claim: %+v %v", claimed, err)
+	}
+	// second worker sees an empty queue (row is claimed, not pending)
+	if _, err := ClaimPendingKBDocument(db); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second claim: %v, want ErrNotFound", err)
+	}
+	doc, _ := GetKBDocument(db, id)
+	if doc.Status != "processing" {
+		t.Fatalf("claimed doc status = %q, want processing", doc.Status)
+	}
+	// release returns it to the queue
+	if err := ReleaseClaim(db, id); err != nil {
+		t.Fatal(err)
+	}
+	doc, _ = GetKBDocument(db, id)
+	if doc.Status != "pending" {
+		t.Fatalf("released doc status = %q, want pending", doc.Status)
+	}
+	// release is a no-op once completed (claim again → complete → release)
+	if _, err := ClaimPendingKBDocument(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := CompleteKBDocument(db, id, "ok", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReleaseClaim(db, id); err != nil {
+		t.Fatal(err)
+	}
+	doc, _ = GetKBDocument(db, id)
+	if doc.Status != "ready" {
+		t.Fatalf("ready doc released back to queue: %+v", doc)
+	}
+	// reset returns processing rows to pending (crash recovery)
+	id2, _ := CreatePendingKBDocument(db, 0, "崩溃残留", "text", 10, "upload", "admin")
+	if _, err := ClaimPendingKBDocument(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetProcessingClaims(db); err != nil {
+		t.Fatal(err)
+	}
+	doc, _ = GetKBDocument(db, id2)
+	if doc.Status != "pending" {
+		t.Fatalf("reset doc status = %q, want pending", doc.Status)
+	}
+}
+
+// C-4: a pending row whose raw upload file never landed (INSERT/Rename race,
+// manual deletion) is skipped — not marked error, not extracted.
+func TestProcessPendingSkipsMissingFile(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()
 	if err := ApplyMigrations(db); err != nil {
@@ -294,8 +355,8 @@ func TestKBPendingDocLifecycle(t *testing.T) {
 	}
 }
 
-// C-3: the claim is non-exclusive (two workers can process the same row); a
-// stale worker's failure must never clobber a successful extraction.
+// C-3: the claim is exclusive (one worker owns a row); a stale worker's
+// failure must never clobber a successful extraction.
 func TestKBDoubleWorkerRace(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()
@@ -306,12 +367,15 @@ func TestKBDoubleWorkerRace(t *testing.T) {
 	if err != nil || id == 0 {
 		t.Fatalf("CreatePendingKBDocument: %d %v", id, err)
 	}
-	// worker 1 completes successfully
+	// worker 1 claims (pending → processing) and completes successfully
+	if _, err := ClaimPendingKBDocument(db); err != nil {
+		t.Fatal(err)
+	}
 	if err := CompleteKBDocument(db, id, "提取成功", ""); err != nil {
 		t.Fatal(err)
 	}
-	// worker 2 holds a stale claim, its file is gone, it reports an error —
-	// the row must stay ready
+	// worker 2 holds a stale claim (no-op: the row is already ready), its
+	// file is gone, it reports an error — the row must stay ready
 	if err := CompleteKBDocument(db, id, "", "文件不存在"); err != nil {
 		t.Fatal(err)
 	}

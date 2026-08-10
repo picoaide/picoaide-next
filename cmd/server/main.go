@@ -95,6 +95,10 @@ func main() {
 	marketplace.RegisterAdminRoutes(r, db, *dataDir+"/skills-cache")
 	knowledge.RegisterRoutes(r, db)
 	uploadsDir := filepath.Join(*dataDir, "kb_uploads")
+	// 独占 claim 模式:崩溃残留的 processing 行启动时回到队列
+	if err := serverstore.ResetProcessingClaims(db); err != nil {
+		log.Printf("kb reset processing claims: %v", err)
+	}
 	knowledge.StartUploadQueue(db, uploadsDir, 2)
 	// 0014 迁移窗口:为存量 ready 文档补分块(幂等,后台执行)
 	go func() {

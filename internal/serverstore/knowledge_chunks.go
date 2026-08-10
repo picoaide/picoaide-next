@@ -208,7 +208,8 @@ func UpdateKBDocumentWithChunks(db *sql.DB, id int64, title, content, contentTyp
 }
 
 // CompleteKBDocumentWithChunks finishes an async upload with its chunks in
-// one transaction; semantics match CompleteKBDocument (CAS on status).
+// one transaction; semantics match CompleteKBDocument (CAS on the claimed
+// processing state).
 func CompleteKBDocumentWithChunks(db *sql.DB, id int64, content, errMsg string, chunks []KBChunk) error {
 	if errMsg == "" {
 		tx, err := db.Begin()
@@ -216,7 +217,7 @@ func CompleteKBDocumentWithChunks(db *sql.DB, id int64, content, errMsg string, 
 			return err
 		}
 		defer tx.Rollback()
-		res, err := tx.Exec("UPDATE kb_documents SET content = ?, size = ?, status = 'ready', error = '' WHERE id = ? AND status = 'pending'", content, len(content), id)
+		res, err := tx.Exec("UPDATE kb_documents SET content = ?, size = ?, status = 'ready', error = '' WHERE id = ? AND status = 'processing'", content, len(content), id)
 		if err != nil {
 			return err
 		}
@@ -239,9 +240,9 @@ func CompleteKBDocumentWithChunks(db *sql.DB, id int64, content, errMsg string, 
 	if err != nil {
 		return err
 	}
-	if doc.Status != "pending" {
+	if doc.Status != "processing" && doc.Status != "pending" {
 		return nil
 	}
-	_, err = db.Exec("UPDATE kb_documents SET status = 'error', error = ? WHERE id = ? AND status = 'pending'", errMsg, id)
+	_, err = db.Exec("UPDATE kb_documents SET status = 'error', error = ? WHERE id = ? AND status IN ('processing','pending')", errMsg, id)
 	return err
 }

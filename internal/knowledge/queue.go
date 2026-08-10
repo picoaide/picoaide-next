@@ -44,9 +44,13 @@ func processNextPending(db *sql.DB, uploadsDir string) bool {
 	path := filepath.Join(uploadsDir, strconv.FormatInt(doc.ID, 10))
 	if _, err := os.Stat(path); err != nil {
 		// C-4: the raw file has not landed yet (INSERT happens before the
-		// Rename in the upload handler) or was manually removed. Skip the
-		// row without marking it error — the upload handler renames the
-		// file into place moments later and the next poll picks it up.
+		// Rename in the upload handler) or was manually removed. Release
+		// the exclusive claim and skip without marking error — the upload
+		// handler renames the file into place moments later and the next
+		// poll picks it up.
+		if rerr := serverstore.ReleaseClaim(db, doc.ID); rerr != nil {
+			log.Printf("kb queue: doc %d release claim: %v", doc.ID, rerr)
+		}
 		return false
 	}
 	content, err := extractSaved(path, doc.ContentType)
