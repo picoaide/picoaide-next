@@ -507,3 +507,40 @@ func TestAdminKBPagedDocsAndAudit(t *testing.T) {
 		t.Fatalf("logs = %v", logs)
 	}
 }
+
+// 文件夹删除:空文件夹可删;有文档/授权 → 拒绝
+func TestAdminDeleteFolder(t *testing.T) {
+	r, db, hdr, _ := kbAdminSetup(t)
+	defer db.Close()
+	w, out := kbReq(t, r, "POST", "/api/admin/kb/folders", `{"name":"空文件夹"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create: %d", w.Code)
+	}
+	fid := int64(out["folder"].(map[string]any)["id"].(float64))
+	// 空 → 可删
+	if w, _ := kbReq(t, r, "DELETE", fmt.Sprintf("/api/admin/kb/folders/%d", fid), "", hdr); w.Code != http.StatusOK {
+		t.Fatalf("delete empty: %d %s", w.Code, w.Body.String())
+	}
+	// 有文档 → 拒绝
+	w, out = kbReq(t, r, "POST", "/api/admin/kb/folders", `{"name":"有文档"}`, hdr)
+	fid2 := int64(out["folder"].(map[string]any)["id"].(float64))
+	if _, err := IndexDocument(db, fid2, "x", "y", "text", "upload", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if w, _ := kbReq(t, r, "DELETE", fmt.Sprintf("/api/admin/kb/folders/%d", fid2), "", hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("delete with docs = %d, want 400", w.Code)
+	}
+	// 有授权 → 拒绝
+	w, out = kbReq(t, r, "POST", "/api/admin/kb/folders", `{"name":"有授权"}`, hdr)
+	fid3 := int64(out["folder"].(map[string]any)["id"].(float64))
+	if w, _ := kbReq(t, r, "PUT", fmt.Sprintf("/api/admin/kb/folders/%d/grant", fid3), `{"group":"研发部"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("grant: %d", w.Code)
+	}
+	if w, _ := kbReq(t, r, "DELETE", fmt.Sprintf("/api/admin/kb/folders/%d", fid3), "", hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("delete with grants = %d, want 400", w.Code)
+	}
+	// 不存在 → 404
+	if w, _ := kbReq(t, r, "DELETE", "/api/admin/kb/folders/99999", "", hdr); w.Code != http.StatusNotFound {
+		t.Fatalf("delete missing = %d, want 404", w.Code)
+	}
+}

@@ -31,6 +31,7 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, uploadsDir string) {
 	g.POST("/import-zip", func(c *gin.Context) { importZip(c, db, uploadsDir) })
 	g.GET("/import-status", func(c *gin.Context) { importStatus(c, db) })
 	g.POST("/folders", func(c *gin.Context) { createFolder(c, db) })
+	g.DELETE("/folders/:id", func(c *gin.Context) { deleteFolder(c, db) })
 	g.GET("/folders", func(c *gin.Context) { listFolders(c, db) })
 	g.GET("/documents", func(c *gin.Context) { listDocuments(c, db) })
 	g.DELETE("/documents/:id", func(c *gin.Context) { deleteDoc(c, db, uploadsDir) })
@@ -552,5 +553,38 @@ func replaceFolderGrants(c *gin.Context, db *sql.DB) {
 		return
 	}
 	_ = serverstore.AuditLog(db, adminUsername(c), "kb_grants_replace", "folder#"+strconv.FormatInt(folderID, 10)+" "+strings.Join(req.Groups, ","))
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// deleteFolder removes an empty folder (no documents, no grants).
+func deleteFolder(c *gin.Context, db *sql.DB) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
+		return
+	}
+	var docCount, grantCount int64
+	if err := db.QueryRow("SELECT COUNT(*) FROM kb_documents WHERE folder_id = ?", id).Scan(&docCount); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if err := db.QueryRow(`SELECT (SELECT COUNT(*) FROM kb_folder_users WHERE folder_id = ?) + (SELECT COUNT(*) FROM kb_folder_groups WHERE folder_id = ?)`, id, id).Scan(&grantCount); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if docCount > 0 || grantCount > 0 {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "文件夹非空(有文档或授权),请先清空")
+		return
+	}
+	res, err := db.Exec("DELETE FROM kb_folders WHERE id = ?", id)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "文件夹不存在")
+		return
+	}
+	_ = serverstore.AuditLog(db, adminUsername(c), "kb_folder_delete", "folder#"+strconv.FormatInt(id, 10))
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

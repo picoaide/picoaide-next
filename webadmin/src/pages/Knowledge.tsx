@@ -214,6 +214,18 @@ export default function Knowledge() {
     }
   }
 
+  async function deleteFolder(id: number, name: string) {
+    if (!window.confirm(`确定删除文件夹「${name}」?有文档或授权时将无法删除。`)) return
+    try {
+      await request(`/api/admin/kb/folders/${id}`, { method: 'DELETE' })
+      if (selected === id) setSelected(0)
+      loadFolders()
+      loadDocs(1, selected === id ? 0 : selected)
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
   async function createFolder() {
     try {
       await request('/api/admin/kb/folders', { method: 'POST', body: JSON.stringify({ name: folderName }) })
@@ -365,19 +377,30 @@ export default function Knowledge() {
                     {f.name}
                   </Button>
                   {f.id !== 0 && (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-6 px-2"
-                      onClick={() => {
-                        setGrantFolder(f)
-                        setGrantTarget('')
-                        loadGrants(f.id)
-                        setGrantDialog(true)
-                      }}
-                    >
-                      授权
-                    </Button>
+                    <>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 px-2"
+                        onClick={() => {
+                          setGrantFolder(f)
+                          setGrantTarget('')
+                          loadGrants(f.id)
+                          setGrantDialog(true)
+                        }}
+                      >
+                        授权
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 px-2 text-destructive"
+                        title="删除文件夹(需先清空文档与授权)"
+                        onClick={() => deleteFolder(f.id, f.name)}
+                      >
+                        删除
+                      </Button>
+                    </>
                   )}
                 </div>
               ))}
