@@ -4,10 +4,21 @@ BIN := bin/picoaide-server
 IMAGE ?= ghcr.io/picoaide/picoaide-server
 TAG ?= latest
 
-.PHONY: test test-server test-client build-server build-client build-desktop webadmin docker-image check pkg-linux pkg-windows pkg-macos dev-env
+.PHONY: test test-server test-client build-server build-client build-desktop webadmin docker-image check pkg-linux pkg-windows pkg-macos dev-env test-ui test-e2e
 
 dev-env:
 	bash scripts/dev-env.sh
+
+# UI 组件测试(Vitest + Testing Library):客户端 renderer + webadmin
+test-ui:
+	cd desktop && ELECTRON_RUN_AS_NODE=1 npx electron ./node_modules/vitest/vitest.mjs run --config vitest.config.ts
+	cd webadmin && npm test
+
+# 浏览器/Electron E2E(依赖 dev-env 已启动: make dev-env)
+# webadmin 用真实浏览器;Electron 场景串行(--workers=1,共享 dev-env)
+test-e2e:
+	cd desktop && npx playwright test --config ../scripts/e2e --workers=1 smoke_client_full.spec.ts
+	cd desktop && npx playwright test --config ../scripts/e2e admin_ui.spec.ts
 	go test ./... -count=1
 
 test-server:

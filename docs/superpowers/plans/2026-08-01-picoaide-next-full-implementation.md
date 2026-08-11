@@ -1962,3 +1962,28 @@ git commit -m "docs: changelog for 0.4.0"
 - 分块器误判修复(第X条句式/列表级联/ASCII 句切分/代码围栏)
 - 词法深命中锚点窗口;块级检索补文档标题召回(kb_fts_trigram OR + d.title LIKE)
 - 向量路径超时/并发删除零值防护;zip 解压总量上限
+
+---
+
+## 测试体验升级轮(2026-08,已合入主线)
+
+> 目标:摆脱"打包安装 + 推生产才能测试"的路径。全部测试走**真实 HTTP 接口链路**(数据内容可模拟,接口不模拟)。
+
+### 本地一键环境(dev-env)
+- `scripts/dev-env.sh` + `make dev-env`:起 mock 上游 + 本地服务端(dev-data/ 持久)→ 管理 API 灌 seed(部门知识库/技能/MCP/授权/alice·bob)→ 客户端 `npm run dev` 登录 `http://127.0.0.1:18080`
+- seed.sh `SEED_LOCAL=1`(技能本地 file:// 裸仓库,不 ssh)+ gateway.local.json(mock-chat 默认模型)
+- `PICOAI_UPSTREAM_KEY=sk-xxx` 可切真实 DeepSeek;`PICOAI_LOGIN_MAX_ATTEMPTS` 放宽测试登录限流
+- 期间修复:用户组 JSON 数组拆分、mock 渠道缺失致 gateway 校验失败吞错
+
+### UI 组件测试(Vitest + Testing Library + jsdom,`make test-ui`)
+- desktop renderer:ChatInput(9)/ArtifactsPanel(4)/Main(3)/Settings(3),window.picoaide 桥统一 stub
+- webadmin:Gateway(4)/Knowledge(4)/Marketplace(3)/Users(3),request API mock
+- 经验:Radix Select item 选择在 jsdom 不可用 → 由浏览器 E2E 覆盖(组件测试断言选项渲染)
+
+### 浏览器/Electron E2E(`make test-e2e`,依赖 dev-env)
+- `admin_ui.spec.ts`:真实浏览器走 dev-env 管理端全流程(登录/渠道联动/命中测试/授权/部门组)
+- `smoke_client_full.spec.ts` 扩展:知识库检索场景(mock `TOOLCALL:kb_search` → 真实 kb_search 工具 → 块级结果渲染);E2E 需 `--workers=1`(共享 dev-env)
+
+### 测试暴露并修复的产品缺陷
+- **admin 用户 MCP 知识库工具不可用**(GetAccessibleFolderIDs 无 admin 特判 → total 0)→ kb_search/read/list/upload 对 IsAdmin 全量(与 marketplace 语义一致)
+- mock 上游二进制未热更(rebuild 后需重启 dev-env 的 mock 进程)
