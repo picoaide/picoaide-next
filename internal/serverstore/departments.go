@@ -37,8 +37,8 @@ func ListDepartments(db *sql.DB) ([]DepartmentInfo, error) {
 		(SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id = g.id),
 		(SELECT COUNT(*) FROM groups c WHERE c.parent_id = g.id),
 		(SELECT COUNT(*) FROM kb_folder_groups kfg WHERE kfg.group_id = g.id)
-		+ (SELECT COUNT(*) FROM skill_grants sg WHERE sg.grantee_type = 'group' AND sg.grantee = g.name)
-		+ (SELECT COUNT(*) FROM mcp_grants mg WHERE mg.grantee_type = 'group' AND mg.grantee = g.name)
+		+ (SELECT COUNT(*) FROM skill_grants sg WHERE sg.grantee_type = 'group' AND sg.grantee = g.name COLLATE NOCASE)
+		+ (SELECT COUNT(*) FROM mcp_grants mg WHERE mg.grantee_type = 'group' AND mg.grantee = g.name COLLATE NOCASE)
 		FROM groups g LEFT JOIN users u ON u.id = g.leader_id
 		ORDER BY g.id`)
 	if err != nil {
@@ -71,6 +71,9 @@ func GroupByID(db *sql.DB, id int64) (*Group, error) {
 // CreateDepartment inserts a department (parent_id 0 = top level).
 // The parent must exist; duplicate names are rejected (UNIQUE).
 func CreateDepartment(db *sql.DB, name string, parentID, leaderID int64, description string) (int64, error) {
+	if name == EveryoneGroupName {
+		return 0, ErrValidation // 保留名:隐式全员组不可重建/改名占用
+	}
 	if parentID != 0 {
 		if _, err := GroupByID(db, parentID); err != nil {
 			return 0, err
@@ -123,11 +126,15 @@ func UpdateDepartment(db *sql.DB, id int64, name string, parentID, leaderID int6
 		return err
 	}
 	defer tx.Rollback()
+	if name == EveryoneGroupName {
+		return ErrValidation // 保留名
+	}
 	if name != "" && name != g.Name {
-		if _, err := tx.Exec("UPDATE skill_grants SET grantee = ? WHERE grantee_type = 'group' AND grantee = ?", name, g.Name); err != nil {
+		// COLLATE NOCASE 与授权解析一致:授权存储大小写异于组名的(手输/LDAP)改名后不失效
+		if _, err := tx.Exec("UPDATE skill_grants SET grantee = ? WHERE grantee_type = 'group' AND grantee = ? COLLATE NOCASE", name, g.Name); err != nil {
 			return err
 		}
-		if _, err := tx.Exec("UPDATE mcp_grants SET grantee = ? WHERE grantee_type = 'group' AND grantee = ?", name, g.Name); err != nil {
+		if _, err := tx.Exec("UPDATE mcp_grants SET grantee = ? WHERE grantee_type = 'group' AND grantee = ? COLLATE NOCASE", name, g.Name); err != nil {
 			return err
 		}
 	}
@@ -161,6 +168,9 @@ func DeleteDepartment(db *sql.DB, id int64) error {
 	}
 	if memberCount > 0 || childCount > 0 || grantCount > 0 {
 		return ErrDepartmentInUse
+	}
+	if g, err := GroupByID(db, id); err == nil && g.Name == EveryoneGroupName {
+		return ErrValidation // 保留名
 	}
 	_, err := db.Exec("DELETE FROM groups WHERE id = ?", id)
 	return err

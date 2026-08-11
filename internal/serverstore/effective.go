@@ -86,9 +86,9 @@ const EveryoneGroupName = "全员"
 // for permission resolution (inheritance-expanded). Plain membership stays
 // available via UserGroups for admin display.
 //
-//	1. 归属部门 + 祖先链:授权给「研发部」→ 前端组/后端组成员可见
-//	2. 主管向上:leader_id = user 的部门及其子树,主管自动获得授权
-//	3. 隐式全员组:EveryoneGroupName 对所有人生效(单部门模型下无需显式加入)
+//  1. 归属部门 + 祖先链:授权给「研发部」→ 前端组/后端组成员可见
+//  2. 主管向上:leader_id = user 的部门及其子树,主管自动获得授权
+//  3. 隐式全员组:EveryoneGroupName 对所有人生效(单部门模型下无需显式加入)
 func UserEffectiveGroups(db *sql.DB, userID int64) ([]string, error) {
 	member, err := UserGroups(db, userID)
 	if err != nil {

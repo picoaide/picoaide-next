@@ -244,7 +244,8 @@ func TestEveryoneGroupImplicit(t *testing.T) {
 	if err := ApplyMigrations(db); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CreateDepartment(db, "全员", 0, 0, ""); err != nil {
+	// 全员为保留名(隐式组),只能由系统/seed 直插创建
+	if _, err := db.Exec("INSERT INTO groups (name) VALUES ('全员')"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := CreateDepartment(db, "研发部", 0, 0, ""); err != nil {
@@ -274,5 +275,61 @@ func TestEveryoneGroupImplicit(t *testing.T) {
 	}
 	if len(names) != 1 {
 		t.Fatalf("everyone grant not resolved: %v", names)
+	}
+}
+
+// 保留名「全员」:不可创建/改名占用/删除
+func TestEveryoneGroupReserved(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateDepartment(db, "全员", 0, 0, ""); err != ErrValidation {
+		t.Fatalf("create 全员 err = %v, want ErrValidation", err)
+	}
+	devID, _ := CreateDepartment(db, "研发部", 0, 0, "")
+	if err := UpdateDepartment(db, devID, "全员", 0, 0, ""); err != ErrValidation {
+		t.Fatalf("rename to 全员 err = %v", err)
+	}
+	everyoneID, _ := CreateDepartment(db, "everyone-x", 0, 0, "")
+	_ = everyoneID
+	if _, err := db.Exec("UPDATE groups SET name = '全员' WHERE id = ?", everyoneID); err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteDepartment(db, everyoneID); err != ErrValidation {
+		t.Fatalf("delete 全员 err = %v, want ErrValidation", err)
+	}
+}
+
+// 授权大小写变体(手输/LDAP):改名级联 NOCASE 后仍解析,删除守卫计得到
+func TestRenameCascadeCaseInsensitive(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	devID, _ := CreateDepartment(db, "研发部", 0, 0, "")
+	// 授权含大小写变体(模拟 LDAP/手输历史):grantee 小写
+	if err := GrantSkill(db, "data-extract", "研发部", GranteeGroup); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO skill_grants (skill_name, grantee_type, grantee) VALUES ('code-review', 'group', '研发部')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO mcp_grants (mcp_id, grantee_type, grantee) VALUES (1, 'group', '研发部')"); err != nil {
+		t.Fatal(err)
+	}
+	// 改名:级联(NOCASE)必须覆盖大小写变体授权
+	if err := UpdateDepartment(db, devID, "技术中心", 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	names, _ := AccessibleSkillNames(db, "alice", []string{"技术中心"})
+	if len(names) != 2 {
+		t.Fatalf("cascade lost case variant grants: %v", names)
+	}
+	set, _ := AccessibleMCPSet(db, "alice", []string{"技术中心"})
+	if !set[1] {
+		t.Fatalf("mcp case variant lost")
 	}
 }

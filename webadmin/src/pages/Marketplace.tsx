@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
+import { deptTreeOptions } from '../lib/utils'
 
 interface Skill {
   name: string
@@ -57,7 +58,7 @@ export default function Marketplace() {
   const [grants, setGrants] = useState<Grant[]>([])
   const [grantTarget, setGrantTarget] = useState('')
   const [grantDept, setGrantDept] = useState('0')
-  const [departments, setDepartments] = useState<{ id: number; name: string }[]>([])
+  const [departments, setDepartments] = useState<{ id: number; parent_id: number; name: string }[]>([])
 
   const load = useCallback(async () => {
     try {
@@ -427,8 +428,8 @@ export default function Marketplace() {
               <Select value={grantDept} onValueChange={(v) => { setGrantDept(v); setGrantTarget('@' + v) }}>
                 <SelectTrigger><SelectValue placeholder="选择部门(可选)" /></SelectTrigger>
                 <SelectContent>
-                  {departments.map((d) => (
-                    <SelectItem key={d.id} value={d.name}>{d.name}</SelectItem>
+                  {deptTreeOptions(departments).map((o) => (
+                    <SelectItem key={o.id} value={o.label.replace(/[↳　\s]/g, '')}>{o.label}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>

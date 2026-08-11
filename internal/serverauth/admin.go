@@ -3,6 +3,7 @@ package serverauth
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -575,7 +576,9 @@ func (a *AdminAPI) updateDepartment(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 		return
 	}
-	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "dept_update", before.Name+"→"+req.Name)
+	detail := fmt.Sprintf("%s→%s parent:%d→%d leader:%d→%d",
+		before.Name, req.Name, before.ParentID, req.ParentID, before.LeaderID, req.LeaderID)
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "dept_update", detail)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 

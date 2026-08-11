@@ -9,7 +9,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Textarea } from '../components/ui/textarea'
-import { cn } from '../lib/utils'
+import { cn, deptTreeOptions } from '../lib/utils'
 
 interface Folder {
   id: number
@@ -597,8 +597,8 @@ export default function Knowledge() {
               <Select value={grantDept} onValueChange={(v) => { setGrantDept(v); setGrantTarget('@' + v) }}>
                 <SelectTrigger><SelectValue placeholder="选择部门(可选)" /></SelectTrigger>
                 <SelectContent>
-                  {departments.map((d) => (
-                    <SelectItem key={d.id} value={d.name}>{d.name}</SelectItem>
+                  {deptTreeOptions(departments).map((o) => (
+                    <SelectItem key={o.id} value={o.label.replace(/[↳　\s]/g, '')}>{o.label}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
