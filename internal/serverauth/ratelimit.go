@@ -3,6 +3,8 @@ package serverauth
 import (
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -20,10 +22,18 @@ type loginLimiter struct {
 }
 
 func newLoginLimiter() *loginLimiter {
+	// PICOAI_LOGIN_MAX_ATTEMPTS overrides the default 10/5min for test
+	// environments (dev-env/E2E login repeatedly as the same user).
+	max := 10
+	if v := os.Getenv("PICOAI_LOGIN_MAX_ATTEMPTS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			max = n
+		}
+	}
 	return &loginLimiter{
 		attempts:    map[string][]time.Time{},
 		maxEntries:  10000,
-		maxAttempts: 10,
+		maxAttempts: max,
 		window:      5 * time.Minute,
 	}
 }

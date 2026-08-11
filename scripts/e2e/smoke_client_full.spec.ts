@@ -136,8 +136,9 @@ test('知识库检索:聊天触发 kb_search 工具并渲染块级结果', async
     await page.keyboard.press('Enter')
     // 工具卡片出现(kb_search 为引擎注册的远程 MCP 工具)
     await page.getByText('kb_search', { exact: false }).first().waitFor({ timeout: 30000 })
-    // 工具结果渲染:本地 dev-env seed 知识库的块级命中(报销类文档)
-    await page.getByText(/报销|制度|差旅/).first().waitFor({ timeout: 30000 })
+    // 工具结果渲染:本地 dev-env seed 知识库的块级命中(报销类文档);
+    // 工具卡可能在消息流视口外,用 attached 断言存在性
+    await page.getByText(/报销|制度|差旅/).first().waitFor({ state: 'attached', timeout: 30000 })
     // 模型基于结果继续回答(mock 回显收尾)
     await page.getByText(/mock upstream echo/).first().waitFor({ timeout: 30000 })
   } finally {

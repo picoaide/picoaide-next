@@ -21,6 +21,7 @@ set -euo pipefail
 DEV_ENV_PORT="${DEV_ENV_PORT:-18080}"
 DEV_ENV_MOCK_PORT="${DEV_ENV_MOCK_PORT:-18081}"
 DEV_ADMIN_PASS="${DEV_ADMIN_PASS:-DevAdmin@123456}"
+# E2E 反复登录同一账号,放宽登录限流(生产默认 10/5min 不变)
 # 测试用户密码(seed 仓库默认,保持一致)
 DEV_USER_PASS="${DEV_USER_PASS:-PicoSeed12345}"
 PICOAI_UPSTREAM_KEY="${PICOAI_UPSTREAM_KEY:-}"
@@ -74,7 +75,7 @@ port_free "$DEV_ENV_MOCK_PORT" || die "端口 $DEV_ENV_MOCK_PORT 被占用"
 say "启动 mock 上游(:$DEV_ENV_MOCK_PORT)与服务端(:$DEV_ENV_PORT)"
 "$DATA_DIR/mock-upstream" -addr ":$DEV_ENV_MOCK_PORT" >"$DATA_DIR/mock.log" 2>&1 &
 echo $! > "$DATA_DIR/mock.pid"
-PICOAI_ADMIN_PASSWORD="$DEV_ADMIN_PASS" "$ROOT/bin/picoaide-server" \
+PICOAI_ADMIN_PASSWORD="$DEV_ADMIN_PASS" PICOAI_LOGIN_MAX_ATTEMPTS=100000 "$ROOT/bin/picoaide-server" \
   -addr ":$DEV_ENV_PORT" -data "$DATA_DIR" --bootstrap-admin admin \
   >"$DATA_DIR/server.log" 2>&1 &
 echo $! > "$DATA_DIR/server.pid"
