@@ -331,7 +331,7 @@ export default function Gateway() {
             </div>
             <div className="space-y-1">
               <Label>名称(如 deepseek)</Label>
-              <Input value={provForm.name} onChange={(e) => setProvForm({ ...provForm, name: e.target.value })} />
+              <Input placeholder="如 deepseek" value={provForm.name} onChange={(e) => setProvForm({ ...provForm, name: e.target.value })} />
             </div>
             <div className="space-y-1">
               <Label>Base URL(渠道型留空自动使用渠道默认地址)</Label>
@@ -343,7 +343,7 @@ export default function Gateway() {
             </div>
             <div className="space-y-1">
               <Label>API Key</Label>
-              <Input type="password" value={provForm.api_key} onChange={(e) => setProvForm({ ...provForm, api_key: e.target.value })} />
+              <Input type="password" placeholder="sk-..." value={provForm.api_key} onChange={(e) => setProvForm({ ...provForm, api_key: e.target.value })} />
             </div>
             <div className="space-y-1">
               <Label>模型(逗号分隔,渠道型自动同步无需填写)</Label>
