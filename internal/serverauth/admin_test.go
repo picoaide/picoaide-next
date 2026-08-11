@@ -530,3 +530,80 @@ func doAdmin(t *testing.T, r http.Handler, method, path, body string, hdr map[st
 	json.Unmarshal(w.Body.Bytes(), &out)
 	return w, out
 }
+
+// 部门管理 API:CRUD + 循环防护 + 删除约束 + 用户单部门归属
+func TestAdminDepartmentsAPI(t *testing.T) {
+	db := mustDB(t)
+	uid, err := createUserDB(db, "boss", "pw123456", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, csrf, err := CreateAdminSession(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdr := map[string]string{"Cookie": "picoaide_session=" + sess.ID, "X-CSRF-Token": csrf}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	RegisterAdminRoutes(r, db)
+
+	// 建部门树
+	var out map[string]any
+	w, out := doAdmin(t, r, "POST", "/api/admin/departments", `{"name":"研发部"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create dept: %d %s", w.Code, w.Body.String())
+	}
+	devID := int64(out["department"].(map[string]any)["id"].(float64))
+	var frontID int64
+	w, out = doAdmin(t, r, "POST", "/api/admin/departments", `{"name":"前端组","parent_id":`+fmt.Sprint(devID)+`}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create child: %d %s", w.Code, w.Body.String())
+	}
+	frontID = int64(out["department"].(map[string]any)["id"].(float64))
+
+	// 列表含层级
+	w, out = doAdmin(t, r, "GET", "/api/admin/departments", "", hdr)
+	if w.Code != http.StatusOK || len(out["departments"].([]any)) != 2 {
+		t.Fatalf("list depts: %d %s", w.Code, w.Body.String())
+	}
+
+	// 循环防护:前端组不能成为研发部上级
+	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/admin/departments/%d", devID),
+		`{"name":"研发部","parent_id":`+fmt.Sprint(frontID)+`}`, hdr)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("cycle parent = %d, want 400", w.Code)
+	}
+
+	// 用户单部门归属
+	var aliceID int64
+	w, out = doAdmin(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"pw12345678"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create user: %d", w.Code)
+	}
+	aliceID = int64(out["user"].(map[string]any)["id"].(float64))
+	w, _ = doAdmin(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d/department", aliceID),
+		`{"group_id":`+fmt.Sprint(frontID)+`}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("set dept: %d %s", w.Code, w.Body.String())
+	}
+	groups, err := serverstore.UserGroups(db, aliceID)
+	if err != nil || len(groups) != 1 || groups[0] != "前端组" {
+		t.Fatalf("alice groups = %v %v", groups, err)
+	}
+
+	// 删除约束:有成员 → 拒绝
+	w, _ = doAdmin(t, r, "DELETE", fmt.Sprintf("/api/admin/departments/%d", frontID), "", hdr)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("delete with member = %d, want 400", w.Code)
+	}
+	// 有子部门 → 拒绝
+	w, _ = doAdmin(t, r, "DELETE", fmt.Sprintf("/api/admin/departments/%d", devID), "", hdr)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("delete with child = %d, want 400", w.Code)
+	}
+	// 审计
+	logs, err := serverstore.ListAuditLogs(db, 10)
+	if err != nil || len(logs) == 0 || logs[0].Action != "user_dept" {
+		t.Fatalf("audit = %+v %v", logs, err)
+	}
+}

@@ -43,6 +43,12 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	g.DELETE("/users/:id", AdminAuth(db), a.deleteUser)
 	g.GET("/users/:id/groups", AdminAuth(db), a.getUserGroups)
 	g.PUT("/users/:id/groups", AdminAuth(db), a.setUserGroups)
+	g.PUT("/users/:id/department", AdminAuth(db), a.setUserDepartment)
+	// 部门管理(金字塔组织架构)
+	g.GET("/departments", AdminAuth(db), a.listDepartments)
+	g.POST("/departments", AdminAuth(db), a.createDepartment)
+	g.PUT("/departments/:id", AdminAuth(db), a.updateDepartment)
+	g.DELETE("/departments/:id", AdminAuth(db), a.deleteDepartment)
 	g.GET("/users/:id/tokens", AdminAuth(db), a.listUserTokens)
 	g.POST("/tokens/:id/revoke", AdminAuth(db), a.revokeToken)
 	g.GET("/usage", AdminAuth(db), a.usage)
@@ -490,4 +496,144 @@ func currentAdminUsername(c *gin.Context) string {
 		return u.Username
 	}
 	return "admin"
+}
+
+// ---- 部门管理(金字塔组织架构) ----
+
+type deptReq struct {
+	Name        string `json:"name"`
+	ParentID    int64  `json:"parent_id"`
+	LeaderID    int64  `json:"leader_id"`
+	Description string `json:"description"`
+}
+
+// listDepartments 返回部门树平铺(含主管/成员数/子部门数/授权引用数)。
+func (a *AdminAPI) listDepartments(c *gin.Context) {
+	list, err := serverstore.ListDepartments(a.DB)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if list == nil {
+		list = []serverstore.DepartmentInfo{}
+	}
+	c.JSON(http.StatusOK, gin.H{"departments": list})
+}
+
+func (a *AdminAPI) createDepartment(c *gin.Context) {
+	var req deptReq
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Name) == "" {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "部门名称必填")
+		return
+	}
+	id, err := serverstore.CreateDepartment(a.DB, strings.TrimSpace(req.Name), req.ParentID, req.LeaderID, req.Description)
+	if err != nil {
+		if errors.Is(err, serverstore.ErrDuplicate) {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "部门名称已存在")
+			return
+		}
+		if errors.Is(err, serverstore.ErrNotFound) {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "上级部门或主管不存在")
+			return
+		}
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
+		return
+	}
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "dept_create", req.Name)
+	c.JSON(http.StatusOK, gin.H{"department": gin.H{"id": id, "name": req.Name}})
+}
+
+func (a *AdminAPI) updateDepartment(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "非法部门 ID")
+		return
+	}
+	var req deptReq
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Name) == "" {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "部门名称必填")
+		return
+	}
+	before, err := serverstore.GroupByID(a.DB, id)
+	if err != nil {
+		writeError(c, http.StatusNotFound, "NOT_FOUND", "部门不存在")
+		return
+	}
+	if err := serverstore.UpdateDepartment(a.DB, id, strings.TrimSpace(req.Name), req.ParentID, req.LeaderID, req.Description); err != nil {
+		if errors.Is(err, serverstore.ErrValidation) {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "上级部门不能是自身或子部门")
+			return
+		}
+		if errors.Is(err, serverstore.ErrDuplicate) {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "部门名称已存在")
+			return
+		}
+		if errors.Is(err, serverstore.ErrNotFound) {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "上级部门或主管不存在")
+			return
+		}
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+		return
+	}
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "dept_update", before.Name+"→"+req.Name)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (a *AdminAPI) deleteDepartment(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "非法部门 ID")
+		return
+	}
+	before, err := serverstore.GroupByID(a.DB, id)
+	if err != nil {
+		writeError(c, http.StatusNotFound, "NOT_FOUND", "部门不存在")
+		return
+	}
+	if err := serverstore.DeleteDepartment(a.DB, id); err != nil {
+		if errors.Is(err, serverstore.ErrDepartmentInUse) {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "部门仍有关联(成员/子部门/授权),请先转移或清理")
+			return
+		}
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
+		return
+	}
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "dept_delete", before.Name)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// setUserDepartment 单部门归属(员工金字塔单选):替换用户全部组为指定部门。
+func (a *AdminAPI) setUserDepartment(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "非法用户 ID")
+		return
+	}
+	u, err := serverstore.GetUserByID(a.DB, id)
+	if err != nil {
+		writeError(c, http.StatusNotFound, "NOT_FOUND", "用户不存在")
+		return
+	}
+	var req struct {
+		GroupID int64 `json:"group_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
+		return
+	}
+	var names []string
+	if req.GroupID > 0 {
+		g, err := serverstore.GroupByID(a.DB, req.GroupID)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "部门不存在")
+			return
+		}
+		names = []string{g.Name}
+	}
+	if err := serverstore.SyncUserGroups(a.DB, id, names); err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+		return
+	}
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_dept", u.Username+" → "+strings.Join(names, ","))
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
