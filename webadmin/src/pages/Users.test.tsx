@@ -26,34 +26,22 @@ beforeEach(() => {
     }
     if (path === '/api/admin/departments') return { departments: depts }
     if (path === '/api/admin/users/1/department' && init?.method === 'PUT') return { ok: true }
-    if (path === '/api/admin/departments' && init?.method === 'POST') return { department: { id: 3, name: '财务部' } }
-    if (path === '/api/admin/departments/1' && init?.method === 'PUT') return { ok: true }
-    if (path === '/api/admin/departments/1' && init?.method === 'DELETE') return { ok: true }
     return {}
   })
 })
 
 describe('Users 用户管理页', () => {
-  it('渲染用户表格与部门管理卡片', async () => {
+  it('渲染用户表格:部门徽标与管理角色', async () => {
     render(<Users />)
-    expect((await screen.findAllByText('alice')).length).toBeGreaterThanOrEqual(1)
-    expect(screen.getByText('部门管理')).toBeInTheDocument()
-    expect(screen.getAllByText('研发部').length).toBeGreaterThanOrEqual(1)
-    expect(screen.getAllByText('前端组').length).toBeGreaterThanOrEqual(1)
+    expect(await screen.findByText('alice')).toBeInTheDocument()
+    expect(screen.getByText('研发部')).toBeInTheDocument()
     expect(screen.getByText('管理员')).toBeInTheDocument()
+    expect(screen.getByText('员工')).toBeInTheDocument()
   })
 
-  it('部门表格:层级/主管/成员数/已授权徽标', async () => {
+  it('员工部门归属:打开对话框从部门树单选并保存', async () => {
     render(<Users />)
-    await screen.findByText('部门管理')
-    expect(screen.getAllByText('alice').length).toBeGreaterThanOrEqual(1) // 用户表+主管列
-    expect(screen.getAllByText('1').length).toBeGreaterThanOrEqual(1) // 成员数
-    expect(screen.getAllByText('已授权').length).toBeGreaterThanOrEqual(1)
-  })
-
-  it('员工部门归属:从部门树单选并保存', async () => {
-    render(<Users />)
-    await screen.findByText('部门管理')
+    await screen.findByText('alice')
     fireEvent.click(screen.getAllByRole('button', { name: '部门' })[0])
     const dialog = within(await screen.findByRole('dialog'))
     expect(dialog.getByText(/从部门树选择归属/)).toBeInTheDocument()
@@ -64,26 +52,10 @@ describe('Users 用户管理页', () => {
     )
   })
 
-  it('新建部门:提交 POST /departments', async () => {
+  it('未分配部门用户显示占位', async () => {
     render(<Users />)
-    await screen.findByText('部门管理')
-    fireEvent.click(screen.getByRole('button', { name: '新建部门' }))
-    const dialog = within(await screen.findByRole('dialog'))
-    fireEvent.change(dialog.getByPlaceholderText('如 研发部'), { target: { value: '财务部' } })
-    fireEvent.click(dialog.getByRole('button', { name: '保存' }))
-    expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/departments',
-      expect.objectContaining({ method: 'POST' }),
-    )
-  })
-
-  it('删除部门:确认后调用 DELETE(带约束提示)', async () => {
-    render(<Users />)
-    await screen.findByText('部门管理')
-    fireEvent.click(screen.getAllByRole('button', { name: '删除' })[0])
-    expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/departments/1',
-      expect.objectContaining({ method: 'DELETE' }),
-    )
+    await screen.findByText('boss')
+    // boss 无部门
+    expect(screen.getByText('—')).toBeInTheDocument()
   })
 })

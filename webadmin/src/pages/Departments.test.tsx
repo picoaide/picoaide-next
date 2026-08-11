@@ -1,0 +1,75 @@
+import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { render, screen, fireEvent, within } from '@testing-library/react'
+import Departments from './Departments'
+import { request } from '../api'
+
+const mockRequest = vi.mocked(request)
+const confirmSpy = vi.fn(() => true)
+
+const depts = [
+  { id: 1, name: '研发部', parent_id: 0, leader_id: 2, leader_name: 'alice', description: '', member_count: 1, child_count: 1, granted_count: 1 },
+  { id: 2, name: '前端组', parent_id: 1, leader_id: 0, leader_name: '', description: '', member_count: 1, child_count: 0, granted_count: 0 },
+]
+
+beforeEach(() => {
+  window.confirm = confirmSpy as any
+  mockRequest.mockReset()
+  mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+    if (path === '/api/admin/departments') return { departments: depts }
+    if (path === '/api/admin/users?size=200') {
+      return { users: [{ id: 2, username: 'alice', is_admin: false, status: 1, groups: ['研发部'] }], total: 1, page: 1, size: 200 }
+    }
+    if (path === '/api/admin/departments' && init?.method === 'POST') return { department: { id: 3, name: '财务部' } }
+    if (path === '/api/admin/departments/1' && init?.method === 'PUT') return { ok: true }
+    if (path === '/api/admin/departments/1' && init?.method === 'DELETE') return { ok: true }
+    return {}
+  })
+})
+
+describe('Departments 部门管理页', () => {
+  it('渲染部门树表格:层级/主管/成员数/已授权徽标', async () => {
+    render(<Departments />)
+    expect(await screen.findByText('部门管理')).toBeInTheDocument()
+    expect(screen.getAllByText('研发部').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText('前端组').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText('alice').length).toBeGreaterThanOrEqual(1) // 主管列
+    expect(screen.getAllByText('已授权').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText('1').length).toBeGreaterThanOrEqual(1) // 成员数
+  })
+
+  it('新建部门:提交 POST /departments', async () => {
+    render(<Departments />)
+    await screen.findByText('部门管理')
+    fireEvent.click(screen.getByRole('button', { name: '新建部门' }))
+    const dialog = within(await screen.findByRole('dialog'))
+    fireEvent.change(dialog.getByPlaceholderText('如 研发部'), { target: { value: '财务部' } })
+    fireEvent.click(dialog.getByRole('button', { name: '保存' }))
+    expect(mockRequest).toHaveBeenCalledWith(
+      '/api/admin/departments',
+      expect.objectContaining({ method: 'POST' }),
+    )
+  })
+
+  it('编辑部门:主管下拉列出用户,保存调用 PUT', async () => {
+    render(<Departments />)
+    await screen.findByText('部门管理')
+    fireEvent.click(screen.getAllByRole('button', { name: '编辑' })[0])
+    const dialog = within(await screen.findByRole('dialog'))
+    expect((dialog.getByPlaceholderText('如 研发部') as HTMLInputElement).value).toBe('研发部')
+    fireEvent.click(dialog.getByRole('button', { name: '保存' }))
+    expect(mockRequest).toHaveBeenCalledWith(
+      '/api/admin/departments/1',
+      expect.objectContaining({ method: 'PUT' }),
+    )
+  })
+
+  it('删除部门:确认后调用 DELETE', async () => {
+    render(<Departments />)
+    await screen.findByText('部门管理')
+    fireEvent.click(screen.getAllByRole('button', { name: '删除' })[0])
+    expect(mockRequest).toHaveBeenCalledWith(
+      '/api/admin/departments/1',
+      expect.objectContaining({ method: 'DELETE' }),
+    )
+  })
+})
