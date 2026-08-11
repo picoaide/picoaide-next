@@ -85,6 +85,8 @@ export default function Knowledge() {
   const [grantDialog, setGrantDialog] = useState(false)
   const [grantFolder, setGrantFolder] = useState<Folder | null>(null)
   const [grantTarget, setGrantTarget] = useState('')
+  const [grantDept, setGrantDept] = useState('0')
+  const [departments, setDepartments] = useState<{ id: number; name: string; parent_id: number }[]>([])
   const [grantUsers, setGrantUsers] = useState<string[]>([])
   const [grantGroups, setGrantGroups] = useState<string[]>([])
   const [editDialog, setEditDialog] = useState(false)
@@ -153,7 +155,14 @@ export default function Knowledge() {
     }
   }
 
-  useEffect(() => { loadFolders(); loadImportStatus(); loadEmbedModel() }, [loadFolders, loadImportStatus])
+  const loadDepartments = useCallback(async () => {
+    try {
+      const d = await request('/api/admin/departments')
+      setDepartments(d.departments ?? [])
+    } catch { /* 部门可选 */ }
+  }, [])
+
+  useEffect(() => { loadFolders(); loadImportStatus(); loadEmbedModel(); loadDepartments() }, [loadFolders, loadImportStatus, loadEmbedModel])
   useEffect(() => { loadDocs(1, selected) }, [loadDocs, selected])
   // poll while uploads are still being extracted
   useEffect(() => {
@@ -580,8 +589,19 @@ export default function Knowledge() {
               </div>
             )}
             <div className="space-y-1">
-              <Label>用户名或组(组名以 @ 开头,如 @研发组)</Label>
-              <Input value={grantTarget} onChange={(e) => setGrantTarget(e.target.value)} />
+              <Label>用户名(单个)</Label>
+              <Input placeholder="如 alice" value={grantTarget} onChange={(e) => setGrantTarget(e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label>部门(金字塔:授权覆盖子部门,主管自动继承)</Label>
+              <Select value={grantDept} onValueChange={(v) => { setGrantDept(v); setGrantTarget('@' + v) }}>
+                <SelectTrigger><SelectValue placeholder="选择部门(可选)" /></SelectTrigger>
+                <SelectContent>
+                  {departments.map((d) => (
+                    <SelectItem key={d.id} value={d.name}>{d.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <Button className="w-full" disabled={!grantTarget.trim()} onClick={grant}>授权</Button>
           </div>

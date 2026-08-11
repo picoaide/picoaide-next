@@ -7,6 +7,7 @@ import { Badge } from '../components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Switch } from '../components/ui/switch'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 
 interface User {
   id: number
@@ -14,6 +15,18 @@ interface User {
   is_admin: boolean
   status: number
   groups?: string[]
+}
+
+interface Department {
+  id: number
+  name: string
+  parent_id: number
+  leader_id: number
+  leader_name: string
+  description: string
+  member_count: number
+  child_count: number
+  granted_count: number
 }
 
 interface ApiToken {
@@ -29,8 +42,21 @@ function fmtTime(s: string): string {
   return s ? s.slice(0, 16).replace('T', ' ') : '—'
 }
 
+// 部门树选项(缩进层级显示):平铺 → "研发部"、"研发部 / 前端组"
+function deptOptions(depts: Department[], parentId: number, depth: number): { id: number; label: string }[] {
+  const out: { id: number; label: string }[] = []
+  for (const d of depts) {
+    if (d.parent_id !== parentId) continue
+    const prefix = depth > 0 ? `${'　'.repeat(depth)}↳ ` : ''
+    out.push({ id: d.id, label: `${prefix}${d.name}` })
+    out.push(...deptOptions(depts, d.id, depth + 1))
+  }
+  return out
+}
+
 export default function Users() {
   const [users, setUsers] = useState<User[]>([])
+  const [depts, setDepts] = useState<Department[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [q, setQ] = useState('')
@@ -41,16 +67,23 @@ export default function Users() {
   const [error, setError] = useState('')
   const [tokensUser, setTokensUser] = useState<User | null>(null)
   const [tokens, setTokens] = useState<ApiToken[]>([])
-  const [groupsUser, setGroupsUser] = useState<User | null>(null)
-  const [groupsInput, setGroupsInput] = useState('')
+  const [deptUser, setDeptUser] = useState<User | null>(null)
+  const [deptSelect, setDeptSelect] = useState('0')
+  // 部门管理(金字塔组织架构)
+  const [deptDialog, setDeptDialog] = useState(false)
+  const [deptForm, setDeptForm] = useState({ id: 0, name: '', parent_id: '0', leader_id: '0', description: '' })
 
   const load = useCallback(async (p: number, search: string) => {
     try {
       const params = new URLSearchParams({ page: String(p), size: '20' })
       if (search) params.set('q', search)
-      const data = await request(`/api/admin/users?${params}`)
-      setUsers(data.users)
-      setTotal(data.total)
+      const [u, d] = await Promise.all([
+        request(`/api/admin/users?${params}`),
+        request('/api/admin/departments'),
+      ])
+      setUsers(u.users)
+      setTotal(u.total)
+      setDepts(d.departments ?? [])
       setPage(p)
     } catch (err: any) {
       setError(err.message)
@@ -117,20 +150,64 @@ export default function Users() {
     }
   }
 
-  async function openGroups(u: User) {
-    setGroupsUser(u)
-    setGroupsInput((u.groups ?? []).join(', '))
+  // ---- 员工部门归属(金字塔单选,从部门树选择) ----
+  async function openDept(u: User) {
+    setDeptUser(u)
+    const current = (u.groups ?? [])[0]
+    const d = depts.find((x) => x.name === current)
+    setDeptSelect(d ? String(d.id) : '0')
   }
 
-  async function saveGroups() {
-    if (!groupsUser) return
-    const groups = groupsInput.split(',').map((s) => s.trim()).filter(Boolean)
+  async function saveDept() {
+    if (!deptUser) return
     try {
-      await request(`/api/admin/users/${groupsUser.id}/groups`, {
+      await request(`/api/admin/users/${deptUser.id}/department`, {
         method: 'PUT',
-        body: JSON.stringify({ groups }),
+        body: JSON.stringify({ group_id: Number(deptSelect) }),
       })
-      setGroupsUser(null)
+      setDeptUser(null)
+      load(page, q)
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
+  // ---- 部门管理(金字塔:部门→主管→员工) ----
+  function openDeptEdit(d?: Department) {
+    setDeptForm({
+      id: d?.id ?? 0,
+      name: d?.name ?? '',
+      parent_id: String(d?.parent_id ?? 0),
+      leader_id: String(d?.leader_id ?? 0),
+      description: d?.description ?? '',
+    })
+    setDeptDialog(true)
+  }
+
+  async function saveDeptForm() {
+    const body = JSON.stringify({
+      name: deptForm.name,
+      parent_id: Number(deptForm.parent_id),
+      leader_id: Number(deptForm.leader_id),
+      description: deptForm.description,
+    })
+    try {
+      if (deptForm.id > 0) {
+        await request(`/api/admin/departments/${deptForm.id}`, { method: 'PUT', body })
+      } else {
+        await request('/api/admin/departments', { method: 'POST', body })
+      }
+      setDeptDialog(false)
+      load(page, q)
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
+  async function removeDept(d: Department) {
+    if (!window.confirm(`确定删除部门「${d.name}」?有关联(成员/子部门/授权)时将被拒绝。`)) return
+    try {
+      await request(`/api/admin/departments/${d.id}`, { method: 'DELETE' })
       load(page, q)
     } catch (err: any) {
       setError(err.message)
@@ -156,12 +233,66 @@ export default function Users() {
         </div>
       </div>
       {error && <div className="text-sm text-destructive">{error}</div>}
+
+      {/* ---- 部门管理(金字塔组织架构) ---- */}
+      <div className="rounded-lg border">
+        <div className="flex items-center justify-between border-b px-4 py-3">
+          <div>
+            <div className="text-sm font-semibold">部门管理</div>
+            <div className="text-xs text-muted-foreground">
+              金字塔架构:部门树(可嵌套)→ 部门主管 → 员工;授权给部门覆盖其子部门,主管自动继承部门及下级授权
+            </div>
+          </div>
+          <Button size="sm" onClick={() => openDeptEdit()}>新建部门</Button>
+        </div>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>部门</TableHead>
+              <TableHead>上级部门</TableHead>
+              <TableHead>部门主管</TableHead>
+              <TableHead>成员</TableHead>
+              <TableHead>子部门</TableHead>
+              <TableHead className="text-right">操作</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {depts.map((d) => {
+              const parent = depts.find((x) => x.id === d.parent_id)
+              return (
+                <TableRow key={d.id}>
+                  <TableCell>
+                    <div className="flex items-center gap-2">
+                      {d.parent_id !== 0 && <span className="text-muted-foreground">↳</span>}
+                      {d.name}
+                      {d.granted_count > 0 && <Badge variant="outline">已授权</Badge>}
+                    </div>
+                    {d.description && <div className="text-xs text-muted-foreground">{d.description}</div>}
+                  </TableCell>
+                  <TableCell>{parent?.name ?? '—'}</TableCell>
+                  <TableCell>{d.leader_name || '—'}</TableCell>
+                  <TableCell>{d.member_count}</TableCell>
+                  <TableCell>{d.child_count}</TableCell>
+                  <TableCell className="text-right space-x-2">
+                    <Button size="sm" variant="outline" onClick={() => openDeptEdit(d)}>编辑</Button>
+                    <Button size="sm" variant="destructive" onClick={() => removeDept(d)}>删除</Button>
+                  </TableCell>
+                </TableRow>
+              )
+            })}
+            {depts.length === 0 && (
+              <TableRow><TableCell colSpan={6} className="text-center text-muted-foreground">暂无部门,点击「新建部门」开始搭建组织架构</TableCell></TableRow>
+            )}
+          </TableBody>
+        </Table>
+      </div>
+
       <Table>
         <TableHeader>
           <TableRow>
             <TableHead>ID</TableHead>
             <TableHead>用户名</TableHead>
-            <TableHead>部门组</TableHead>
+            <TableHead>部门</TableHead>
             <TableHead>角色</TableHead>
             <TableHead>状态</TableHead>
             <TableHead className="text-right">操作</TableHead>
@@ -174,14 +305,14 @@ export default function Users() {
               <TableCell>{u.username}</TableCell>
               <TableCell>
                 {(u.groups ?? []).length > 0
-                  ? u.groups!.map((g) => <Badge key={g} variant="outline" className="mr-1">@{g}</Badge>)
+                  ? u.groups!.map((g) => <Badge key={g} variant="outline" className="mr-1">{g}</Badge>)
                   : <span className="text-xs text-muted-foreground">—</span>}
               </TableCell>
               <TableCell>{u.is_admin ? <Badge>管理员</Badge> : <Badge variant="secondary">员工</Badge>}</TableCell>
               <TableCell>{u.status === 1 ? <Badge variant="success">启用</Badge> : <Badge variant="destructive">禁用</Badge>}</TableCell>
               <TableCell className="text-right space-x-2">
                 <Button size="sm" variant="outline" onClick={() => openTokens(u)}>令牌</Button>
-                <Button size="sm" variant="outline" onClick={() => openGroups(u)}>部门组</Button>
+                <Button size="sm" variant="outline" onClick={() => openDept(u)}>部门</Button>
                 <Button size="sm" variant="outline" onClick={() => toggleUser(u)}>
                   {u.status === 1 ? '禁用' : '启用'}
                 </Button>
@@ -201,7 +332,7 @@ export default function Users() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>新建用户</DialogTitle>
-            <DialogDescription>创建本地账号</DialogDescription>
+            <DialogDescription>创建本地账号,创建后在「部门」中设置归属</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-1">
@@ -221,18 +352,72 @@ export default function Users() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={!!groupsUser} onOpenChange={(open) => { if (!open) setGroupsUser(null) }}>
+      {/* 员工部门归属(金字塔单选) */}
+      <Dialog open={!!deptUser} onOpenChange={(open) => { if (!open) setDeptUser(null) }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>部门组 · {groupsUser?.username}</DialogTitle>
-            <DialogDescription>组名以逗号分隔;部门组用于知识库/技能/MCP 授权(LDAP 登录自动同步,此处仅本地账号)</DialogDescription>
+            <DialogTitle>设置部门 · {deptUser?.username}</DialogTitle>
+            <DialogDescription>从部门树选择归属(单选);授权给上级部门自动覆盖本部门</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-1">
-              <Label>部门组</Label>
-              <Input placeholder="研发部, 财务部" value={groupsInput} onChange={(e) => setGroupsInput(e.target.value)} />
+              <Label>部门</Label>
+              <Select value={deptSelect} onValueChange={setDeptSelect}>
+                <SelectTrigger><SelectValue placeholder="选择部门" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="0">未分配</SelectItem>
+                  {deptOptions(depts, 0, 0).map((o) => (
+                    <SelectItem key={o.id} value={String(o.id)}>{o.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
-            <Button onClick={saveGroups} className="w-full">保存</Button>
+            <Button onClick={saveDept} className="w-full">保存</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 部门新建/编辑(金字塔) */}
+      <Dialog open={deptDialog} onOpenChange={setDeptDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{deptForm.id > 0 ? '编辑部门' : '新建部门'}</DialogTitle>
+            <DialogDescription>上级部门为空 = 顶层部门;主管可为空,后续补任</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-1">
+              <Label>部门名称</Label>
+              <Input placeholder="如 研发部" value={deptForm.name} onChange={(e) => setDeptForm({ ...deptForm, name: e.target.value })} />
+            </div>
+            <div className="space-y-1">
+              <Label>上级部门</Label>
+              <Select value={deptForm.parent_id} onValueChange={(v) => setDeptForm({ ...deptForm, parent_id: v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="0">无(顶层部门)</SelectItem>
+                  {deptOptions(depts.filter((d) => d.id !== deptForm.id), 0, 0).map((o) => (
+                    <SelectItem key={o.id} value={String(o.id)}>{o.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label>部门主管</Label>
+              <Select value={deptForm.leader_id} onValueChange={(v) => setDeptForm({ ...deptForm, leader_id: v })}>
+                <SelectTrigger><SelectValue placeholder="选择主管" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="0">未设置</SelectItem>
+                  {users.map((u) => (
+                    <SelectItem key={u.id} value={String(u.id)}>{u.username}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label>描述(可选)</Label>
+              <Input value={deptForm.description} onChange={(e) => setDeptForm({ ...deptForm, description: e.target.value })} />
+            </div>
+            <Button className="w-full" disabled={!deptForm.name.trim()} onClick={saveDeptForm}>保存</Button>
           </div>
         </DialogContent>
       </Dialog>

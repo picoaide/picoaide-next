@@ -56,14 +56,18 @@ export default function Marketplace() {
   const [grantDialog, setGrantDialog] = useState<{ kind: 'skill' | 'mcp'; name: string; id: number } | null>(null)
   const [grants, setGrants] = useState<Grant[]>([])
   const [grantTarget, setGrantTarget] = useState('')
+  const [grantDept, setGrantDept] = useState('0')
+  const [departments, setDepartments] = useState<{ id: number; name: string }[]>([])
 
   const load = useCallback(async () => {
     try {
-      const [s, m, d] = await Promise.all([
+      const [s, m, d, dep] = await Promise.all([
         request('/api/admin/skills'),
         request('/api/admin/mcp'),
         request('/api/admin/mcp-downloads?size=20'),
+        request('/api/admin/departments'),
       ])
+      setDepartments(dep.departments ?? [])
       setSkills(s.skills)
       setMcps(m.mcp)
       setDownloads(d.downloads)
@@ -415,8 +419,19 @@ export default function Marketplace() {
               <div className="text-xs text-muted-foreground">未授权:所有用户均不可见(严格默认),请授权用户或部门组</div>
             )}
             <div className="space-y-1">
-              <Label>用户名或部门组(组名以 @ 开头,如 @研发部)</Label>
-              <Input value={grantTarget} onChange={(e) => setGrantTarget(e.target.value)} />
+              <Label>用户名(单个)</Label>
+              <Input placeholder="如 alice" value={grantTarget} onChange={(e) => setGrantTarget(e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label>部门(金字塔:授权覆盖子部门,主管自动继承)</Label>
+              <Select value={grantDept} onValueChange={(v) => { setGrantDept(v); setGrantTarget('@' + v) }}>
+                <SelectTrigger><SelectValue placeholder="选择部门(可选)" /></SelectTrigger>
+                <SelectContent>
+                  {departments.map((d) => (
+                    <SelectItem key={d.id} value={d.name}>{d.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <Button className="w-full" disabled={!grantTarget.trim()} onClick={doGrant}>授权</Button>
           </div>
