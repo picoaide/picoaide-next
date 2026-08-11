@@ -9,7 +9,7 @@ import { tmpdir } from 'os'
 
 const SERVER_URL = process.env.PICOAI_SERVER_URL || 'http://127.0.0.1:18080'
 const USERNAME = process.env.PICOAI_E2E_USER || 'admin'
-const PASSWORD = process.env.PICOAI_E2E_PASSWORD || 'Admin@123456'
+const PASSWORD = process.env.PICOAI_E2E_PASSWORD || process.env.PICOAI_ADMIN_PASSWORD || 'DevAdmin@123456'
 
 test.setTimeout(120_000)
 
@@ -120,3 +120,27 @@ function findFile(root: string, name: string): string | null {
 }
 
 void rmSync
+
+test('知识库检索:聊天触发 kb_search 工具并渲染块级结果', async () => {
+  const { app, page } = await launchApp(true)
+  try {
+    await page.getByLabel('服务器地址').fill(SERVER_URL)
+    await page.getByLabel('用户名').fill(USERNAME)
+    await page.getByLabel('密码').fill(PASSWORD)
+    await page.getByRole('button', { name: '登录', exact: true }).click()
+    await page.getByText('新建会话').waitFor({ timeout: 20000 })
+
+    // 执行模式触发 kb_search(脚本化 TOOLCALL)
+    await page.getByRole('tab', { name: '执行' }).click()
+    await page.getByPlaceholder(/输入消息|请输入/).fill('TOOLCALL:kb_search')
+    await page.keyboard.press('Enter')
+    // 工具卡片出现(kb_search 为引擎注册的远程 MCP 工具)
+    await page.getByText('kb_search', { exact: false }).first().waitFor({ timeout: 30000 })
+    // 工具结果渲染:本地 dev-env seed 知识库的块级命中(报销类文档)
+    await page.getByText(/报销|制度|差旅/).first().waitFor({ timeout: 30000 })
+    // 模型基于结果继续回答(mock 回显收尾)
+    await page.getByText(/mock upstream echo/).first().waitFor({ timeout: 30000 })
+  } finally {
+    await app.close()
+  }
+})

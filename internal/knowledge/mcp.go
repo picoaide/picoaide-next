@@ -95,7 +95,7 @@ func handleToolCall(db *sql.DB, c *gin.Context, id json.RawMessage, params json.
 	if err != nil {
 		return textResponse(id, "failed to load user groups: "+err.Error(), true)
 	}
-	accessible, err := accessibleFolders(db, u.Username, groups)
+	accessible, err := accessibleFolders(db, u.Username, groups, u.IsAdmin)
 	if err != nil {
 		return textResponse(id, "failed to load folder grants: "+err.Error(), true)
 	}
@@ -104,7 +104,7 @@ func handleToolCall(db *sql.DB, c *gin.Context, id json.RawMessage, params json.
 	}
 	switch p.Name {
 	case "kb_search":
-		return toolKBSearch(db, id, p.Arguments, u.Username, groups)
+		return toolKBSearch(db, id, p.Arguments, u.Username, groups, u.IsAdmin)
 	case "kb_read":
 		return toolKBRead(db, id, p.Arguments, accessible)
 	case "kb_list":
@@ -116,7 +116,7 @@ func handleToolCall(db *sql.DB, c *gin.Context, id json.RawMessage, params json.
 	}
 }
 
-func toolKBSearch(db *sql.DB, id json.RawMessage, args json.RawMessage, username string, groups []string) rpcResponse {
+func toolKBSearch(db *sql.DB, id json.RawMessage, args json.RawMessage, username string, groups []string, isAdmin bool) rpcResponse {
 	var a struct {
 		Query    string `json:"query"`
 		Page     int    `json:"page"`
@@ -128,7 +128,14 @@ func toolKBSearch(db *sql.DB, id json.RawMessage, args json.RawMessage, username
 	if a.Query == "" {
 		return textResponse(id, "query is required", true)
 	}
-	res, total, err := SearchChunks(db, username, groups, a.Query, a.Page, a.PageSize)
+	var res []ChunkResult
+	var total int64
+	var err error
+	if isAdmin {
+		res, total, err = SearchChunksAll(db, a.Query, a.Page, a.PageSize)
+	} else {
+		res, total, err = SearchChunks(db, username, groups, a.Query, a.Page, a.PageSize)
+	}
 	if err != nil {
 		return textResponse(id, "search failed: "+err.Error(), true)
 	}
@@ -250,7 +257,18 @@ func toolKBUpload(db *sql.DB, id json.RawMessage, args json.RawMessage, accessib
 	return textResponse(id, fmt.Sprintf("uploaded document id=%d folder=%d", docID, a.FolderID), false)
 }
 
-func accessibleFolders(db *sql.DB, username string, groups []string) (map[int64]bool, error) {
+func accessibleFolders(db *sql.DB, username string, groups []string, isAdmin bool) (map[int64]bool, error) {
+	if isAdmin {
+		ids, err := serverstore.ListKBFolders(db)
+		if err != nil {
+			return nil, err
+		}
+		m := map[int64]bool{0: true}
+		for _, f := range ids {
+			m[f.ID] = true
+		}
+		return m, nil
+	}
 	ids, err := serverstore.GetAccessibleFolderIDs(db, username, groups)
 	if err != nil {
 		return nil, err
