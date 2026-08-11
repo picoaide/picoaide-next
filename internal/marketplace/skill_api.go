@@ -68,7 +68,8 @@ func (a *API) viewer(c *gin.Context) (u *serverstore.User, groups []string, ok b
 	if u == nil {
 		return nil, nil, false
 	}
-	groups, err := serverstore.UserGroups(a.DB, u.ID)
+	// 有效组(部门树继承)
+	groups, err := serverstore.UserEffectiveGroups(a.DB, u.ID)
 	if err != nil {
 		return nil, nil, false
 	}

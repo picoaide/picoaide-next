@@ -91,7 +91,8 @@ func handleToolCall(db *sql.DB, c *gin.Context, id json.RawMessage, params json.
 	if u == nil {
 		return rpcErrorResponse(id, -32602, "no authenticated user")
 	}
-	groups, err := serverstore.UserGroups(db, u.ID)
+	// 有效组(部门树继承:祖先链 + 主管子树),权限解析统一入口
+	groups, err := serverstore.UserEffectiveGroups(db, u.ID)
 	if err != nil {
 		return textResponse(id, "failed to load user groups: "+err.Error(), true)
 	}

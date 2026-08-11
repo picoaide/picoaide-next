@@ -71,7 +71,8 @@ func Build(db *sql.DB, user *serverstore.User) (*Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	groups, err := serverstore.UserGroups(db, user.ID)
+	// 有效组(部门树继承:祖先链 + 主管子树)
+	groups, err := serverstore.UserEffectiveGroups(db, user.ID)
 	if err != nil {
 		return nil, err
 	}

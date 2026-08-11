@@ -1,0 +1,238 @@
+package serverstore
+
+import (
+	"testing"
+)
+
+func TestDepartmentCRUD(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+
+	// 建树:研发部(顶层)→ 前端组/后端组;人事部(顶层)
+	devID, err := CreateDepartment(db, "研发部", 0, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	frontID, err := CreateDepartment(db, "前端组", devID, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateDepartment(db, "后端组", devID, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	hrID, err := CreateDepartment(db, "人事部", 0, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 重名拒绝
+	if _, err := CreateDepartment(db, "人事部", 0, 0, ""); err != ErrDuplicate {
+		t.Fatalf("dup name err = %v", err)
+	}
+	// 父部门不存在
+	if _, err := CreateDepartment(db, "孤儿", 9999, 0, ""); err != ErrNotFound {
+		t.Fatalf("bad parent err = %v", err)
+	}
+
+	// 列表含层级信息
+	list, err := ListDepartments(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 4 {
+		t.Fatalf("departments = %+v", list)
+	}
+	for _, d := range list {
+		if d.Name == "前端组" && d.ParentID != devID {
+			t.Fatalf("前端组 parent = %d", d.ParentID)
+		}
+	}
+
+	// 循环防护:前端组不能成为研发部的父
+	if err := UpdateDepartment(db, devID, "研发部", frontID, 0, ""); err != ErrValidation {
+		t.Fatalf("cycle parent err = %v, want ErrValidation", err)
+	}
+	// 自引用拒绝
+	if err := UpdateDepartment(db, devID, "研发部", devID, 0, ""); err != ErrValidation {
+		t.Fatalf("self parent err = %v", err)
+	}
+	// 主管必须存在
+	if err := UpdateDepartment(db, devID, "研发部", 0, 9999, ""); err != ErrNotFound {
+		t.Fatalf("bad leader err = %v", err)
+	}
+
+	// 删除约束:有子部门/成员/授权 → 拒绝
+	aliceID, err := CreateUserWithPassword(db, "alice", "pw123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncUserGroups(db, aliceID, []string{"前端组"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := GrantSkill(db, "data-extract", "人事部", GranteeGroup); err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteDepartment(db, devID); err != ErrDepartmentInUse {
+		t.Fatalf("delete dev with children err = %v", err)
+	}
+	if err := DeleteDepartment(db, frontID); err != ErrDepartmentInUse {
+		t.Fatalf("delete front with member err = %v", err)
+	}
+	if err := DeleteDepartment(db, hrID); err != ErrDepartmentInUse {
+		t.Fatalf("delete hr with grant err = %v", err)
+	}
+	// 无引用部门可删
+	emptyID, err := CreateDepartment(db, "空部门", 0, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteDepartment(db, emptyID); err != nil {
+		t.Fatalf("delete empty: %v", err)
+	}
+}
+
+// 改名级联:授权表按组名引用,改名后授权必须仍解析到同一组
+func TestDepartmentRenameCascadesGrants(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	devID, _ := CreateDepartment(db, "研发部", 0, 0, "")
+	if err := GrantSkill(db, "data-extract", "研发部", GranteeGroup); err != nil {
+		t.Fatal(err)
+	}
+	if err := GrantMCP(db, 1, "研发部", GranteeGroup); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateDepartment(db, devID, "技术中心", 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	names, err := AccessibleSkillNames(db, "alice", []string{"技术中心"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 || names[0] != "data-extract" {
+		t.Fatalf("skill grant lost after rename: %v", names)
+	}
+	set, err := AccessibleMCPSet(db, "alice", []string{"技术中心"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !set[1] {
+		t.Fatalf("mcp grant lost after rename")
+	}
+}
+
+// 金字塔继承:授权给父部门 → 子部门成员可见;主管自动获得部门子树授权
+func TestUserEffectiveGroupsInheritance(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	devID, _ := CreateDepartment(db, "研发部", 0, 0, "")
+	frontID, _ := CreateDepartment(db, "前端组", devID, 0, "")
+	if _, err := CreateDepartment(db, "后端组", devID, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	hrID, _ := CreateDepartment(db, "人事部", 0, 0, "")
+
+	// alice 属前端组;bob 属人事部;carl 是研发部主管(不属于任何部门)
+	aliceID, _ := CreateUserWithPassword(db, "alice", "pw123456")
+	bobID, _ := CreateUserWithPassword(db, "bob", "pw123456")
+	carlID, _ := CreateUserWithPassword(db, "carl", "pw123456")
+	if err := SyncUserGroups(db, aliceID, []string{"前端组"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncUserGroups(db, bobID, []string{"人事部"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateDepartment(db, devID, "研发部", 0, carlID, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// alice(前端组)有效组 = 前端组 + 研发部(祖先)
+	names, err := UserEffectiveGroups(db, aliceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, n := range names {
+		got[n] = true
+	}
+	if !got["前端组"] || !got["研发部"] {
+		t.Fatalf("alice effective = %v, want 前端组+研发部", names)
+	}
+	if got["人事部"] {
+		t.Fatalf("alice must not see 人事部: %v", names)
+	}
+	_ = hrID
+	_ = frontID
+
+	// bob(人事部)只有人事部
+	names, _ = UserEffectiveGroups(db, bobID)
+	if len(names) != 1 || names[0] != "人事部" {
+		t.Fatalf("bob effective = %v", names)
+	}
+
+	// carl(研发部主管,未入组)有效组 = 研发部 + 前端组 + 后端组(主管子树)
+	names, err = UserEffectiveGroups(db, carlID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = map[string]bool{}
+	for _, n := range names {
+		got[n] = true
+	}
+	if !got["研发部"] || !got["前端组"] || !got["后端组"] {
+		t.Fatalf("carl leader effective = %v, want 研发部+子树", names)
+	}
+	if got["人事部"] {
+		t.Fatalf("carl must not see 人事部")
+	}
+}
+
+// 端到端:授权「研发部」的 skill → 前端组成员可见(继承);主管可见(向上)
+func TestGrantInheritanceEndToEnd(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	devID, _ := CreateDepartment(db, "研发部", 0, 0, "")
+	frontID, _ := CreateDepartment(db, "前端组", devID, 0, "")
+	aliceID, _ := CreateUserWithPassword(db, "alice", "pw123456")
+	carlID, _ := CreateUserWithPassword(db, "carl", "pw123456")
+	if err := SyncUserGroups(db, aliceID, []string{"前端组"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateDepartment(db, devID, "研发部", 0, carlID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := GrantSkill(db, "data-extract", "研发部", GranteeGroup); err != nil {
+		t.Fatal(err)
+	}
+
+	// alice(前端组成员):通过祖先链可见
+	groups, _ := UserEffectiveGroups(db, aliceID)
+	names, err := AccessibleSkillNames(db, "alice", groups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 {
+		t.Fatalf("front-end member must inherit dev grant: %v", names)
+	}
+	// carl(主管):通过主管子树可见
+	groups, _ = UserEffectiveGroups(db, carlID)
+	names, err = AccessibleSkillNames(db, "carl", groups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 {
+		t.Fatalf("leader must inherit department grant: %v", names)
+	}
+	_ = frontID
+}
