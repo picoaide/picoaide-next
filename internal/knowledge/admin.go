@@ -38,6 +38,7 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, uploadsDir string) {
 	g.GET("/documents/:id", func(c *gin.Context) { getDoc(c, db) })
 	g.POST("/documents/:id/retry", func(c *gin.Context) { retryDoc(c, db) })
 	g.PUT("/folders/:id/grant", func(c *gin.Context) { grantFolder(c, db) })
+	g.PUT("/folders/:id/grants", func(c *gin.Context) { replaceFolderGrants(c, db) })
 	g.DELETE("/folders/:id/grant", func(c *gin.Context) { revokeGrant(c, db) })
 	g.GET("/folders/:id/grants", func(c *gin.Context) { listGrants(c, db) })
 	g.GET("/search", func(c *gin.Context) { search(c, db) })
@@ -517,4 +518,39 @@ func search(c *gin.Context, db *sql.DB) {
 			"title": r.Title, "title_path": r.TitlePath, "content": content, "score": r.Score})
 	}
 	c.JSON(http.StatusOK, gin.H{"results": out, "total": total, "mode": SearchMode(db)})
+}
+
+// replaceFolderGrants 整组替换文件夹的全部部门授权(原子;用户授权保留)。
+func replaceFolderGrants(c *gin.Context, db *sql.DB) {
+	folderID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
+		return
+	}
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM kb_folders WHERE id = ?", folderID).Scan(&n); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if n == 0 {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "文件夹不存在")
+		return
+	}
+	var req struct {
+		Groups []string `json:"groups"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
+		return
+	}
+	if err := serverstore.ReplaceFolderGroupGrants(db, folderID, req.Groups); err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "存在不认识的部门名称")
+			return
+		}
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "授权对象不合法")
+		return
+	}
+	_ = serverstore.AuditLog(db, adminUsername(c), "kb_grants_replace", "folder#"+strconv.FormatInt(folderID, 10)+" "+strings.Join(req.Groups, ","))
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

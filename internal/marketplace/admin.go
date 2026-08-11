@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -32,9 +33,11 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g.GET("/mcp-downloads", func(c *gin.Context) { listDownloads(c, db) })
 	// 授权管理(严格默认:未授权不可见/不可下载)
 	g.GET("/skills/:name/grants", func(c *gin.Context) { listSkillGrants(c, db) })
+	g.PUT("/skills/:name/grants", func(c *gin.Context) { replaceSkillGrants(c, db) })
 	g.PUT("/skills/:name/grant", func(c *gin.Context) { setSkillGrant(c, db, true) })
 	g.DELETE("/skills/:name/grant", func(c *gin.Context) { setSkillGrant(c, db, false) })
 	g.GET("/mcp/:id/grants", func(c *gin.Context) { listMCPGrants(c, db) })
+	g.PUT("/mcp/:id/grants", func(c *gin.Context) { replaceMCPGrants(c, db) })
 	g.PUT("/mcp/:id/grant", func(c *gin.Context) { setMCPGrant(c, db, true) })
 	g.DELETE("/mcp/:id/grant", func(c *gin.Context) { setMCPGrant(c, db, false) })
 }
@@ -472,4 +475,60 @@ func listDownloads(c *gin.Context, db *sql.DB) {
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"downloads": out, "total": total})
+}
+
+// replaceSkillGrants 整组替换技能的全部部门授权(原子;用户授权保留)。
+func replaceSkillGrants(c *gin.Context, db *sql.DB) {
+	name := c.Param("name")
+	if _, err := serverstore.GetSkill(db, name); errors.Is(err, serverstore.ErrNotFound) {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+		return
+	}
+	var req struct {
+		Groups []string `json:"groups"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
+		return
+	}
+	if err := serverstore.ReplaceSkillGroupGrants(db, name, req.Groups); err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "存在不认识的部门名称")
+			return
+		}
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "授权对象不合法")
+		return
+	}
+	_ = serverstore.AuditLog(db, adminUsername(c), "skill_grants_replace", name+" "+strings.Join(req.Groups, ","))
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// replaceMCPGrants 整组替换 MCP 的全部部门授权(原子;用户授权保留)。
+func replaceMCPGrants(c *gin.Context, db *sql.DB) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
+		return
+	}
+	if _, err := serverstore.GetMCPServer(db, id); errors.Is(err, serverstore.ErrNotFound) {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "插件不存在")
+		return
+	}
+	var req struct {
+		Groups []string `json:"groups"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
+		return
+	}
+	if err := serverstore.ReplaceMCPGroupGrants(db, id, req.Groups); err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "存在不认识的部门名称")
+			return
+		}
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "授权对象不合法")
+		return
+	}
+	_ = serverstore.AuditLog(db, adminUsername(c), "mcp_grants_replace", "mcp#"+strconv.FormatInt(id, 10)+" "+strings.Join(req.Groups, ","))
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

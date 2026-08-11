@@ -190,3 +190,78 @@ func DeleteMCPGrants(db queryer, mcpID int64) error {
 	_, err := db.Exec("DELETE FROM mcp_grants WHERE mcp_id = ?", mcpID)
 	return err
 }
+
+// ---- 整组替换(多部门批量授权,原子) ----
+
+// replaceGroupGrants replaces all group grants of a resource in one
+// transaction: existing group grants are dropped, the given department
+// names become the full group-grant set (user grants untouched).
+// Every name must reference an existing department (typos fail fast).
+func replaceGroupGrants(db *sql.DB, deleteSQL string, deleteArgs []any, insert func(tx *sql.Tx, name string) error, groups []string) error {
+	// 校验部门存在(整组替换只接受已存在部门,防拼错隐式建组)
+	seen := map[string]bool{}
+	for _, g := range groups {
+		if g == "" || seen[g] {
+			return ErrValidation
+		}
+		seen[g] = true
+		var n int
+		if err := db.QueryRow("SELECT COUNT(*) FROM groups WHERE name = ? COLLATE NOCASE", g).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(deleteSQL, deleteArgs...); err != nil {
+		return err
+	}
+	for _, g := range groups {
+		if err := insert(tx, g); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ReplaceSkillGroupGrants sets the full department-grant set of a skill.
+func ReplaceSkillGroupGrants(db *sql.DB, skillName string, groups []string) error {
+	return replaceGroupGrants(db,
+		"DELETE FROM skill_grants WHERE skill_name = ? AND grantee_type = 'group'", []any{skillName},
+		func(tx *sql.Tx, name string) error {
+			_, err := tx.Exec("INSERT INTO skill_grants (skill_name, grantee_type, grantee) VALUES (?, 'group', ?)", skillName, name)
+			return err
+		},
+		groups)
+}
+
+// ReplaceMCPGroupGrants sets the full department-grant set of an MCP.
+func ReplaceMCPGroupGrants(db *sql.DB, mcpID int64, groups []string) error {
+	return replaceGroupGrants(db,
+		"DELETE FROM mcp_grants WHERE mcp_id = ? AND grantee_type = 'group'", []any{mcpID},
+		func(tx *sql.Tx, name string) error {
+			_, err := tx.Exec("INSERT INTO mcp_grants (mcp_id, grantee_type, grantee) VALUES (?, 'group', ?)", mcpID, name)
+			return err
+		},
+		groups)
+}
+
+// ReplaceFolderGroupGrants sets the full department-grant set of a folder.
+func ReplaceFolderGroupGrants(db *sql.DB, folderID int64, groups []string) error {
+	return replaceGroupGrants(db,
+		"DELETE FROM kb_folder_groups WHERE folder_id = ?", []any{folderID},
+		func(tx *sql.Tx, name string) error {
+			gid, err := GetOrCreateGroup(tx, name)
+			if err != nil {
+				return err
+			}
+			_, err = tx.Exec("INSERT OR IGNORE INTO kb_folder_groups (folder_id, group_id) VALUES (?, ?)", folderID, gid)
+			return err
+		},
+		groups)
+}

@@ -295,3 +295,59 @@ func TestAdminGrantAPI(t *testing.T) {
 		t.Fatalf("unknown user grant = %d, want 400", w.Code)
 	}
 }
+
+// 整组替换端点:一次提交多部门授权,原子替换组授权
+func TestAdminReplaceGrantsAPI(t *testing.T) {
+	r, db, hdr := marketAdminSetup(t)
+	if _, err := serverstore.CreateUserWithPassword(db, "alice", "pw123456"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.CreateDepartment(db, "研发部", 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.CreateDepartment(db, "人事部", 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.AddSkill(db, &serverstore.Skill{
+		Name: "data-extract", Version: "1.0.0", GitURL: "https://x/data-extract", Enabled: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.AddMCPServer(db, &serverstore.MCPServer{Name: "time-now", Transport: "stdio", Command: "date", Enabled: 1}); err != nil {
+		t.Fatal(err)
+	}
+	// 一次提交两个部门(共享)
+	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/data-extract/grants", `{"groups":["研发部","人事部"]}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("replace skill grants: %d %s", w.Code, w.Body.String())
+	}
+	_, out := mreq(t, r, "GET", "/api/admin/skills/data-extract/grants", "", hdr)
+	grants := out["grants"].([]any)
+	if len(grants) != 2 {
+		t.Fatalf("skill grants = %v, want 2 departments", grants)
+	}
+	if w, _ := mreq(t, r, "PUT", "/api/admin/mcp/1/grants", `{"groups":["研发部","人事部"]}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("replace mcp grants: %d %s", w.Code, w.Body.String())
+	}
+	w2, out2 := mreq(t, r, "GET", "/api/admin/mcp/1/grants", "", hdr)
+	if len(out2["grants"].([]any)) != 2 {
+		t.Fatalf("mcp grants = %v, want 2 departments", out2["grants"])
+	}
+	_ = w2
+	// 空列表清空
+	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/data-extract/grants", `{"groups":[]}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("clear grants: %d", w.Code)
+	}
+	_, out = mreq(t, r, "GET", "/api/admin/skills/data-extract/grants", "", hdr)
+	if len(out["grants"].([]any)) != 0 {
+		t.Fatalf("grants after clear = %v", out["grants"])
+	}
+	// 不存在的部门 → 400
+	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/data-extract/grants", `{"groups":["不存在"]}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown dept = %d, want 400", w.Code)
+	}
+	// 审计
+	logs, err := serverstore.ListAuditLogs(db, 5)
+	if err != nil || logs[0].Action != "skill_grants_replace" {
+		t.Fatalf("audit = %+v %v", logs, err)
+	}
+}
