@@ -236,3 +236,43 @@ func TestGrantInheritanceEndToEnd(t *testing.T) {
 	}
 	_ = frontID
 }
+
+// 隐式全员组:未显式加入「全员」的用户也自动获得该组授权
+func TestEveryoneGroupImplicit(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateDepartment(db, "全员", 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateDepartment(db, "研发部", 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	uid, _ := CreateUserWithPassword(db, "alice", "pw123456")
+	if err := SyncUserGroups(db, uid, []string{"研发部"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := GrantSkill(db, "data-extract", "全员", GranteeGroup); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := UserEffectiveGroups(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, n := range groups {
+		got[n] = true
+	}
+	if !got["全员"] {
+		t.Fatalf("effective groups lack implicit 全员: %v", groups)
+	}
+	names, err := AccessibleSkillNames(db, "alice", groups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 {
+		t.Fatalf("everyone grant not resolved: %v", names)
+	}
+}
