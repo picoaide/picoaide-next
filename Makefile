@@ -4,9 +4,10 @@ BIN := bin/picoaide-server
 IMAGE ?= ghcr.io/picoaide/picoaide-server
 TAG ?= latest
 
-.PHONY: test test-server test-client build-server build-client build-desktop webadmin docker-image check pkg-linux pkg-windows pkg-macos
+.PHONY: test test-server test-client build-server build-client build-desktop webadmin docker-image check pkg-linux pkg-windows pkg-macos dev-env
 
-test:
+dev-env:
+	bash scripts/dev-env.sh
 	go test ./... -count=1
 
 test-server:
