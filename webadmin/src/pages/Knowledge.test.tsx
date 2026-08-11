@@ -12,6 +12,7 @@ beforeEach(() => {
   mockRequest.mockReset()
   mockRequest.mockImplementation(async (path: string) => {
     if (path === '/api/admin/kb/folders') return { folders: [{ id: 1, name: '研发部', parent_id: 0 }] }
+    if (path === '/api/admin/departments') return { departments: [{ id: 1, name: '研发部', parent_id: 0 }, { id: 4, name: '财务部', parent_id: 0 }] }
     if (path.startsWith('/api/admin/kb/documents')) return { documents: [], total: 0 }
     if (path === '/api/admin/kb/import-status') return { status: { pending: 0, ready: 0, error: 0, total: 0 }, errors: [] }
     if (path === '/api/admin/kb/embedding-model') return { model: '' }
@@ -61,26 +62,28 @@ describe('Knowledge 知识库页', () => {
     )
   })
 
-  it('授权对话框:输入 @组 提交调用 PUT grant', async () => {
+  it('授权对话框:勾选部门多选保存(整组替换)', async () => {
     mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path === '/api/admin/kb/folders/1/grants' && init?.method === 'PUT') return { ok: true }
+      if (path === '/api/admin/kb/folders/1/grants') return { users: [], groups: [] }
       return {
         folders: [{ id: 1, name: '研发部', parent_id: 0 }],
+        departments: [{ id: 1, name: '研发部', parent_id: 0 }, { id: 4, name: '财务部', parent_id: 0 }],
         documents: [], total: 0,
         status: { pending: 0, ready: 0, error: 0, total: 0 }, errors: [],
         model: '',
-        users: [], groups: [],
       } as any
     })
     render(<Knowledge />)
     await screen.findByText('研发部')
     fireEvent.click(screen.getAllByRole('button', { name: '授权' })[0])
     const dialog = within(await screen.findByRole('dialog'))
-    fireEvent.change(dialog.getByRole('textbox'), { target: { value: '@财务部' } })
-    fireEvent.click(dialog.getByRole('button', { name: '授权' }))
+    // 勾选研发部 → 保存部门授权(整组替换)
+    fireEvent.click(dialog.getByLabelText(/研发部/))
+    fireEvent.click(dialog.getByRole('button', { name: '保存部门授权' }))
     expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/kb/folders/1/grant',
-      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ group: '财务部' }) }),
+      '/api/admin/kb/folders/1/grants',
+      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ groups: ['研发部'] }) }),
     )
   })
 })

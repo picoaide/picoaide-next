@@ -8,7 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
-import { deptTreeOptions } from '../lib/utils'
+import { Checkbox } from '../components/ui/checkbox'
 
 interface Skill {
   name: string
@@ -57,7 +57,7 @@ export default function Marketplace() {
   const [grantDialog, setGrantDialog] = useState<{ kind: 'skill' | 'mcp'; name: string; id: number } | null>(null)
   const [grants, setGrants] = useState<Grant[]>([])
   const [grantTarget, setGrantTarget] = useState('')
-  const [grantDept, setGrantDept] = useState('0')
+  const [grantGroups, setGrantGroups] = useState<string[]>([])
   const [departments, setDepartments] = useState<{ id: number; parent_id: number; name: string }[]>([])
 
   const load = useCallback(async () => {
@@ -156,11 +156,30 @@ export default function Marketplace() {
     try {
       const data = await request(grantsPath(d))
       setGrants(data.grants ?? [])
+      setGrantGroups((data.grants ?? []).filter((g: Grant) => g.grantee_type === 'group').map((g: Grant) => g.grantee))
       setGrantTarget('')
       setGrantDialog(d)
     } catch (err: any) {
       setError(err.message)
     }
+  }
+
+  // 保存部门多选(整组替换,原子)
+  async function saveDeptGrants() {
+    if (!grantDialog) return
+    try {
+      await request(grantsPath(grantDialog), {
+        method: 'PUT',
+        body: JSON.stringify({ groups: grantGroups }),
+      })
+      setGrantDialog(null)
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
+  function toggleGroup(name: string) {
+    setGrantGroups((prev) => (prev.includes(name) ? prev.filter((g) => g !== name) : [...prev, name]))
   }
 
   async function doGrant() {
@@ -420,21 +439,26 @@ export default function Marketplace() {
               <div className="text-xs text-muted-foreground">未授权:所有用户均不可见(严格默认),请授权用户或部门组</div>
             )}
             <div className="space-y-1">
-              <Label>用户名(单个)</Label>
-              <Input placeholder="如 alice" value={grantTarget} onChange={(e) => setGrantTarget(e.target.value)} />
+              <Label>部门(多选:一个资源可授权多个部门,成员共享无需重复上传)</Label>
+              <div className="max-h-48 space-y-1 overflow-y-auto rounded-md border p-2">
+                {departments.map((d) => (
+                  <label key={d.id} className="flex cursor-pointer items-center gap-2 text-sm">
+                    <Checkbox
+                      checked={grantGroups.includes(d.name)}
+                      onChange={() => toggleGroup(d.name)}
+                    />
+                    {d.parent_id !== 0 && <span className="text-muted-foreground">↳</span>}
+                    {d.name}
+                  </label>
+                ))}
+              </div>
+              <Button size="sm" variant="outline" className="mt-1 w-full" onClick={saveDeptGrants}>保存部门授权</Button>
             </div>
             <div className="space-y-1">
-              <Label>部门(金字塔:授权覆盖子部门,主管自动继承)</Label>
-              <Select value={grantDept} onValueChange={(v) => { setGrantDept(v); setGrantTarget('@' + v) }}>
-                <SelectTrigger><SelectValue placeholder="选择部门(可选)" /></SelectTrigger>
-                <SelectContent>
-                  {deptTreeOptions(departments).map((o) => (
-                    <SelectItem key={o.id} value={o.label.replace(/[↳　\s]/g, '')}>{o.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Label>用户名(单个,可选)</Label>
+              <Input placeholder="如 alice" value={grantTarget} onChange={(e) => setGrantTarget(e.target.value)} />
             </div>
-            <Button className="w-full" disabled={!grantTarget.trim()} onClick={doGrant}>授权</Button>
+            <Button className="w-full" disabled={!grantTarget.trim()} onClick={doGrant}>添加用户授权</Button>
           </div>
         </DialogContent>
       </Dialog>

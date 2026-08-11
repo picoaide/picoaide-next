@@ -8,8 +8,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
+import { Checkbox } from '../components/ui/checkbox'
 import { Textarea } from '../components/ui/textarea'
-import { cn, deptTreeOptions } from '../lib/utils'
+import { cn } from '../lib/utils'
 
 interface Folder {
   id: number
@@ -85,10 +86,11 @@ export default function Knowledge() {
   const [grantDialog, setGrantDialog] = useState(false)
   const [grantFolder, setGrantFolder] = useState<Folder | null>(null)
   const [grantTarget, setGrantTarget] = useState('')
-  const [grantDept, setGrantDept] = useState('0')
+  const [grantGroups, setGrantGroups] = useState<string[]>([])
+  const [deptChecked, setDeptChecked] = useState<string[]>([])
   const [departments, setDepartments] = useState<{ id: number; name: string; parent_id: number }[]>([])
   const [grantUsers, setGrantUsers] = useState<string[]>([])
-  const [grantGroups, setGrantGroups] = useState<string[]>([])
+
   const [editDialog, setEditDialog] = useState(false)
   const [editId, setEditId] = useState(0)
   const [editTitle, setEditTitle] = useState('')
@@ -257,9 +259,28 @@ export default function Knowledge() {
       const data = await request(`/api/admin/kb/folders/${folderId}/grants`)
       setGrantUsers(data.users ?? [])
       setGrantGroups(data.groups ?? [])
+      setDeptChecked(data.groups ?? [])
     } catch (err: any) {
       setError(err.message)
     }
+  }
+
+  // 保存部门多选(整组替换,原子)
+  async function saveDeptGrants() {
+    if (!grantFolder) return
+    try {
+      await request(`/api/admin/kb/folders/${grantFolder.id}/grants`, {
+        method: 'PUT',
+        body: JSON.stringify({ groups: deptChecked }),
+      })
+      loadGrants(grantFolder.id)
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
+  function toggleGroup(name: string) {
+    setDeptChecked((prev) => (prev.includes(name) ? prev.filter((g) => g !== name) : [...prev, name]))
   }
 
   async function revoke(target: string, isGroup: boolean) {
@@ -589,21 +610,26 @@ export default function Knowledge() {
               </div>
             )}
             <div className="space-y-1">
-              <Label>用户名(单个)</Label>
-              <Input placeholder="如 alice" value={grantTarget} onChange={(e) => setGrantTarget(e.target.value)} />
+              <Label>部门(多选:一个文件夹可授权多个部门,成员共享)</Label>
+              <div className="max-h-48 space-y-1 overflow-y-auto rounded-md border p-2">
+                {departments.map((d) => (
+                  <label key={d.id} className="flex cursor-pointer items-center gap-2 text-sm">
+                    <Checkbox
+                      checked={deptChecked.includes(d.name)}
+                      onChange={() => toggleGroup(d.name)}
+                    />
+                    {d.parent_id !== 0 && <span className="text-muted-foreground">↳</span>}
+                    {d.name}
+                  </label>
+                ))}
+              </div>
+              <Button size="sm" variant="outline" className="mt-1 w-full" onClick={saveDeptGrants}>保存部门授权</Button>
             </div>
             <div className="space-y-1">
-              <Label>部门(金字塔:授权覆盖子部门,主管自动继承)</Label>
-              <Select value={grantDept} onValueChange={(v) => { setGrantDept(v); setGrantTarget('@' + v) }}>
-                <SelectTrigger><SelectValue placeholder="选择部门(可选)" /></SelectTrigger>
-                <SelectContent>
-                  {deptTreeOptions(departments).map((o) => (
-                    <SelectItem key={o.id} value={o.label.replace(/[↳　\s]/g, '')}>{o.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Label>用户名(单个,可选)</Label>
+              <Input placeholder="如 alice" value={grantTarget} onChange={(e) => setGrantTarget(e.target.value)} />
             </div>
-            <Button className="w-full" disabled={!grantTarget.trim()} onClick={grant}>授权</Button>
+            <Button className="w-full" disabled={!grantTarget.trim()} onClick={grant}>添加用户授权</Button>
           </div>
         </DialogContent>
       </Dialog>

@@ -10,6 +10,7 @@ beforeEach(() => {
   window.confirm = confirmSpy as any
   mockRequest.mockReset()
   mockRequest.mockImplementation(async (path: string) => {
+    if (path === '/api/admin/departments') return { departments: [{ id: 1, name: '研发部', parent_id: 0 }, { id: 2, name: '人事部', parent_id: 0 }] }
     if (path === '/api/admin/skills') return { skills: [{ name: 'data-extract', version: '1.0.0', description: '数据提取', author: 'seed', git_url: 'file:///tmp/x', enabled: true }] }
     if (path === '/api/admin/mcp') return { mcp: [{ id: 1, name: 'time-now', description: '时间', transport: 'stdio', command: 'date', enabled: true }] }
     if (path === '/api/admin/mcp-downloads?size=20') return { downloads: [] }
@@ -39,10 +40,11 @@ describe('Marketplace 商城页', () => {
     )
   })
 
-  it('技能授权对话框:输入 @组 提交调用 PUT grant', async () => {
+  it('技能授权对话框:勾选部门多选保存(整组替换)', async () => {
     mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path === '/api/admin/skills/data-extract/grants' && init?.method === 'PUT') return { ok: true }
-      if (path === '/api/admin/skills') return { skills: [{ name: 'data-extract', version: '1.0.0', description: '数据提取', author: 'seed', git_url: 'file:///tmp/x', enabled: true }] }
+      if (path === '/api/admin/departments') return { departments: [{ id: 1, name: '研发部', parent_id: 0 }, { id: 2, name: '人事部', parent_id: 0 }] }
+    if (path === '/api/admin/skills') return { skills: [{ name: 'data-extract', version: '1.0.0', description: '数据提取', author: 'seed', git_url: 'file:///tmp/x', enabled: true }] }
       if (path === '/api/admin/mcp') return { mcp: [] }
       if (path === '/api/admin/mcp-downloads?size=20') return { downloads: [] }
       if (path === '/api/admin/skills/data-extract/grants') return { grants: [] }
@@ -52,12 +54,12 @@ describe('Marketplace 商城页', () => {
     await screen.findByText('data-extract')
     fireEvent.click(screen.getAllByRole('button', { name: '授权' })[0])
     const dialog = within(await screen.findByRole('dialog'))
-    expect(await dialog.findByText(/未授权:所有用户均不可见/)).toBeInTheDocument()
-    fireEvent.change(dialog.getByRole('textbox'), { target: { value: '@人事部' } })
-    fireEvent.click(dialog.getByRole('button', { name: '授权' }))
+    expect(await dialog.findByText(/一个资源可授权多个部门/)).toBeInTheDocument()
+    fireEvent.click(dialog.getByLabelText(/研发部/))
+    fireEvent.click(dialog.getByRole('button', { name: '保存部门授权' }))
     expect(mockRequest).toHaveBeenCalledWith(
-      '/api/admin/skills/data-extract/grant',
-      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ group: '人事部' }) }),
+      '/api/admin/skills/data-extract/grants',
+      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ groups: ['研发部'] }) }),
     )
   })
 })
