@@ -1,5 +1,7 @@
 # 全项目审计发现与修复计划(2026-08-12)
 
+> **执行状态(2026-08-12 晚)**:批次 1-5 全部执行完毕,commit 序列见 `git log`(约 50 个 commit,`fix:`/`feat:`/`docs:`/`test:` 前缀)。`make check` 全绿(服务端 go test + 客户端 633 用例 + typecheck)。手工冒烟清单见下。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 修复 2026-08-12 六路并行审计发现的全部 90 个问题(高危 6 / 中危 ~40 / 低危 ~45),按安全边界 → 数据正确性 → 权限体系 → 资源健壮性 → UI/契约/文档 五批执行。每任务 TDD 红-绿-commit;所有安全边界类修复必须附回归测试证明绕过已封死。
@@ -648,3 +650,39 @@
 | 5 | `make check` + 两前端 `npm run build` | 错误码契约;文档与代码一致;shadcn 合规 |
 
 **Definition of done:** 每批任务全部 commit 且 commit message 符合 `feat:|fix:|test:|docs:|chore:` ≤72 字符;`make check` 绿;手工冒烟清单(B5.13)通过;本计划所有 checkbox 勾选。
+
+---
+
+## 8. 执行记录与遗留项(2026-08-12 执行完毕)
+
+### 已执行批次(commit 概览)
+
+| 批次 | 主题 | 关键 commit |
+|---|---|---|
+| 1 | 安全边界 | `fix: block ~user and --opt=path approval-gate bypasses`、`feat: show actual command/code in approval dialog`、`fix: reject ambiguous-backtracking regexes`、`fix(extension): omit password field values`、`feat: enforce stdio command whitelist`、`fix: require preview nonce`、`fix: reject filesystem roots`、`fix: harden gatewayFetch fallback`、`feat: require user consent on first TLS trust` |
+| 2 | 数据正确性 | `fix: guard editAndRerun`、`fix: recompute channel overrides per failover candidate`、`fix: re-derive conversation workspace`、`fix: bump conversation updated_at`、`fix: validate all attachments before writing any` |
+| 3 | 权限体系 | `feat: seed reserved 全员 group`(迁移 0018)、`fix: resolve MCP config pull with effective groups`、`fix: NOCASE-consistent grant guards`(迁移 0019)、`fix: validate group existence in single-grant endpoints`、`fix: drop legacy multi-group endpoint`、`fix: admin-set password no longer detaches IdP users`、`fix: per-connection FK pragma; bind OIDC state` |
+| 4 | 资源健壮性 | `fix: cache MCP registry per session`、`fix: add http.Server timeouts`、`fix: amortize login limiter sweep`、`fix: OIDC discovery timeout`、`fix: whitelist upstream headers`、`fix: clean pending usage on idle timeout`(迁移 0020)、`feat: require user consent on first TLS trust`、`feat: provider enable toggle` |
+| 5 | UI/契约/文档 | webadmin 三处修复、renderer 两批修复、扩展修复、bootstrap 规范化、错误信封统一、validateServerURL 去重、服务端低危批量、知识库低危批量、AGENTS.md + spec 同步 |
+
+### 遗留项(明确推迟,建议下期)
+
+1. **window.confirm → shadcn Dialog**(webadmin 9 处):交互一致性与 AGENTS §3.1 合规,功能无碍,推迟
+2. **编码检测三份拷贝**(filesystem/terminal/web)→ 提取 `tools/encoding.ts`:语义差异多(强制编码/BOM/charset),低风险重构,推迟
+3. **词法检索管线两份拷贝**(search.go vs chunk_index.go)→ 合并:改动面大且 doc-level 已是遗留回退路径,推迟
+4. **`subtreeOf`/`subtreeGroupIDs`**:一个内存树一个 DB 查询,数据结构不同,合并收益低,保留
+5. **MCP 崩溃自动重启 1 次**:spec §3.6 标记为未实现(范围外),文档已同步
+6. **多显示器 screen_capture 全屏**:当前仅主屏,spec 未承诺多屏,保留
+7. **recommended 字段硬编码 true**:建议加 `mcp_servers.recommended` 列 + 管理开关(需迁移 0021),推迟
+8. **CDP capability token 升级路径**:信任边界已文档化(裁决 D2),后续版本可做
+
+### 手工冒烟清单(B5.13)
+
+- [ ] 审批弹窗显示完整命令串(而非 `(command, timeoutSec)` 摘要)
+- [ ] `cat ~root/x` 与 `cp --target-directory=/tmp x` 触发审批
+- [ ] 全员授权后子部门用户/主管可见可用(kb_search/kb_read/marketplace config)
+- [ ] 证书轮换后登录页可重置并重新信任(展示指纹)
+- [ ] 扩展密码框不出现在语义快照
+- [ ] webadmin 日期筛选生效(改日期后点查询)
+- [ ] 移动会话到项目后新消息/附件写入新项目目录
+- [ ] 首信 TLS:登录页展示指纹 → 信任并连接 → 重试成功
