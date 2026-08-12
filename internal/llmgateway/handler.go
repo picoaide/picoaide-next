@@ -96,22 +96,8 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		return
 	}
 
-	// 渠道参数注入:思考模式等;注入失败不阻塞请求(原样转发)
-	if ups[0].Channel != "" {
-		if ch, ok := channels.Get(ups[0].Channel); ok {
-			ov, rm := ch.RequestOverrides(req.Model)
-			if raw2, err := applyChannelOverrides(raw, ov, rm); err == nil {
-				raw = raw2
-			}
-		}
-	}
-
-	// max_tokens 默认注入(客户端未传时用模型 default_params.max_output)
-	if params, err := serverstore.ModelDefaultParams(a.DB, req.Model); err == nil && params != "" {
-		if raw2, err := applyMaxTokensDefault(raw, params); err == nil {
-			raw = raw2
-		}
-	}
+	// max_tokens 默认值注入依据(模型维度,与候选无关,提前读取)
+	defaultParams, _ := serverstore.ModelDefaultParams(a.DB, req.Model)
 
 	// streaming path: insert a pending usage row first, backfilled on the
 	// final SSE chunk; a client disconnect leaves it pending (no rollback).
@@ -125,9 +111,25 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 
 	// 故障转移:按序尝试每个 provider(连接失败/5xx/首字节超时 → 下一个)。
 	// 单 provider 失败即返回,不重试(避免重复计费);4xx 由 forward 原样返回。
+	// 渠道 override 与 max_tokens 注入按候选独立计算(从原始 body 出发):
+	// failover 时第二个 provider 不得收到首个 provider 的渠道参数污染。
 	var resp *http.Response
 	for i := range ups {
-		resp, err = a.forward(c, &ups[i], raw, req.Stream)
+		body := raw
+		if ups[i].Channel != "" {
+			if ch, ok := channels.Get(ups[i].Channel); ok {
+				ov, rm := ch.RequestOverrides(req.Model)
+				if raw2, err := applyChannelOverrides(body, ov, rm); err == nil {
+					body = raw2
+				}
+			}
+		}
+		if defaultParams != "" {
+			if raw2, err := applyMaxTokensDefault(body, defaultParams); err == nil {
+				body = raw2
+			}
+		}
+		resp, err = a.forward(c, &ups[i], body, req.Stream)
 		if err == nil {
 			break
 		}
