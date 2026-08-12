@@ -569,3 +569,45 @@ func TestMatchModel(t *testing.T) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
+
+// 上游响应头白名单:Set-Cookie 等不得透传给客户端
+func TestServeJSONDropsUntrustedHeaders(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Set-Cookie", "sid=abc")
+		w.Header().Set("X-Upstream-Key", "secret")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	t.Cleanup(up.Close)
+	body := `{"model":"m","messages":[]}`
+	var a API
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/", strings.NewReader(body))
+	resp, err := http.Get(up.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.serveJSON(c, resp, 1, "m")
+	for k := range w.Header() {
+		if strings.EqualFold(k, "Set-Cookie") || strings.EqualFold(k, "X-Upstream-Key") {
+			t.Fatalf("untrusted header leaked: %s", k)
+		}
+	}
+	if !strings.Contains(w.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("Content-Type dropped: %v", w.Header())
+	}
+}
+
+// 限流桶满员:驱逐最旧桶,新用户不被硬拒
+func TestGatewayRateLimiterEvictsOldestWhenFull(t *testing.T) {
+	l := newRateLimiter()
+	l.max = 2
+	if !l.allow(1, 10) || !l.allow(2, 10) {
+		t.Fatal("first users allowed")
+	}
+	if !l.allow(3, 10) {
+		t.Fatal("new user refused when bucket table full: must evict oldest")
+	}
+}

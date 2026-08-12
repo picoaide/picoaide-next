@@ -266,10 +266,41 @@ func (a *API) forward(c *gin.Context, up *Upstream, raw []byte, stream bool) (*h
 	return resp, nil
 }
 
+// nonStreamBodyTimeout bounds reading a non-stream upstream body once headers
+// arrived (审计2026-M11:全量 client.Timeout 会截断长报告生成;这里只限 body 读)
+var nonStreamBodyTimeout = 10 * time.Minute
+
+// passHeaders 是透传给客户端的上游响应头白名单:其余头(Set-Cookie/Server/
+// hop-by-hop 等)一律丢弃(审计2026-L10)
+var passHeaders = map[string]bool{
+	"Content-Type":          true,
+	"Retry-After":           true,
+	"X-Request-Id":          true,
+	"X-RateLimit-Limit":     true,
+	"X-RateLimit-Remaining": true,
+}
+
 // serveJSON passes a non-stream upstream response through and records usage.
 func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model string) {
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxUpstreamBody)+1))
+	type readResult struct {
+		body []byte
+		err  error
+	}
+	ch := make(chan readResult, 1)
+	go func() {
+		b, e := io.ReadAll(io.LimitReader(resp.Body, int64(maxUpstreamBody)+1))
+		ch <- readResult{b, e}
+	}()
+	var body []byte
+	var err error
+	select {
+	case r := <-ch:
+		body, err = r.body, r.err
+	case <-time.After(nonStreamBodyTimeout):
+		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "上游响应超时")
+		return
+	}
 	if err != nil {
 		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "读取上游响应失败")
 		return
@@ -286,6 +317,9 @@ func (a *API) serveJSON(c *gin.Context, resp *http.Response, userID int64, model
 	}
 	c.Status(resp.StatusCode)
 	for k, vv := range resp.Header {
+		if !passHeaders[k] {
+			continue
+		}
 		for _, v := range vv {
 			c.Writer.Header().Add(k, v)
 		}
@@ -308,6 +342,9 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 		}
 		c.Status(resp.StatusCode)
 		for k, vv := range resp.Header {
+			if !passHeaders[k] {
+				continue
+			}
 			for _, v := range vv {
 				c.Writer.Header().Add(k, v)
 			}
@@ -456,7 +493,19 @@ func (l *rateLimiter) allow(userID int64, rate int) bool {
 	b, ok := l.buckets[userID]
 	if !ok {
 		if len(l.buckets) >= l.max {
-			return false
+			// 满员驱逐最旧条目(与登录限流器一致,审计2026-L19):
+			// 大量活跃用户时新用户不被硬拒,过期桶优先让位
+			var victimID int64
+			var oldest time.Time
+			for id, b := range l.buckets {
+				if victimID == 0 || b.last.Before(oldest) {
+					victimID, oldest = id, b.last
+				}
+			}
+			if victimID == 0 {
+				return false
+			}
+			delete(l.buckets, victimID)
 		}
 		b = &bucket{tokens: float64(rate), last: now}
 		l.buckets[userID] = b
