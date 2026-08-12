@@ -73,17 +73,17 @@ data/                  # 服务端运行时数据(0700,gitignore)
 
 ## 7. 关键契约(两端必须一致)
 
-- **事件协议**(主进程→renderer,`agent:event`):`text_delta`/`reasoning_delta`/`tool_start`/`tool_end`(含 `duration_ms`)/`tool_error`/`confirm_required`(含 `request_id`)/`artifact`/`done`/`canceled`/`error` —— 全部 snake_case
-- **REST 错误**:`{"error":{"code":"ERR_CODE","message":"..."}}`;`AUTH_REQUIRED`/`AUTH_FAILED`/`FORBIDDEN`(管理端)/`NOT_FOUND`/`VALIDATION`/`UPSTREAM`/`RATE_LIMITED`/`INTERNAL`
-- **bootstrap**:`{default_model, models, skills, mcp, web}`(1.16b 服务端 ↔ 2.4 客户端 `BootstrapConfig` 严格对齐)
-- **CDP 桥**:固定 `127.0.0.1:54321`,JSON-RPC:`browser.tabInfo`/`getContent`/`click`/`type`/`navigate`/`scroll`/`executeScript`
-- **DB**:客户端 5 表(conversations 含 status+project_id/messages 含 tool_call_id+tool_name+is_error/artifacts/settings/projects 迁移 0010);服务端 20+ 表(迁移 0001-0016,0007 废弃;0013 trigram FTS、0014 kb_chunks、0015 kb_chunk_embeddings、0016 skill_grants/mcp_grants)
-- **知识库检索契约**:块级检索(kb_chunks 800 rune+标题路径);`kb_search` 返回 doc/chunk id、标题路径、snippet 与 score,混合检索 = trigram/unicode61 词法 + 向量余弦(网关 /v1/embeddings,模型名存 settings `kb.embedding_model`)→ RRF(k=60)融合,无向量时纯词法降级;`kb_read(doc_id, chunk_ids?)` 支持分块定点读取;长词(≥3 rune)走 trigram、短词走 unicode61 前缀 + LIKE(含 d.title);所有 folder(含根目录)须显式授权(`GetAccessibleFolderIDs` 严格模式)
-- **项目体系**:项目 = 命名工作目录;项目内会话 workspace = `<项目目录>/<会话id>/`(chat:new 自动 mkdir),引擎工具 cwd/allowedDirs 以会话 workspace 为基准,无项目会话回退全局工作目录;删除项目仅解绑会话(移入未分类),不删文件
-- **自动标题**:首轮对话 done 后后台调网关默认模型生成 ≤20 字标题(15s 超时),失败兜底截取首条用户消息 20 字;仅 title 为空时触发
-- **Portable(仅 Windows/Linux)**:exe 同目录存在 `portable.txt` → 数据目录 = exe 同目录/data(不可写回退系统目录);macOS 一律走 `~/Library/Application Support/picoaide`(dmg 拖入 Applications 即用,标准 HIG:原生菜单 Cmd+Q/+/N、深色模式跟随系统)
+- **事件协议**(主进程→renderer,`agent:event`):每个事件携带 `conversationId`;`text_delta`/`reasoning_delta`/`tool_start`/`tool_end`(含 `duration_ms`)/`tool_error`/`confirm_required`(含 `request_id`+`tool_call_id`+`op`+`target`+`reason`)/`context_usage`(chars+budget)/`artifact`/`done`/`canceled`/`error` —— 全部 snake_case
+- **REST 错误**:`{"error":{"code":"ERR_CODE","message":"..."}}`;`AUTH_REQUIRED`/`AUTH_FAILED`/`FORBIDDEN`(管理端)/`NOT_FOUND`/`VALIDATION`/`UPSTREAM`/`RATE_LIMITED`/`INTERNAL`(健康探针与 404 NoRoute 同信封)
+- **bootstrap**:`{default_model, models, skills, mcp, web}`(1.16b 服务端 ↔ 2.4 客户端 `BootstrapConfig` 严格对齐;客户端对 skills/mcp/web 缺省值兜底)
+- **CDP 桥**:固定 `127.0.0.1:54321`,JSON-RPC:`browser.tabInfo`/`getContent`/`click`/`type`/`navigate`/`scroll`/`executeScript`(信任边界见 §2.8)
+- **DB**:客户端 6 表(conversations 含 status+project_id+workspace+starred+archived/messages 含 tool_call_id+tool_name+is_error/artifacts/settings/projects 迁移 0010;status 含 planning/approved/rejected);服务端 20+ 表(迁移 0001-0020,0007 废弃;0013 trigram FTS、0014 kb_chunks、0015 kb_chunk_embeddings、0016 skill_grants/mcp_grants、0017 departments、0018 全员 seed、0019 groups NOCASE 唯一、0020 usage.kind)
+- **知识库检索契约**:块级检索(kb_chunks 800 rune+标题路径);`kb_search` 返回 doc/chunk id、标题路径、snippet 与 score,混合检索 = trigram/unicode61 词法 + 向量余弦(网关 /v1/embeddings,模型名存 settings `kb.embedding_model`)→ RRF(k=60)融合,无向量时纯词法降级;`kb_read(doc_id, chunk_ids?)` 支持分块定点读取(chunk_ids ≤100);长词(≥3 rune)走 trigram、短词走 unicode61 前缀 + LIKE(含 d.title);所有 folder(含根目录)须显式授权(`GetAccessibleFolderIDs` 严格模式)
+- **项目体系**:项目 = 命名工作目录;项目内会话 workspace = `<项目目录>/<会话id>/`(chat:new 自动 mkdir),引擎工具 cwd/allowedDirs 以会话 workspace 为基准,无项目会话回退全局工作目录;删除项目仅解绑会话(移入未分类,workspace 同步置空),不删文件;移动会话到项目会重推导 workspace
+- **自动标题**:首轮对话 done 后后台调网关默认模型生成 ≤20 字标题(15s 超时),失败/空串兜底截取首条用户消息 20 字;仅 title 为空时触发
+- **Portable(仅 Windows/Linux)**:exe 同目录存在 `portable.txt` → 数据目录 = exe 同目录/data(已存在但不可写同样回退系统目录);macOS 一律走 `~/Library/Application Support/picoaide`(dmg 拖入 Applications 即用,标准 HIG:原生菜单 Cmd+Q/+/N、深色模式跟随系统)
 - **文档访问边界**:知识库/文档一律经服务端远程 MCP(kb_search/kb_read/kb_list)查询,不做本地文档同步
-- **审批签名**:`confirm(requestId, ok)`;命令判定 `needsApprovalFor(command, allowedDirs)`;路径 `isAllowed(absPath, allowedDirs)`
+- **审批签名**:`confirm(requestId, ok)`;命令判定 `needsApprovalFor(command, allowedDirs)`(拒绝 `~user` 与 `--opt=/path` 绕过);路径 `isAllowed(absPath, allowedDirs)`;首次 TLS 信任须用户确认(登录页展示指纹)
 
 ## 8. 常用命令
 

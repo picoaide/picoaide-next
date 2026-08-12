@@ -32,7 +32,7 @@
 | D19 | 客户端本地存储 | better-sqlite3 | Node 生态最稳的同步 SQLite 驱动,主进程内使用;原生模块需 `@electron/rebuild` 匹配 Electron ABI |
 | D20 | 客户端本地 MCP | 官方 @modelcontextprotocol/sdk(Client) | MCP 标准 TypeScript SDK,stdio + HTTP 双传输 |
 | D21 | 客户端 OCR | tesseract.js | 纯 JS/WASM,三平台免系统依赖,惰性加载 |
-| D22 | 长任务与恢复 | streamText 多步循环(自管步数上限)+ 消息落库 | 办公任务分钟级,失败主因是 LLM/工具错误而非进程崩溃;消息即状态——中断任务标记 `status=running`,恢复 = 从最后一条用户消息重跑历史,零额外运行时;高危审批在工具 `execute` 内门控(60s 超时拒绝),不依赖 AI SDK 审批 API(版本差异风险) |
+| D22 | 长任务与恢复 | streamText 多步循环(自管步数上限)+ 消息落库 | 办公任务分钟级,失败主因是 LLM/工具错误而非进程崩溃;消息即状态——中断任务标记 `status=running`,恢复 = 从最后一条用户消息重跑历史,零额外运行时;高危审批经 AI SDK v7 原生 `toolApproval` 实现(2026-08-12 裁决:引擎主循环逐个 confirm_required → 等回执 → tool-approval-response;`ai` 版本锁定 package.json,升级须跑审批回归测试) |
 | D23 | UI 组件 | shadcn/ui + Tailwind(客户端 renderer 与 webadmin 统一使用) | 官方 shadcn AI 组件已发布(替代 ai-elements 轨道);Vite + React 官方支持;复制粘贴式、样式全可控;聊天/表格/表单/弹窗组件开箱即用 |
 | D24 | 网关接入 | 自研 Go 网关;AI SDK provider baseURL 直连 | 不用 Vercel AI Gateway 云服务;客户端零密钥,计量在服务端 |
 | D25 | 浏览器操作 | 自研浏览器插件桥:客户端主进程**固定监听 127.0.0.1:54321**,Chrome/Edge 插件默认直连该端口,即装即用零配置 | 免 Playwright 系统依赖;插件以最小权限(MV3)桥接真实浏览器;仅回环地址;操作类工具审批兜底 |
@@ -55,7 +55,7 @@ PicoAide(旧)是浏览器 Web UI + 服务端沙箱(overlayfs + netns)模式,存�
 构建**企业内网桌面 AI 办公智能体**:
 
 - **桌面客户端**:完整 Agent 在本机运行,直接操作文件/浏览器/屏幕,完成"整理文件、做表格、写方案、生成 PPT、信息检索"等实际办公任务
-- **服务端网关**:自研轻量基础设施——AI 网关(统一 LLM 入口/密钥/计量)+ Skill 商城 + MCP 插件商城 + 知识库(远程 MCP)。**商城定位为企业内部分发渠道:管理员统一上架/配置,客户端展示为"建议清单",员工按需自助安装**(非授权制),不涉及任何收费扣费
+- **服务端网关**:自研轻量基础设施——AI 网关(统一 LLM 入口/密钥/计量)+ Skill 商城 + MCP 插件商城 + 知识库(远程 MCP)。**商城与知识库均为管理员授权制(2026-08-12 修订,严格默认):资源上架/创建后未授权用户一律不可见不可用(404 不泄露存在性),授权对象 = 用户或部门组**;不涉及任何收费扣费
 - **员工零配置**:安装客户端 → 登录账号 → 直接可用。**所有功能配置(模型/上游密钥/技能/MCP 插件/凭证/知识库权限)均由管理员在服务端管理页配置**,登录时服务端下发启动配置(模型列表 + 默认模型 + 技能/MCP 建议清单),客户端无配置负担。**"零配置"=功能零配置;本机可访问目录为唯一本地设置**(安全边界,管理员无法替员工决定本机路径)。**MCP/Skill 为可选增强能力,未安装任何插件/技能也可正常完成全部基础任务**
 - **私有化可部署**:服务端可部署企业内网,支持 LDAP/OIDC 对接
 
@@ -345,7 +345,7 @@ export class AgentEngine {
   - **持久化**:每步(assistant 消息 + 工具结果)同步写入 `messages` 表;任务开始置 `conversations.status='running'`,结束置 `done`/`failed`
   - **恢复**:重启后扫描 `status IN ('running','executing')` 的会话 → UI 提示"有未完成任务,是否继续" → **重跑 = 截断到最后一条 user 消息**(其后的 assistant/tool 行不进入上下文,标记为历史,防止重复累积),重新发起多步循环;简单可靠,零额外运行时
   - **上下文窗口**:发送给 LLM 的历史最多取最近 50 条消息(超出部分仅存 DB 供 UI 查看,不发送),防长会话 token 膨胀
-- **高危审批**:工具 `execute` 内门控(见 3.4),实现层自管,不依赖 AI SDK 审批 API(版本差异风险)
+- **高危审批**:AI SDK v7 原生 `toolApproval`(2026-08-12 裁决:引擎主循环逐个 `confirm_required` → 等回执 → `tool-approval-response`;审批弹窗展示实际命令串/代码/URL,与执行串一致;`ai` 版本锁定 package.json,升级 SDK 必须跑审批回归测试)
 - Ask 模式用轻量 `streamText`(无工具、单步);Craft/Plan 用多步循环
 - **并发与取消**:每个 run 独立 `AbortController`(多会话并发互不影响);`cancel()` 中止当前 run 并 reject 所有挂起审批;事件流含 `canceled` 类型(见 3.3.3)
 
@@ -418,7 +418,7 @@ renderer 经 preload 暴露的 `window.picoaide.onAgentEvent(cb)` 订阅(底层 
 | browser_tab_info / browser_get_content | 读取浏览器当前页(经插件桥) | 见 3.8:读取类直接可用;内容仅回本机 |
 | browser_click / browser_type / browser_navigate / browser_scroll / browser_execute_js | 操作浏览器当前页 | **高危:审批弹窗**(操作类与 executeScript) |
 
-**命令审批策略(防绕过设计)**:判定前**剥离/拒绝全部控制字符(含换行 `\n`、`\r`、`\0`)与裸 `$`(`$(`、`${` 已拒,裸 `$VAR` 也拒)**;含 shell 拼接字符(`;` `&&` `\|\|` `\|` 反引号 `>` `<`)或**首词不在安全白名单**(`ls,cat,pwd,mkdir,cp,mv,echo,head,tail,grep,wc,date,df,du,uname`——**不含 find**,其 `-exec/-delete` 可递归删除)或**路径参数经 realpath 解析后越出可访问目录**(`cat /etc/passwd`、`cat ~/.ssh/id_rsa`)→ 一律审批。
+**命令审批策略(防绕过设计)**:判定前**剥离/拒绝全部控制字符(含换行 `\n`、`\r`、`\0`)与裸 `$`(`$(`、`${` 已拒,裸 `$VAR` 也拒)**;含 shell 拼接字符(`;` `&&` `\|\|` `\|` 反引号 `>` `<`)或**首词不在安全白名单**(`ls,cat,pwd,mkdir,cp,mv,echo,head,tail,grep,wc,date,df,du,uname`——**不含 find**,其 `-exec/-delete` 可递归删除)或**路径参数经 realpath 解析后越出可访问目录**(`cat /etc/passwd`、`cat ~/.ssh/id_rsa`)→ 一律审批。**2026-08-12 加固**:他人 home 展开(`~user/...`)、长选项内嵌路径(`--opt=/path`、`--file=/etc/x`)同样一律审批;`pip install` 免审批为白名单外**已记录的例外**(仅限纯包名/白名单旗标参数,任意 URL/索引源/目录安装照常审批)。
 
 **可访问目录模型**:默认 = 用户工作目录(每次对话独立子目录 `workspaces/<conv>/`,零配置开箱即用);客户端**唯一的本地配置项**是"可访问目录"追加列表(本地安全边界,管理员无法替员工决定本机路径,故保留客户端设置;默认不配也完全可用)。**首次越界引导**:工具访问可访问目录外的路径被拒时,弹窗"是否将 X 加入可访问目录?",员工确认后自动加入并重试(旗舰场景如"读桌面文件"一键授权,无需预先配置)。工具越界返回明确错误给 Agent 重试。
 
@@ -525,11 +525,11 @@ CREATE TABLE settings (
 }
 ```
 
-- `stdio`:本地 spawn,JSON-RPC over stdio,进程生命周期随客户端,崩溃自动重启 1 次,再失败停用并提示
+- `stdio`:本地 spawn,JSON-RPC over stdio,进程生命周期随客户端(崩溃自动重启 1 次为**未实现范围外**,2026-08-12 标记)
 - `http`:客户端起 MCP client 直连 URL(本地服务或内网地址)
 - MCP client → AI SDK `tool` 适配层(`adapter.ts`),工具暴露给 Agent;**插件工具按风险启发式强制审批**(名称/描述含 delete/remove/write/exec/shell/外发 等 → `needsApproval`),**启发式仅减噪,不作安全边界——真正的硬防线是安装时的风险弹窗**(展示插件名/作者/来源/命令/权限范围,员工知情后决定)
-- **建议安装制(非授权)**:启动配置下发"建议清单"(管理员上架的启用插件);员工在设置页自行安装/卸载/开关,安装时从 `/api/marketplace/mcp/:id/config` 拉取配置与凭证(需登录,per-user 限流 + 下载审计);**凭证仅进程内存持有;客户端每次启动在登录态下重拉插件凭证(不落盘),服务端下架后 config 端点拒绝拉取**
-- **安装安全**:第三方插件安装前弹窗风险提示(硬防线);stdio `command` 限白名单二进制(如 npx/node/python3/docker,绝对路径),`args` 拒绝 shell 元字符
+- **管理员授权制(2026-08-12 修订,原"建议安装制"作废)**:启动配置下发的"建议清单"即**已授权**插件;员工仅能安装被授权的插件,安装时从 `/api/marketplace/mcp/:id/config` 拉取配置与凭证(需登录,per-user 限流 + 下载审计;权限经 effective groups 解析);**凭证仅进程内存持有;客户端登录时重拉插件凭证(会话级缓存,不落盘),服务端下架后 config 端点拒绝拉取**
+- **安装安全**:第三方插件安装前弹窗风险提示(硬防线,preview nonce 二次确认);stdio `command` 限白名单二进制(如 npx/node/python3/docker,绝对路径),`args` 拒绝 shell 元字符(**客户端运行时同样强制校验**)
 
 ### 3.7 Skill 运行时
 
@@ -546,7 +546,7 @@ skill-name-v1.2.3.tar.gz
 
 - 加载:SKILL.md → 注入系统提示;scripts → 注册为 `skill_exec <name>` 工具(**在本地受限会话执行**,仅超时+输出截断;需要用户文件的操作仍走本地工具)
 - 更新:商城版本检测,手动更新;卸载:删目录 + 移除提示注入
-- **建议安装制**:启动配置下发技能建议清单,员工在设置页自行安装/卸载(与管理页上架解耦,非授权制)
+- **管理员授权制(2026-08-12 修订)**:启动配置下发已授权技能清单,员工在设置页自行安装/卸载(未授权不可见,与管理页上架解耦)
 - 来源信任:仅商城官方渠道;第三方 skill 首次安装弹窗提示风险
 - 技能包自带 `tools/` 工具定义(JSON schema):**本期不实现,二期再注册**(loader 忽略该目录)
 
@@ -637,7 +637,7 @@ CREATE TABLE api_tokens (
 );
 ```
 
-- 登录:`POST /api/auth/login` → 服务端验证 → 返回 `{token, user}`(user 含 is_admin/status;无权限字段——建议安装制下员工无授权概念)
+- 登录:`POST /api/auth/login` → 服务端验证 → 返回 `{token, user}`(user 含 is_admin/status;资源可见性由服务端按用户/部门授权过滤)
 - 后续请求:`Authorization: Bearer <token>`;`VerifyToken` 校验:存在 / 未吊销 / **未过期** / 关联用户有效
 - 登录限流:10 次/5 分钟(按 IP+用户名;**有界**内存滑动窗口,条目过期清理,防内存膨胀)
 - 超管引导:`--bootstrap-admin` 启动参数(env `PICOAI_ADMIN_PASSWORD` 设密码),首次启动无超管时创建;**不提供"首注册即超管"的注册端点**(存在抢先接管与 TOCTOU 风险)
@@ -720,13 +720,13 @@ PUT  /api/admin/skills/:name                  # 更新
 - 存储:`skills` 表(名称/版本/描述/作者/Git 源/校验和/上架时间)
 - 打包:服务端 clone Git 源(**浅克隆** + 仓库大小上限,如 >200MB 拒绝)→ 校验 metadata.yaml → tar.gz → 缓存目录 `data/skills-cache/`(构建新版本时清理旧包)
 - 校验:包内文件名白名单(拒绝绝对路径/`..`/**symlink/hardlink 条目**),大小上限(默认 100MB);技能名过 `SafePathSegment`
-- **建议制**:`/api/marketplace/skills` 为建议清单(员工自装,非授权);archive 下载需登录
+- **授权制(2026-08-12 修订)**:`/api/marketplace/skills` 为已授权清单(未授权 404);archive 下载需登录且已授权
 
-### 4.4 MCP 插件商城(建议安装制)
+### 4.4 MCP 插件商城(管理员授权制)
 
 ```
-GET  /api/marketplace/mcp                     # 建议清单(客户端可见,仅 enabled,脱敏)
-GET  /api/marketplace/mcp/:id/config          # 安装时拉取配置+凭证(需登录,加密传输)
+GET  /api/marketplace/mcp                     # 已授权清单(客户端可见,仅 enabled,脱敏)
+GET  /api/marketplace/mcp/:id/config          # 安装时拉取配置+凭证(需登录+已授权,加密传输)
 POST /api/admin/mcp                           # 上架(transport/command/args/url/env/headers)
 PUT/DELETE /api/admin/mcp/:id                 # 编辑/下架
 ```
@@ -795,10 +795,10 @@ kb_folders / kb_documents / kb_folder_users / kb_folder_groups / kb_audit_logs
 | 客户端 token | Electron safeStorage(OS 密钥链)优先;**Windows 无密钥链时回退不落盘(每次启动重登)**,其余平台回退 config.json 0600 |
 | 超管引导 | `--bootstrap-admin` 需 env `PICOAI_ADMIN_PASSWORD`(缺失则启动失败,不打印密码到日志) |
 | master key | env `PICOAI_MASTER_KEY` 或 `data/master.key`(0600);**data 目录 0700**;轮换无(列为已知限制) |
-| 高危操作 | 删除/截屏/剪贴板读取/命令审批/kb_upload/浏览器操作类工具 → UI 确认弹窗(60s 超时拒绝,自弹窗可见起算);命令按"白名单+无拼接+路径边界"判定(拒绝控制字符/裸 `$`/find) |
-| 浏览器插件桥 | 仅绑定回环地址 127.0.0.1:54321(不对外网开放);**无鉴权(零配置)——本机任意进程可连,与客户端同信任级(风险见 §9)**;操作类/executeScript 工具审批;插件未连接时工具明确报错 |
-| 插件工具 | MCP 插件工具按风险启发式强制审批(动词表:delete/remove/write/exec/shell/http/post/put/send/upload/publish/push/sync/purge/clear/truncate/unlink/rm 等,大小写不敏感,**best-effort 仅减噪,安全边界=安装弹窗**);插件安装风险提示;stdio 命令白名单 |
-| 插件凭证 | 仅登录用户可拉取(建议安装制,无授权表);**per-user 限流 + 下载审计**;仅 enabled 可拉;加密传输;客户端仅内存持有(启动重拉) |
+| 高危操作 | 删除/截屏/剪贴板读取/命令审批/kb_upload/浏览器操作类工具 → UI 确认弹窗(60s 超时拒绝,自弹窗可见起算);弹窗展示**实际命令串/代码/URL**(与执行串一致);命令按"白名单+无拼接+路径边界"判定(拒绝控制字符/裸 `$`/find/`~user`/`--opt=/path`) |
+| 浏览器插件桥 | 仅绑定回环地址 127.0.0.1:54321(不对外网开放);**无鉴权(零配置)——本机任意进程可连,与客户端同信任级(2026-08-12 裁决:信任模型=本机进程即员工本人,属设计内行为非安全边界,风险见 §9)**;插件未连接时工具明确报错 |
+| 插件工具 | MCP 插件工具按风险启发式强制审批(动词表:delete/remove/write/exec/shell/http/post/put/send/upload/publish/push/sync/purge/clear/truncate/unlink/rm 等,大小写不敏感,**best-effort 仅减噪,安全边界=安装弹窗(preview nonce 二次确认)**);stdio 命令白名单客户端运行时强制校验 |
+| 插件凭证 | 仅登录且已授权用户可拉取;per-user 限流 + 下载审计;仅 enabled 可拉;加密传输;客户端仅内存持有(登录重拉,会话级缓存) |
 | 文件越界 | 可访问目录白名单(默认工作目录,realpath 校验) |
 | Skill 包安全 | 文件名白名单/无 symlink/大小上限/浅克隆限额/第三方来源风险提示 |
 | 登录爆破 | 10 次/5 分钟限流(有界窗口) |
