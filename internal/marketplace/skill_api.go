@@ -322,9 +322,11 @@ func (a *API) getMCPConfig(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "插件已下架")
 		return
 	}
-	// 严格授权:未授权用户与不存在同响应,不泄露存在性
+	// 严格授权:未授权用户与不存在同响应,不泄露存在性。
+	// 组解析必须用 effective groups(祖先链 + 主管子树 + 隐式全员),
+	// 与列表/bootstrap 同口径——否则子部门成员看得到插件却拉不到配置。
 	if !u.IsAdmin {
-		groups, gerr := serverstore.UserGroups(a.DB, u.ID)
+		groups, gerr := serverstore.UserEffectiveGroups(a.DB, u.ID)
 		if gerr != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "插件读取失败")
 			return

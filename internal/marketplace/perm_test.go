@@ -198,6 +198,51 @@ func TestMarketplaceGroupGrant(t *testing.T) {
 	}
 }
 
+// getMCPConfig 必须用 effective groups:子部门成员 / 主管 / 全员授权均可拉取配置
+func TestMCPConfigUsesEffectiveGroups(t *testing.T) {
+	r, db, token, uid, _ := marketUserSetup(t)
+	devID, _ := serverstore.CreateDepartment(db, "研发部", 0, 0, "")
+	frontID, _ := serverstore.CreateDepartment(db, "前端组", devID, 0, "")
+	// 授权给祖先部门;用户只属于子部门
+	if err := serverstore.SyncUserGroups(db, uid, []string{"前端组"}); err != nil {
+		t.Fatal(err)
+	}
+	var mcpID int64
+	if err := db.QueryRow("SELECT id FROM mcp_servers WHERE name = 'time-now'").Scan(&mcpID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO mcp_grants (mcp_id, grantee_type, grantee) VALUES (?, 'group', '研发部')", mcpID); err != nil {
+		t.Fatal(err)
+	}
+	w := bearerGet(t, r, fmt.Sprintf("/api/marketplace/mcp/%d/config", mcpID), token)
+	if w.Code != http.StatusOK {
+		t.Fatalf("child-department user config pull = %d %s", w.Code, w.Body.String())
+	}
+
+	// 主管(无成员行)授权同:改成主管后仍可拉取
+	uid2, _ := serverstore.CreateUserWithPassword(db, "carol", "pw123456")
+	token2, _ := serverauth.IssueToken(db, uid2)
+	if err := serverstore.UpdateDepartment(db, devID, "研发部", 0, uid2, ""); err != nil {
+		t.Fatal(err)
+	}
+	w = bearerGet(t, r, fmt.Sprintf("/api/marketplace/mcp/%d/config", mcpID), token2)
+	if w.Code != http.StatusOK {
+		t.Fatalf("leader config pull = %d %s", w.Code, w.Body.String())
+	}
+
+	// 全员授权(迁移 seed):任何用户均可拉取
+	if _, err := db.Exec("INSERT INTO mcp_grants (mcp_id, grantee_type, grantee) VALUES (?, 'group', '全员')", mcpID); err != nil {
+		t.Fatal(err)
+	}
+	uid3, _ := serverstore.CreateUserWithPassword(db, "dave", "pw123456")
+	token3, _ := serverauth.IssueToken(db, uid3)
+	w = bearerGet(t, r, fmt.Sprintf("/api/marketplace/mcp/%d/config", mcpID), token3)
+	if w.Code != http.StatusOK {
+		t.Fatalf("everyone config pull = %d %s", w.Code, w.Body.String())
+	}
+	_ = frontID
+}
+
 // admin (IsAdmin) sees everything without grants
 func TestMarketplaceAdminSeesAll(t *testing.T) {
 	r, db, _, _, _ := marketUserSetup(t)
