@@ -58,7 +58,11 @@ func (p *OIDCProvider) Configure(cfg map[string]string) error {
 	if issuer == "" || clientID == "" || redirect == "" {
 		return errors.New("oidc: issuer, client_id and redirect_url are required")
 	}
-	provider, err := oidc.NewProvider(context.Background(), issuer)
+	// discovery 必须限时:不可达/挂起的 IdP 不得阻塞服务启动(审计2026-M4);
+	// 失败视为 OIDC 未配置(降级,不阻断启动)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	provider, err := oidc.NewProvider(ctx, issuer)
 	if err != nil {
 		return err
 	}

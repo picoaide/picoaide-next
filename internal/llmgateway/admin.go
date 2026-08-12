@@ -1,10 +1,12 @@
 package llmgateway
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -42,6 +44,7 @@ var syncFetchFn func(url string) ([]byte, error)
 // catalog is usable immediately instead of waiting for the hourly loop.
 // Failures are non-fatal: the provider stays saved and the caller retries
 // via sync-all / the per-provider sync button.
+// 生产路径 15s 请求内超时(审计2026-M5):慢/黑洞上游不得把 admin 请求挂到 120s。
 func syncProviderNow(db *sql.DB, p *serverstore.GatewayProvider) *SyncResult {
 	if p.Channel == "" {
 		return nil
@@ -54,7 +57,13 @@ func syncProviderNow(db *sql.DB, p *serverstore.GatewayProvider) *SyncResult {
 	if err != nil {
 		return &SyncResult{Provider: p.Name, Error: err.Error()}
 	}
-	res := SyncProvider(db, ch, p, key, syncFetchFn)
+	fetch := syncFetchFn
+	if fetch == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		fetch = func(url string) ([]byte, error) { return channels.HTTPFetch(ctx, url, key) }
+	}
+	res := SyncProvider(db, ch, p, key, fetch)
 	return &res
 }
 
