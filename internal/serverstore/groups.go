@@ -15,7 +15,11 @@ type queryer interface {
 // Lookup is case-insensitive (COLLATE NOCASE): LDAP cn "Finance" and a
 // hand-typed "finance" are the same group, so grants never silently fail
 // to resolve. The stored name keeps its first-seen casing.
+// 保留名全员拒绝创建:隐式组只能由迁移 seed(普通拼写不得翻转为全员授权)。
 func GetOrCreateGroup(db queryer, name string) (int64, error) {
+	if name == EveryoneGroupName {
+		return 0, ErrValidation
+	}
 	var id int64
 	err := db.QueryRow("SELECT id FROM groups WHERE name = ? COLLATE NOCASE", name).Scan(&id)
 	if err == nil {

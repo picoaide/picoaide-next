@@ -561,9 +561,9 @@ func TestAdminDepartmentsAPI(t *testing.T) {
 	}
 	frontID = int64(out["department"].(map[string]any)["id"].(float64))
 
-	// 列表含层级
+	// 列表含层级(含迁移 seed 的隐式全员)
 	w, out = doAdmin(t, r, "GET", "/api/admin/departments", "", hdr)
-	if w.Code != http.StatusOK || len(out["departments"].([]any)) != 2 {
+	if w.Code != http.StatusOK || len(out["departments"].([]any)) != 3 {
 		t.Fatalf("list depts: %d %s", w.Code, w.Body.String())
 	}
 

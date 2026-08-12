@@ -36,18 +36,25 @@ func TestDepartmentCRUD(t *testing.T) {
 		t.Fatalf("bad parent err = %v", err)
 	}
 
-	// 列表含层级信息
+	// 列表含层级信息(迁移 0018 seed 的隐式全员也在列)
 	list, err := ListDepartments(db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list) != 4 {
+	if len(list) != 5 {
 		t.Fatalf("departments = %+v", list)
 	}
+	hasEveryone := false
 	for _, d := range list {
+		if d.Name == "全员" {
+			hasEveryone = true
+		}
 		if d.Name == "前端组" && d.ParentID != devID {
 			t.Fatalf("前端组 parent = %d", d.ParentID)
 		}
+	}
+	if !hasEveryone {
+		t.Fatalf("departments list lacks seeded 全员: %+v", list)
 	}
 
 	// 循环防护:前端组不能成为研发部的父
@@ -172,10 +179,14 @@ func TestUserEffectiveGroupsInheritance(t *testing.T) {
 	_ = hrID
 	_ = frontID
 
-	// bob(人事部)只有人事部
+	// bob(人事部)只有人事部 + 隐式全员(0018 seed)
 	names, _ = UserEffectiveGroups(db, bobID)
-	if len(names) != 1 || names[0] != "人事部" {
-		t.Fatalf("bob effective = %v", names)
+	got = map[string]bool{}
+	for _, n := range names {
+		got[n] = true
+	}
+	if !got["人事部"] || !got["全员"] || len(names) != 2 {
+		t.Fatalf("bob effective = %v, want 人事部+全员", names)
 	}
 
 	// carl(研发部主管,未入组)有效组 = 研发部 + 前端组 + 后端组(主管子树)
@@ -244,10 +255,6 @@ func TestEveryoneGroupImplicit(t *testing.T) {
 	if err := ApplyMigrations(db); err != nil {
 		t.Fatal(err)
 	}
-	// 全员为保留名(隐式组),只能由系统/seed 直插创建
-	if _, err := db.Exec("INSERT INTO groups (name) VALUES ('全员')"); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := CreateDepartment(db, "研发部", 0, 0, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -278,6 +285,45 @@ func TestEveryoneGroupImplicit(t *testing.T) {
 	}
 }
 
+// 迁移 0018:全新安装即存在全员行(此前只有测试手工直插,生产环境功能失效)
+func TestEveryoneGroupSeededByMigration(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM groups WHERE name = '全员'").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("全员 group rows = %d, want 1 (migration 0018 must seed it)", n)
+	}
+	// GetOrCreateGroup 不得创建/占用保留名
+	if _, err := GetOrCreateGroup(db, "全员"); err != ErrValidation {
+		t.Fatalf("GetOrCreateGroup(全员) err = %v, want ErrValidation", err)
+	}
+	// CreateDepartment 仍拒绝保留名
+	if _, err := CreateDepartment(db, "全员", 0, 0, ""); err != ErrValidation {
+		t.Fatalf("CreateDepartment(全员) err = %v, want ErrValidation", err)
+	}
+	// 全新用户(无任何部门)也自动获得全员
+	uid, _ := CreateUserWithPassword(db, "bob", "pw123456")
+	groups, err := UserEffectiveGroups(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, g := range groups {
+		if g == "全员" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("fresh user effective groups lack 全员: %v", groups)
+	}
+}
+
 // 保留名「全员」:不可创建/改名占用/删除
 func TestEveryoneGroupReserved(t *testing.T) {
 	db := openTestDB(t)
@@ -292,9 +338,9 @@ func TestEveryoneGroupReserved(t *testing.T) {
 	if err := UpdateDepartment(db, devID, "全员", 0, 0, ""); err != ErrValidation {
 		t.Fatalf("rename to 全员 err = %v", err)
 	}
-	everyoneID, _ := CreateDepartment(db, "everyone-x", 0, 0, "")
-	_ = everyoneID
-	if _, err := db.Exec("UPDATE groups SET name = '全员' WHERE id = ?", everyoneID); err != nil {
+	// 迁移 0018 已 seed 全员行:删除守卫必须拒绝删除保留名
+	var everyoneID int64
+	if err := db.QueryRow("SELECT id FROM groups WHERE name = '全员'").Scan(&everyoneID); err != nil {
 		t.Fatal(err)
 	}
 	if err := DeleteDepartment(db, everyoneID); err != ErrValidation {
