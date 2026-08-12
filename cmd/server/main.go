@@ -138,14 +138,15 @@ func main() {
 			}
 			index, err := dist.Open("index.html")
 			if err != nil {
-				c.String(http.StatusNotFound, "webadmin 未构建")
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "webadmin 未构建")
 				return
 			}
 			defer index.Close()
 			c.DataFromReader(http.StatusOK, -1, "text/html", index, nil)
 			return
 		}
-		c.String(http.StatusNotFound, "not found")
+		// 错误信封契约(审计2026-S37):非 2xx 一律 {"error":{code,message}}
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "接口不存在")
 	})
 
 	log.Printf("picoaide-server v%s listening on %s (data=%s)", version, *addr, *dataDir)
