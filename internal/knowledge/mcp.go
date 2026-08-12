@@ -142,10 +142,18 @@ func toolKBSearch(db *sql.DB, id json.RawMessage, args json.RawMessage, username
 	}
 	if total == 0 {
 		// migration window: docs without chunks (pre-0014, not yet
-		// backfilled) fall back to doc-level search
-		docRes, docTotal, derr := Search(db, username, groups, a.Query, a.Page, a.PageSize)
-		if derr == nil && docTotal > 0 {
-			return textResponse(id, fmt.Sprintf("total %d\n%s", docTotal, formatDocResults(docRes)), false)
+		// backfilled) fall back to doc-level search。
+		// admin 用 SearchAll(管理员本应全量可见,不走个人授权过滤;审计2026-M6)
+		if isAdmin {
+			docRes, docTotal, derr := SearchAll(db, a.Query, a.Page, a.PageSize)
+			if derr == nil && docTotal > 0 {
+				return textResponse(id, fmt.Sprintf("total %d\n%s", docTotal, formatDocResults(docRes)), false)
+			}
+		} else {
+			docRes, docTotal, derr := Search(db, username, groups, a.Query, a.Page, a.PageSize)
+			if derr == nil && docTotal > 0 {
+				return textResponse(id, fmt.Sprintf("total %d\n%s", docTotal, formatDocResults(docRes)), false)
+			}
 		}
 	}
 	return textResponse(id, fmt.Sprintf("total %d\n%s", total, formatChunkResults(res)), false)
