@@ -382,10 +382,15 @@ export default function Knowledge() {
                         size="sm"
                         variant="ghost"
                         className="h-6 px-2"
-                        onClick={() => {
+                        onClick={async () => {
+                          // 先加载 grants 再开弹窗:否则 deptChecked 仍是上一个文件夹的
+                          // 勾选,保存时会把旧文件夹的整组授权覆盖到新文件夹(审计2026-W2)
                           setGrantFolder(f)
                           setGrantTarget('')
-                          loadGrants(f.id)
+                          setGrantUsers([])
+                          setGrantGroups([])
+                          setDeptChecked([])
+                          await loadGrants(f.id)
                           setGrantDialog(true)
                         }}
                       >

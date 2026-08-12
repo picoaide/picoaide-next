@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
 } from 'recharts'
@@ -22,11 +22,20 @@ export default function Usage() {
   const [rows, setRows] = useState<UsageRow[]>([])
   const [error, setError] = useState('')
 
+  // 日期经 ref 读取:load 不被 from/to 变化重创(保持"点击查询才发请求"),
+  // 同时点击时读到的永远是最新输入(审计2026-W1 旧闭包修复)
+  const fromRef = useRef(from)
+  const toRef = useRef(to)
+  useEffect(() => {
+    fromRef.current = from
+    toRef.current = to
+  }, [from, to])
+
   const load = useCallback(async () => {
     try {
       const params = new URLSearchParams({ group })
-      if (from) params.set('from', from)
-      if (to) params.set('to', to)
+      if (fromRef.current) params.set('from', fromRef.current)
+      if (toRef.current) params.set('to', toRef.current)
       const data = await request(`/api/admin/usage?${params}`)
       setRows(data.rows ?? [])
       setError('')

@@ -251,7 +251,7 @@ export default function Gateway() {
                   <TableCell>{p.name}</TableCell>
                   <TableCell>{p.channel ? <Badge variant="secondary">{p.channel}</Badge> : '—'}</TableCell>
                   <TableCell className="font-mono text-xs">{p.base_url}</TableCell>
-                  <TableCell>{p.api_key || '(未设置)'}</TableCell>
+                  <TableCell>{p.api_key ? (p.api_key === '***' ? '已设置(隐藏)' : p.api_key) : '(未设置)'}</TableCell>
                   <TableCell>
                     {p.channel ? <span className="text-xs text-muted-foreground">自动同步</span> : p.models.join(', ')}
                   </TableCell>
