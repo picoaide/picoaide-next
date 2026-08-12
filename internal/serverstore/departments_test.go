@@ -379,3 +379,89 @@ func TestRenameCascadeCaseInsensitive(t *testing.T) {
 		t.Fatalf("mcp case variant lost")
 	}
 }
+
+// 删除守卫按 NOCASE 计授权引用:大小写变体授权不得绕过守卫
+func TestDeleteGuardCountsCaseVariantGrants(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	salesID, _ := CreateDepartment(db, "Sales", 0, 0, "")
+	// 手输大小写变体授权(grantee 与组名大小写不同)
+	if _, err := db.Exec("INSERT INTO skill_grants (skill_name, grantee_type, grantee) VALUES ('x', 'group', 'sales')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteDepartment(db, salesID); err != ErrDepartmentInUse {
+		t.Fatalf("delete Sales with case-variant grant err = %v, want ErrDepartmentInUse", err)
+	}
+	// 清掉变体授权后可删
+	if _, err := db.Exec("DELETE FROM skill_grants WHERE grantee = 'sales'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteDepartment(db, salesID); err != nil {
+		t.Fatalf("delete Sales after clearing = %v", err)
+	}
+}
+
+// 0019:组名唯一约束 NOCASE,大小写变体部门不得并存
+func TestDepartmentNamesUniqueCaseInsensitive(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateDepartment(db, "Sales", 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateDepartment(db, "sales", 0, 0, ""); err != ErrDuplicate {
+		t.Fatalf("case-variant create err = %v, want ErrDuplicate", err)
+	}
+}
+
+// CreateDepartment 校验主管存在;UpdateDepartment 空名拒绝
+func TestDepartmentGuards(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateDepartment(db, "研发部", 0, 9999, ""); err != ErrNotFound {
+		t.Fatalf("bogus leader create err = %v, want ErrNotFound", err)
+	}
+	if _, err := CreateDepartment(db, "", 0, 0, ""); err != ErrValidation {
+		t.Fatalf("empty name create err = %v, want ErrValidation", err)
+	}
+	id, _ := CreateDepartment(db, "研发部", 0, 0, "")
+	if err := UpdateDepartment(db, id, "", 0, 0, ""); err != ErrValidation {
+		t.Fatalf("empty rename err = %v, want ErrValidation", err)
+	}
+}
+
+// RevokeFolderGroup 大小写不敏感(与授权解析一致)
+func TestRevokeFolderGroupCaseInsensitive(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	gid, _ := CreateDepartment(db, "Sales", 0, 0, "")
+	fid, err := CreateKBFolder(db, "f", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := GrantFolderGroup(db, fid, "Sales"); err != nil {
+		t.Fatal(err)
+	}
+	_ = gid
+	if err := RevokeFolderGroup(db, fid, "sales"); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM kb_folder_groups WHERE folder_id = ?", fid).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("folder group grants after case-variant revoke = %d, want 0", n)
+	}
+}

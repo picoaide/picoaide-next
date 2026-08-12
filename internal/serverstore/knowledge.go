@@ -248,8 +248,9 @@ func RevokeFolderUser(db *sql.DB, folderID int64, username string) error {
 }
 
 // RevokeFolderGroup removes a group grant by name (idempotent).
+// 组名匹配 NOCASE:与授权解析口径一致,大小写变体的 revoke 不得静默失效
 func RevokeFolderGroup(db *sql.DB, folderID int64, groupName string) error {
-	_, err := db.Exec("DELETE FROM kb_folder_groups WHERE folder_id = ? AND group_id = (SELECT id FROM groups WHERE name = ?)", folderID, groupName)
+	_, err := db.Exec("DELETE FROM kb_folder_groups WHERE folder_id = ? AND group_id = (SELECT id FROM groups WHERE name = ? COLLATE NOCASE)", folderID, groupName)
 	return err
 }
 

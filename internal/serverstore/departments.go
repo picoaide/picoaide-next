@@ -69,13 +69,22 @@ func GroupByID(db *sql.DB, id int64) (*Group, error) {
 }
 
 // CreateDepartment inserts a department (parent_id 0 = top level).
-// The parent must exist; duplicate names are rejected (UNIQUE).
+// The parent must exist; duplicate names are rejected (UNIQUE, NOCASE since 0019).
+// leader 必须存在(与 UpdateDepartment 同口径,防悬空主管静默落库)。
 func CreateDepartment(db *sql.DB, name string, parentID, leaderID int64, description string) (int64, error) {
 	if name == EveryoneGroupName {
 		return 0, ErrValidation // 保留名:隐式全员组不可重建/改名占用
 	}
+	if name == "" {
+		return 0, ErrValidation
+	}
 	if parentID != 0 {
 		if _, err := GroupByID(db, parentID); err != nil {
+			return 0, err
+		}
+	}
+	if leaderID != 0 {
+		if _, err := GetUserByID(db, leaderID); err != nil {
 			return 0, err
 		}
 	}
@@ -129,6 +138,9 @@ func UpdateDepartment(db *sql.DB, id int64, name string, parentID, leaderID int6
 	if name == EveryoneGroupName {
 		return ErrValidation // 保留名
 	}
+	if name == "" {
+		return ErrValidation // 空名会把全部授权级联写成空串,store 层兜底拒绝
+	}
 	if name != "" && name != g.Name {
 		// COLLATE NOCASE 与授权解析一致:授权存储大小写异于组名的(手输/LDAP)改名后不失效
 		if _, err := tx.Exec("UPDATE skill_grants SET grantee = ? WHERE grantee_type = 'group' AND grantee = ? COLLATE NOCASE", name, g.Name); err != nil {
@@ -152,14 +164,24 @@ func UpdateDepartment(db *sql.DB, id int64, name string, parentID, leaderID int6
 // DeleteDepartment removes a department. Guard: departments with members,
 // child departments or grant references cannot be deleted — the operator
 // must move members/children and clear grants first (避免误删权限黑洞).
+// 守卫计数与删除同事务(TOCTOU);授权引用按 NOCASE 计数(与解析口径一致,
+// 大小写变体的授权不得绕过守卫导致孤儿授权/后续复活)。
 func DeleteDepartment(db *sql.DB, id int64) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if g, err := GroupByID(db, id); err == nil && g.Name == EveryoneGroupName {
+		return ErrValidation // 保留名
+	}
 	var memberCount, childCount, grantCount int64
-	if err := db.QueryRow(`SELECT
+	if err := tx.QueryRow(`SELECT
 		(SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id = g.id),
 		(SELECT COUNT(*) FROM groups c WHERE c.parent_id = g.id),
 		(SELECT COUNT(*) FROM kb_folder_groups kfg WHERE kfg.group_id = g.id)
-		+ (SELECT COUNT(*) FROM skill_grants sg WHERE sg.grantee_type = 'group' AND sg.grantee = g.name)
-		+ (SELECT COUNT(*) FROM mcp_grants mg WHERE mg.grantee_type = 'group' AND mg.grantee = g.name)
+		+ (SELECT COUNT(*) FROM skill_grants sg WHERE sg.grantee_type = 'group' AND sg.grantee = g.name COLLATE NOCASE)
+		+ (SELECT COUNT(*) FROM mcp_grants mg WHERE mg.grantee_type = 'group' AND mg.grantee = g.name COLLATE NOCASE)
 		FROM groups g WHERE g.id = ?`, id).Scan(&memberCount, &childCount, &grantCount); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
@@ -169,11 +191,10 @@ func DeleteDepartment(db *sql.DB, id int64) error {
 	if memberCount > 0 || childCount > 0 || grantCount > 0 {
 		return ErrDepartmentInUse
 	}
-	if g, err := GroupByID(db, id); err == nil && g.Name == EveryoneGroupName {
-		return ErrValidation // 保留名
+	if _, err := tx.Exec("DELETE FROM groups WHERE id = ?", id); err != nil {
+		return err
 	}
-	_, err := db.Exec("DELETE FROM groups WHERE id = ?", id)
-	return err
+	return tx.Commit()
 }
 
 // subtreeGroupIDs returns the department id plus all descendant ids
