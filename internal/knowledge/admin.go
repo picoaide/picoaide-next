@@ -202,6 +202,14 @@ func uploadDoc(c *gin.Context, db *sql.DB, uploadsDir string) {
 	if folderID < 0 {
 		folderID = 0
 	}
+	// 与 multipart 路径同口径:folder_id 必须存在(0=根目录),防孤儿文档
+	if folderID != 0 {
+		var n int
+		if err := db.QueryRow("SELECT COUNT(*) FROM kb_folders WHERE id = ?", folderID).Scan(&n); err != nil || n == 0 {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "folder_id 不存在")
+			return
+		}
+	}
 	id, err := IndexDocument(db, folderID, title, content, contentType, "admin", adminUsername(c))
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "上传失败")
@@ -568,26 +576,42 @@ func deleteFolder(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
 		return
 	}
-	var docCount, grantCount int64
-	if err := db.QueryRow("SELECT COUNT(*) FROM kb_documents WHERE folder_id = ?", id).Scan(&docCount); err != nil {
+	// 守卫 + 删除同事务(TOCTOU);子文件夹也算"非空"——删除父目录会把子文件夹
+	// 悬挂为孤儿(审计2026-H2)
+	tx, err := db.Begin()
+	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
-	if err := db.QueryRow(`SELECT (SELECT COUNT(*) FROM kb_folder_users WHERE folder_id = ?) + (SELECT COUNT(*) FROM kb_folder_groups WHERE folder_id = ?)`, id, id).Scan(&grantCount); err != nil {
+	defer tx.Rollback()
+	var docCount, grantCount, childCount int64
+	if err := tx.QueryRow("SELECT COUNT(*) FROM kb_documents WHERE folder_id = ?", id).Scan(&docCount); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
-	if docCount > 0 || grantCount > 0 {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "文件夹非空(有文档或授权),请先清空")
+	if err := tx.QueryRow(`SELECT (SELECT COUNT(*) FROM kb_folder_users WHERE folder_id = ?) + (SELECT COUNT(*) FROM kb_folder_groups WHERE folder_id = ?)`, id, id).Scan(&grantCount); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
-	res, err := db.Exec("DELETE FROM kb_folders WHERE id = ?", id)
+	if err := tx.QueryRow("SELECT COUNT(*) FROM kb_folders WHERE parent_id = ?", id).Scan(&childCount); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if docCount > 0 || grantCount > 0 || childCount > 0 {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "文件夹非空(有文档、子文件夹或授权),请先清空")
+		return
+	}
+	res, err := tx.Exec("DELETE FROM kb_folders WHERE id = ?", id)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
 		return
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "文件夹不存在")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
 		return
 	}
 	_ = serverstore.AuditLog(db, adminUsername(c), "kb_folder_delete", "folder#"+strconv.FormatInt(id, 10))

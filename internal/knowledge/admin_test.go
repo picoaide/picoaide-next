@@ -545,6 +545,19 @@ func TestAdminDeleteFolder(t *testing.T) {
 	if w, _ := kbReq(t, r, "DELETE", fmt.Sprintf("/api/admin/kb/folders/%d", fid3), "", hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("delete with grants = %d, want 400", w.Code)
 	}
+	// 有子文件夹 → 拒绝(删除父目录不得把子文件夹悬挂为孤儿)
+	w, out = kbReq(t, r, "POST", "/api/admin/kb/folders", `{"name":"父目录"}`, hdr)
+	parentID := int64(out["folder"].(map[string]any)["id"].(float64))
+	if w, _ := kbReq(t, r, "POST", "/api/admin/kb/folders", fmt.Sprintf(`{"name":"子目录","parent_id":%d}`, parentID), hdr); w.Code != http.StatusOK {
+		t.Fatalf("create child: %d", w.Code)
+	}
+	if w, _ := kbReq(t, r, "DELETE", fmt.Sprintf("/api/admin/kb/folders/%d", parentID), "", hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("delete with children = %d, want 400", w.Code)
+	}
+	// JSON 上传不存在的 folder_id → 400(与 multipart 同口径)
+	if w, _ := kbReq(t, r, "POST", "/api/admin/kb/upload", `{"title":"x","content":"y","folder_id":99999}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("json upload unknown folder_id = %d, want 400", w.Code)
+	}
 	// 不存在 → 404
 	if w, _ := kbReq(t, r, "DELETE", "/api/admin/kb/folders/99999", "", hdr); w.Code != http.StatusNotFound {
 		t.Fatalf("delete missing = %d, want 404", w.Code)
