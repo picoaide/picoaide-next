@@ -106,7 +106,8 @@ func TestSyncProviderModelAndRemoveMissing(t *testing.T) {
 	}
 }
 
-func TestSyncProviderModelPerProvider(t *testing.T) {	db := openTestDB(t)
+func TestSyncProviderModelPerProvider(t *testing.T) {
+	db := openTestDB(t)
 	if err := ApplyMigrations(db); err != nil {
 		t.Fatal(err)
 	}
