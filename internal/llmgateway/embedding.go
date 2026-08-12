@@ -201,7 +201,7 @@ func (a *API) handleEmbeddings(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "上游服务不可用")
 		return
 	}
-	if _, err := serverstore.RecordUsage(a.DB, user.ID, req.Model, tokens, 0); err != nil {
+	if _, err := serverstore.RecordUsageKind(a.DB, user.ID, req.Model, tokens, 0, "embedding"); err != nil {
 		log.Printf("gateway: record embed usage: %v", err)
 	}
 	c.JSON(http.StatusOK, gin.H{

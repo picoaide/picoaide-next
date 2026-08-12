@@ -279,7 +279,7 @@ func TestProxyStreamIdleTimeout(t *testing.T) {
 	if !strings.Contains(got, `"content":"hi"`) {
 		t.Fatalf("first chunk missing: %q", got)
 	}
-	if !strings.Contains(got, "UPSTREAM_IDLE_TIMEOUT") {
+	if !strings.Contains(got, `"code":"UPSTREAM"`) || !strings.Contains(got, "空闲超时") {
 		t.Fatalf("no idle timeout error sent to client: %q", got)
 	}
 	if strings.Contains(got, "[DONE]") {

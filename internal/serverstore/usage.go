@@ -7,10 +7,17 @@ import (
 
 const sqliteTimeFmt = "2006-01-02 15:04:05"
 
-// RecordUsage inserts a usage row and returns its id.
+// RecordUsage inserts a chat usage row and returns its id.
 func RecordUsage(db *sql.DB, userID int64, model string, promptTokens, completionTokens int64) (int64, error) {
-	res, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens) VALUES (?, ?, ?, ?)`,
-		userID, model, promptTokens, completionTokens)
+	return RecordUsageKind(db, userID, model, promptTokens, completionTokens, "chat")
+}
+
+// RecordUsageKind inserts a usage row with an explicit kind (chat | embedding).
+// embedding 行的 0-token(上游省略 usage)是真实请求计数,不得被
+// CleanupPendingUsage 当作流中断残留清除(审计2026-M16)。
+func RecordUsageKind(db *sql.DB, userID int64, model string, promptTokens, completionTokens int64, kind string) (int64, error) {
+	res, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, kind) VALUES (?, ?, ?, ?, ?)`,
+		userID, model, promptTokens, completionTokens, kind)
 	if err != nil {
 		return 0, err
 	}
@@ -31,10 +38,10 @@ func DeleteUsage(db *sql.DB, id int64) error {
 	return err
 }
 
-// CleanupPendingUsage deletes zero-token rows older than cutoff (stale pending
-// rows left by interrupted streaming requests). Run at server startup.
+// CleanupPendingUsage deletes zero-token chat rows older than cutoff (stale
+// pending rows left by interrupted streaming requests). Run at server startup.
 func CleanupPendingUsage(db *sql.DB, cutoff time.Time) error {
-	_, err := db.Exec(`DELETE FROM usage WHERE prompt_tokens = 0 AND completion_tokens = 0 AND created_at < ?`,
+	_, err := db.Exec(`DELETE FROM usage WHERE kind = 'chat' AND prompt_tokens = 0 AND completion_tokens = 0 AND created_at < ?`,
 		cutoff.Format(sqliteTimeFmt))
 	return err
 }

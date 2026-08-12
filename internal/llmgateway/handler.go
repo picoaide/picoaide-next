@@ -358,6 +358,7 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 	fl, _ := c.Writer.(http.Flusher)
 	br := bufio.NewReader(resp.Body)
 	clientGone := false
+	idleTimedOut := false
 	for {
 		// 5#9/5#10: stop pumping once the client context is gone
 		if c.Request.Context().Err() != nil {
@@ -385,8 +386,9 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 		}
 		if err != nil { // EOF, client disconnect, or idle timeout
 			if errors.Is(err, errStreamIdleTimeout) {
+				idleTimedOut = true
 				log.Printf("gateway: stream idle timeout after %v, terminating", streamIdleTimeout)
-				fmt.Fprintf(c.Writer, "data: %s\n\n", `{"error":{"code":"UPSTREAM_IDLE_TIMEOUT","message":"上游响应空闲超时"}}`)
+				fmt.Fprintf(c.Writer, "data: %s\n\n", `{"error":{"code":"UPSTREAM","message":"上游响应空闲超时"}}`)
 				if fl != nil {
 					fl.Flush()
 				}
@@ -394,7 +396,8 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 			break
 		}
 	}
-	if clientGone && usageID > 0 {
+	// idle 超时与客户端断开同样无法回填:pending 行必须清除,否则计量虚增一小时
+	if (clientGone || idleTimedOut) && usageID > 0 {
 		if err := serverstore.DeleteUsage(a.DB, usageID); err != nil {
 			log.Printf("gateway: delete pending usage: %v", err)
 		}
