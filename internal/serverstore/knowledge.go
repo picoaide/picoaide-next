@@ -181,7 +181,9 @@ func PurgeOldAuditLogs(db *sql.DB, cutoff time.Time) error {
 
 // RetryKBDocument re-queues a failed upload for extraction.
 func RetryKBDocument(db *sql.DB, id int64) error {
-	res, err := db.Exec("UPDATE kb_documents SET status = 'pending', error = '' WHERE id = ?", id)
+	// 状态守卫(审计2026-L10):仅 error/pending 可重排;processing 行由 worker
+	// 独占声明(CAS),重排会破坏排他性导致双重提取/文件竞态删除
+	res, err := db.Exec("UPDATE kb_documents SET status = 'pending', error = '' WHERE id = ? AND status IN ('error', 'pending')", id)
 	if err != nil {
 		return err
 	}

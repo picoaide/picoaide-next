@@ -224,7 +224,12 @@ func toolKBList(db *sql.DB, id json.RawMessage, args json.RawMessage, accessible
 		if !accessible[f.ID] {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("#%d %s (parent %d)", f.ID, f.Name, f.ParentID))
+		// 父目录 id 仅当也在可访问集合内才展示(审计2026-L6:不泄露无权文件夹的存在)
+		parent := ""
+		if f.ParentID != 0 && accessible[f.ParentID] {
+			parent = fmt.Sprintf(" (parent %d)", f.ParentID)
+		}
+		lines = append(lines, fmt.Sprintf("#%d %s%s", f.ID, f.Name, parent))
 		// include_docs: enumerate documents in accessible folders so the LLM
 		// can pick a document by title before searching (A3).
 		if a.IncludeDocs {
@@ -254,6 +259,10 @@ func toolKBUpload(db *sql.DB, id json.RawMessage, args json.RawMessage, accessib
 	}
 	if a.Title == "" || a.Content == "" {
 		return textResponse(id, "title and content are required", true)
+	}
+	// 标题上限(审计2026-L5):4MB 级 MCP 请求体里的巨型标题不得落库/进摘要
+	if len([]rune(a.Title)) > 200 {
+		return textResponse(id, "title too long (max 200 runes)", true)
 	}
 	// folder 0(根目录)不再隐式可写:与可读性一致,必须显式授权后才可
 	// 上传(严格授权制);无授权返回拒绝

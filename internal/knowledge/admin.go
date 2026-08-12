@@ -242,6 +242,8 @@ func retryDoc(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "重试失败")
 		return
 	}
+	// 与其余变更端点一致:重排(可能改变文档内容)必须审计(审计2026-L17)
+	_ = serverstore.AuditLog(db, adminUsername(c), "kb_retry", "doc#"+strconv.FormatInt(id, 10))
 	c.JSON(http.StatusOK, gin.H{"ok": true, "doc": gin.H{"id": id, "status": "pending"}})
 }
 

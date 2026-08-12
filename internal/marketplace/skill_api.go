@@ -157,11 +157,8 @@ func (a *API) getSkill(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "技能读取失败")
 		return
 	}
-	if s.Enabled != 1 {
-		// 与 downloadArchive 一致:下架即不可读,不泄露元数据
-		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能已下架")
-		return
-	}
+	// 授权检查先于下架检查(审计2026-L13):未授权用户对"存在但下架"与"不存在"
+	// 必须得到同一 404,不得用消息区分资源状态
 	if !u.IsAdmin {
 		names, err := serverstore.AccessibleSkillNames(a.DB, u.Username, groups)
 		if err != nil || !containsName(names, s.Name) {
@@ -169,6 +166,11 @@ func (a *API) getSkill(c *gin.Context) {
 			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
 			return
 		}
+	}
+	if s.Enabled != 1 {
+		// 与 downloadArchive 一致:下架即不可读,不泄露元数据
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能已下架")
+		return
 	}
 	c.JSON(http.StatusOK, gin.H{"skill": skillJSON(*s)})
 }
@@ -197,11 +199,7 @@ func (a *API) downloadArchive(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "技能读取失败")
 		return
 	}
-	if s.Enabled != 1 {
-		// C-10: 下架即不可下载,与不存在同响应(与 MCP 插件一致)
-		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能已下架")
-		return
-	}
+	// 授权先于下架(审计2026-L13)
 	if !u.IsAdmin {
 		names, err := serverstore.AccessibleSkillNames(a.DB, u.Username, groups)
 		if err != nil || !containsName(names, s.Name) {
@@ -209,6 +207,11 @@ func (a *API) downloadArchive(c *gin.Context) {
 			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
 			return
 		}
+	}
+	if s.Enabled != 1 {
+		// C-10: 下架即不可下载,与不存在同响应(与 MCP 插件一致)
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能已下架")
+		return
 	}
 	if !util.SafePathSegment(s.Name) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能名不合法")

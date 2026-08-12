@@ -76,6 +76,10 @@ func SearchChunks(db *sql.DB, username string, groups []string, query string, pa
 	if err != nil {
 		return nil, 0, err
 	}
+	if len(folders) == 0 {
+		// 空集早退(审计2026-L1)
+		return []ChunkResult{}, 0, nil
+	}
 	return searchChunksInFolders(db, folders, query, page, pageSize)
 }
 
