@@ -43,7 +43,7 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	g.PUT("/users/:id", AdminAuth(db), a.updateUser)
 	g.DELETE("/users/:id", AdminAuth(db), a.deleteUser)
 	g.GET("/users/:id/groups", AdminAuth(db), a.getUserGroups)
-	g.PUT("/users/:id/groups", AdminAuth(db), a.setUserGroups)
+	// 单部门归属:多部门 set 端点已移除(与金字塔单部门模型冲突,审计2026-C6)
 	g.PUT("/users/:id/department", AdminAuth(db), a.setUserDepartment)
 	// 部门管理(金字塔组织架构)
 	g.GET("/departments", AdminAuth(db), a.listDepartments)
@@ -91,6 +91,42 @@ func (a *AdminAPI) adminAuth() gin.HandlerFunc {
 	}
 }
 
+// AuthenticateConfiguredAdmin authenticates an admin login through the same
+// provider registry as the client login (ConfigureProviders):在 auth.mode=ldap
+// 模式下,过期本地管理员无法绕开配置直接登录管理页。返回用户行(须已存在或
+// 可 provision),调用方仍需校验 IsAdmin。
+func AuthenticateConfiguredAdmin(db *sql.DB, username, password string) (*serverstore.User, error) {
+	pwds, _ := ConfigureProviders(db)
+	order := []string{"ldap", "local"}
+	var lastErr error
+	for _, name := range order {
+		var p PasswordProvider
+		for _, cand := range pwds {
+			if cand.Name() == name {
+				p = cand
+				break
+			}
+		}
+		if p == nil {
+			continue
+		}
+		ui, err := p.Authenticate(username, password)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		u, err := provisionUser(db, ui)
+		if err != nil {
+			return nil, err
+		}
+		return u, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no password provider configured")
+	}
+	return nil, lastErr
+}
+
 func (a *AdminAPI) handleLogin(c *gin.Context) {
 	var req struct {
 		Username string `json:"username"`
@@ -104,7 +140,7 @@ func (a *AdminAPI) handleLogin(c *gin.Context) {
 		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录尝试过于频繁,请稍后再试")
 		return
 	}
-	u, err := serverstore.AuthenticateLocal(a.DB, req.Username, req.Password)
+	u, err := AuthenticateConfiguredAdmin(a.DB, req.Username, req.Password)
 	if err != nil || !u.IsAdmin {
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "用户名或密码错误或非管理员")
 		return
@@ -124,7 +160,7 @@ func (a *AdminAPI) handleLogin(c *gin.Context) {
 		Secure:   secure,
 		MaxAge:   int(AdminSessionTTL.Seconds()),
 	})
-	c.JSON(http.StatusOK, gin.H{"csrf_token": csrf, "user": userJSON(&u)})
+	c.JSON(http.StatusOK, gin.H{"csrf_token": csrf, "user": userJSON(u)})
 }
 
 func (a *AdminAPI) handleMe(c *gin.Context) {
@@ -210,45 +246,11 @@ func (a *AdminAPI) getUserGroups(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"groups": groups})
 }
 
-// setUserGroups replaces a user's group membership (部门归属)——本地账号
-// 进入部门组的唯一入口(LDAP 登录自动同步,不受此接口影响)。
+// setUserGroups 已随多部门端点移除(审计2026-C6):员工单部门归属一律走
+// PUT /users/:id/department;此处保留仅为类型说明,实际不注册路由。
+// nolint:unused // 保留防误注册的语义说明
 func (a *AdminAPI) setUserGroups(c *gin.Context) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "非法用户 ID")
-		return
-	}
-	u, err := serverstore.GetUserByID(a.DB, id)
-	if errors.Is(err, serverstore.ErrNotFound) {
-		writeError(c, http.StatusNotFound, "NOT_FOUND", "用户不存在")
-		return
-	} else if err != nil {
-		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-		return
-	}
-	var req struct {
-		Groups []string `json:"groups"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
-		return
-	}
-	clean := make([]string, 0, len(req.Groups))
-	for _, g := range req.Groups {
-		g = strings.TrimSpace(g)
-		if g == "" || strings.ContainsAny(g, "/\\\t\n") {
-			writeError(c, http.StatusBadRequest, "VALIDATION", "组名不合法: "+g)
-			return
-		}
-		clean = append(clean, g)
-	}
-	if err := serverstore.SyncUserGroups(a.DB, id, clean); err != nil {
-		writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
-		return
-	}
-	// 权限变更必须审计(误授权恢复靠审计)
-	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_groups", u.Username+" "+strings.Join(clean, ","))
-	c.JSON(http.StatusOK, gin.H{"ok": true, "groups": clean})
+	writeError(c, http.StatusNotFound, "NOT_FOUND", "该端点已移除,请使用 PUT /users/:id/department")
 }
 
 func (a *AdminAPI) createUser(c *gin.Context) {

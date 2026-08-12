@@ -176,9 +176,17 @@ func (a *API) authenticate(username, password string) (UserInfo, error) {
 // username collides with an existing local account is rejected — it must never
 // adopt the local row (which would inherit is_admin/status/credentials).
 func (a *API) provisionUser(ui UserInfo) (*serverstore.User, error) {
-	u, err := serverstore.GetUserByUsername(a.DB, ui.Username)
+	return provisionUser(a.DB, ui)
+}
+
+// provisionUser creates a local users row for an external (ldap/oidc) identity
+// on first login, and syncs group membership. An external identity whose
+// username collides with an existing local account is rejected — it must never
+// adopt the local row (which would inherit is_admin/status/credentials).
+func provisionUser(db *sql.DB, ui UserInfo) (*serverstore.User, error) {
+	u, err := serverstore.GetUserByUsername(db, ui.Username)
 	if errors.Is(err, serverstore.ErrNotFound) {
-		id, err := serverstore.CreateUser(a.DB, &serverstore.User{
+		id, err := serverstore.CreateUser(db, &serverstore.User{
 			Username:    ui.Username,
 			DisplayName: ui.DisplayName,
 			Email:       ui.Email,
@@ -191,12 +199,12 @@ func (a *API) provisionUser(ui UserInfo) (*serverstore.User, error) {
 			}
 			// C-13: a concurrent first login inserted the row between our
 			// lookup and INSERT; re-fetch it instead of failing with a 500.
-			u, err = serverstore.GetUserByUsername(a.DB, ui.Username)
+			u, err = serverstore.GetUserByUsername(db, ui.Username)
 			if err != nil {
 				return nil, err
 			}
 		} else {
-			u, err = serverstore.GetUserByID(a.DB, id)
+			u, err = serverstore.GetUserByID(db, id)
 			if err != nil {
 				return nil, err
 			}
@@ -205,6 +213,10 @@ func (a *API) provisionUser(ui UserInfo) (*serverstore.User, error) {
 	if err != nil && !errors.Is(err, serverstore.ErrNotFound) {
 		return nil, err
 	}
+	// 竞态兜底:行在 re-fetch 前被删,绝不空指针解引用(审计2026-L1)
+	if u == nil {
+		return nil, errors.New("user row disappeared during provisioning")
+	}
 	// 防提权:外部身份不得接管本地账号行
 	if ui.Source == "external" && u.Source != "external" {
 		return nil, errors.New("username belongs to a local account")
@@ -212,7 +224,7 @@ func (a *API) provisionUser(ui UserInfo) (*serverstore.User, error) {
 	// 同步组:外部(LDAP)身份每次登录全量对齐——组被移除或清空后,
 	// user_groups 必须同步回收,否则 skill/mcp/kb 组授权永久生效
 	if ui.Source == "external" {
-		if err := serverstore.SyncUserGroups(a.DB, u.ID, ui.Groups); err != nil {
+		if err := serverstore.SyncUserGroups(db, u.ID, ui.Groups); err != nil {
 			return nil, err
 		}
 	}
