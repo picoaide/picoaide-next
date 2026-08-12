@@ -137,6 +137,8 @@ type providerReq struct {
 	APIKey  string   `json:"api_key"`
 	Models  []string `json:"models"`
 	Channel string   `json:"channel"`
+	// 显式禁用开关:enabled=false 的 provider 不再参与模型路由(审计2026-M14)
+	Enabled *bool `json:"enabled"`
 }
 
 func providerJSON(p serverstore.GatewayProvider) gin.H {
@@ -189,6 +191,9 @@ func createProvider(c *gin.Context, db *sql.DB) {
 		return
 	}
 	p := &serverstore.GatewayProvider{Name: req.Name, BaseURL: req.BaseURL, APIKeyEnc: enc, Models: req.Models, Channel: req.Channel, Enabled: 1}
+	if req.Enabled != nil && !*req.Enabled {
+		p.Enabled = 0
+	}
 	if _, err := serverstore.AddGatewayProvider(db, p); err != nil {
 		if errors.Is(err, serverstore.ErrDuplicate) {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "上游名称已存在")
@@ -257,6 +262,13 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 	}
 	if req.Models != nil {
 		p.Models = req.Models
+	}
+	if req.Enabled != nil {
+		if *req.Enabled {
+			p.Enabled = 1
+		} else {
+			p.Enabled = 0
+		}
 	}
 	if err := serverstore.UpdateGatewayProvider(db, p); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")

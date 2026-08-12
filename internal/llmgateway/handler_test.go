@@ -73,6 +73,8 @@ data: [DONE]
 
 func newGateway(t *testing.T, f *fakeUpstream) (*gin.Engine, *sql.DB, string) {
 	t.Helper()
+	// 测试环境未接 master key:身份解密(测试密钥明文存储)
+	DecryptSecret = func(s string) (string, error) { return s, nil }
 	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/gw.db", t.TempDir()))
 	if err != nil {
 		t.Fatal(err)

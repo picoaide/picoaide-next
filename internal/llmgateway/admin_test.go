@@ -20,6 +20,7 @@ import (
 func adminTestSetup(t *testing.T) (http.Handler, *sql.DB, map[string]string) {
 	t.Helper()
 	t.Setenv("PICOAI_MASTER_KEY", "0123456789abcdef0123456789abcdef")
+	DecryptSecret = func(s string) (string, error) { return s, nil }
 	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/admin.db", t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
@@ -326,5 +327,36 @@ func TestAdminModelsAndDefaultModel(t *testing.T) {
 	// delete model
 	if w, _ := adminReq(t, r, "DELETE", "/api/admin/models/1", "", hdr); w.Code != http.StatusOK {
 		t.Fatalf("delete model: %d", w.Code)
+	}
+}
+
+// 禁用开关:enabled=false 后 provider 不再参与路由
+func TestProviderEnableToggle(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+		`{"name":"manual","base_url":"https://x.example","api_key":"sk","models":["m1"]}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create provider: %d %s", w.Code, w.Body.String())
+	}
+	id := int64(out["provider"].(map[string]any)["id"].(float64))
+	// 禁用
+	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/providers/%d", id), `{"enabled":false}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("disable provider: %d %s", w.Code, w.Body.String())
+	}
+	ups, err := MatchModels(db, "m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ups) != 0 {
+		t.Fatalf("disabled provider still routable: %+v", ups)
+	}
+	// 重新启用
+	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/providers/%d", id), `{"enabled":true}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("enable provider: %d %s", w.Code, w.Body.String())
+	}
+	ups, err = MatchModels(db, "m1")
+	if err != nil || len(ups) != 1 {
+		t.Fatalf("re-enabled provider not routable: %+v %v", ups, err)
 	}
 }
