@@ -637,3 +637,35 @@ func TestAdminLoginRespectsAuthMode(t *testing.T) {
 		t.Fatalf("ldap-mode local admin login = %d, want 401", w.Code)
 	}
 }
+
+// 外部(LDAP/OIDC)用户不得改本地密码:避免被踢出 IdP 且防接管守卫拒绝其登录
+func TestExternalUserPasswordRejected(t *testing.T) {
+	db := mustDB(t)
+	bossID, err := createUserDB(db, "boss", "pw123456", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extID, err := serverstore.CreateUser(db, &serverstore.User{Username: "alice-ldap", Source: "external", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, csrf, err := CreateAdminSession(db, bossID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdr := map[string]string{"Cookie": "picoaide_session=" + sess.ID, "X-CSRF-Token": csrf}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	RegisterAdminRoutes(r, db)
+	w, _ := doAdmin(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", extID), `{"password":"newpassword123"}`, hdr)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("external password change = %d, want 400", w.Code)
+	}
+	u, err := serverstore.GetUserByID(db, extID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Source != "external" || u.PasswordHash != "" {
+		t.Fatalf("external user mutated: source=%s hash=%q", u.Source, u.PasswordHash)
+	}
+}

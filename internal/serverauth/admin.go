@@ -343,6 +343,12 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 		u.Email = *req.Email
 	}
 	if req.Password != nil && *req.Password != "" {
+		// 外部(LDAP/OIDC)用户的密码由 IdP 管理:改写本地密码并置 Source=local 会
+		// 让该用户被永久踢出 IdP(provision 防接管守卫拒绝其再次登录)——直接拒绝
+		if u.Source == "external" {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "外部认证用户的密码由企业 IdP 管理,不能在此修改")
+			return
+		}
 		if utf8.RuneCountInString(*req.Password) < minPasswordLength {
 			writeError(c, http.StatusBadRequest, "VALIDATION", "密码至少 10 位")
 			return
@@ -353,7 +359,6 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 			return
 		}
 		u.PasswordHash = hash
-		u.Source = "local"
 	}
 	if req.IsAdmin != nil {
 		u.IsAdmin = *req.IsAdmin
