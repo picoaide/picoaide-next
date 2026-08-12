@@ -55,7 +55,8 @@ type UsageAggregateRow struct {
 }
 
 // UsageAggregate aggregates usage by day | model | user between from/to
-// (zero time means unbounded).
+// (zero time means unbounded).按 user 分组时标签用用户名(JOIN users,
+// 审计2026-L8),查无行时回退用户 ID。
 func UsageAggregate(db *sql.DB, from, to time.Time, group string) ([]UsageAggregateRow, error) {
 	var selectExpr, groupExpr string
 	switch group {
@@ -64,11 +65,16 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string) ([]UsageAggreg
 	case "model":
 		selectExpr, groupExpr = "model", "model"
 	default:
-		selectExpr, groupExpr = "CAST(user_id AS TEXT)", "user_id"
+		selectExpr = "COALESCE(u.username, CAST(usage.user_id AS TEXT))"
+		groupExpr = "u.username, usage.user_id"
 	}
 	q := `SELECT ` + selectExpr + ` AS label,
-		SUM(prompt_tokens) AS pt, SUM(completion_tokens) AS ct, COUNT(*) AS req
-		FROM usage WHERE 1=1`
+		SUM(usage.prompt_tokens) AS pt, SUM(usage.completion_tokens) AS ct, COUNT(*) AS req
+		FROM usage`
+	if group != "day" && group != "model" {
+		q += " LEFT JOIN users u ON u.id = usage.user_id"
+	}
+	q += " WHERE 1=1"
 	var args []any
 	if !from.IsZero() {
 		q += " AND created_at >= ?"

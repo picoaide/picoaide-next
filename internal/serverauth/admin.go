@@ -18,6 +18,12 @@ import (
 
 const sessionCookieName = "picoaide_session"
 
+// secureCookiesEnabled reads server.secure_cookies(反代部署手动开启 Secure 标记)
+func secureCookiesEnabled(db *sql.DB) bool {
+	v, ok, err := serverstore.GetSetting(db, "server.secure_cookies")
+	return err == nil && ok && strings.TrimSpace(v) == "1"
+}
+
 // minPasswordLength is the minimum password length for admin-created users.
 // Password expiry is deliberately out of scope for now.
 const minPasswordLength = 10
@@ -150,7 +156,9 @@ func (a *AdminAPI) handleLogin(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "会话创建失败")
 		return
 	}
-	secure := c.Request.TLS != nil
+	// Secure cookie:直接 TLS 或 server.secure_cookies=1(反代后置)时开启,
+	// 避免会话 cookie 在明文跳段裸奔(审计2026-M6)
+	secure := c.Request.TLS != nil || secureCookiesEnabled(a.DB)
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    sess.ID,
