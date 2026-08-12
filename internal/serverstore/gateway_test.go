@@ -106,8 +106,7 @@ func TestSyncProviderModelAndRemoveMissing(t *testing.T) {
 	}
 }
 
-func TestSyncProviderModelPerProvider(t *testing.T) {
-	db := openTestDB(t)
+func TestSyncProviderModelPerProvider(t *testing.T) {	db := openTestDB(t)
 	if err := ApplyMigrations(db); err != nil {
 		t.Fatal(err)
 	}
@@ -151,5 +150,88 @@ func TestSyncProviderModelPerProvider(t *testing.T) {
 	}
 	if remains != 1 {
 		t.Fatalf("provider2 row remains = %d, want 1", remains)
+	}
+}
+
+func TestSyncProviderModelsDedupesNames(t *testing.T) {
+	db := openTestDB(t)
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	pid, err := AddGatewayProvider(db, &GatewayProvider{Name: "p", BaseURL: "http://a", APIKeyEnc: "k"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 重名模型列表不得触发 UNIQUE 冲突(原实现第二个 INSERT 失败 → 半同步 + 500)
+	if err := SyncProviderModels(db, pid, []string{"m", "m", "x"}); err != nil {
+		t.Fatalf("SyncProviderModels with duplicate names: %v", err)
+	}
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM models WHERE provider_id = ?", pid).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("model rows = %d, want 2", n)
+	}
+}
+
+func TestDeleteModelClearsDefaultModel(t *testing.T) {
+	db := openTestDB(t)
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	pid, err := AddGatewayProvider(db, &GatewayProvider{Name: "p", BaseURL: "http://a", APIKeyEnc: "k"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncProviderModel(db, pid, "def", `{}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetSetting(db, "gateway.default_model", "def"); err != nil {
+		t.Fatal(err)
+	}
+	mid, err := AddModel(db, &Model{Name: "def", ProviderID: pid, DisplayName: "def"})
+	if err == nil {
+		t.Fatal("duplicate model insert should fail") // def 已由 SyncProviderModel 建行
+	}
+	// 找到 def 行 id 再删
+	var id int64
+	if err := db.QueryRow("SELECT id FROM models WHERE name = 'def'").Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	_ = mid
+	if err := DeleteModel(db, id); err != nil {
+		t.Fatal(err)
+	}
+	v, ok, _ := GetSetting(db, "gateway.default_model")
+	if !ok || v != "" {
+		t.Fatalf("default_model = %q ok=%v, want cleared", v, ok)
+	}
+}
+
+func TestDeleteProviderClearsDefaultModel(t *testing.T) {
+	db := openTestDB(t)
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	pid, err := AddGatewayProvider(db, &GatewayProvider{Name: "p", BaseURL: "http://a", APIKeyEnc: "k"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncProviderModel(db, pid, "def", `{}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetSetting(db, "gateway.default_model", "def"); err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteGatewayProvider(db, pid); err != nil {
+		t.Fatal(err)
+	}
+	v, ok, _ := GetSetting(db, "gateway.default_model")
+	if !ok || v != "" {
+		t.Fatalf("default_model = %q ok=%v, want cleared", v, ok)
 	}
 }

@@ -95,13 +95,28 @@ func UpdateGatewayProvider(db *sql.DB, p *GatewayProvider) error {
 	return nil
 }
 
-// DeleteGatewayProvider removes a provider (and its models).
+// DeleteGatewayProvider removes a provider (and its models);
+// 若默认模型属于该 provider,同步重置 gateway.default_model。
 func DeleteGatewayProvider(db *sql.DB, id int64) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	rows, err := tx.Query("SELECT name FROM models WHERE provider_id = ?", id)
+	if err != nil {
+		return err
+	}
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			rows.Close()
+			return err
+		}
+		names = append(names, n)
+	}
+	rows.Close()
 	if _, err := tx.Exec("DELETE FROM models WHERE provider_id = ?", id); err != nil {
 		return err
 	}
@@ -113,13 +128,28 @@ func DeleteGatewayProvider(db *sql.DB, id int64) error {
 	if n == 0 {
 		return ErrNotFound
 	}
+	for _, name := range names {
+		if err := clearDefaultModelIf(tx, name); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
 // SyncProviderModels replaces the models table rows for a provider so it
 // mirrors the provider's models JSON list. This keeps a single source of
 // truth: the provider's model list is the model list the client sees.
+// 重名模型按首次出现去重(UNIQUE(provider_id,name) 约束),避免半同步 + 500。
 func SyncProviderModels(db *sql.DB, providerID int64, names []string) error {
+	seen := make(map[string]bool, len(names))
+	deduped := make([]string, 0, len(names))
+	for _, name := range names {
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		deduped = append(deduped, name)
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -128,7 +158,7 @@ func SyncProviderModels(db *sql.DB, providerID int64, names []string) error {
 	if _, err := tx.Exec("DELETE FROM models WHERE provider_id = ?", providerID); err != nil {
 		return err
 	}
-	for _, name := range names {
+	for _, name := range deduped {
 		if _, err := tx.Exec(`INSERT INTO models (name, provider_id, display_name) VALUES (?, ?, ?)`,
 			name, providerID, name); err != nil {
 			return err
@@ -261,15 +291,47 @@ func UpdateModel(db *sql.DB, m *Model) error {
 	return nil
 }
 
-// DeleteModel removes a model.
+// DeleteModel removes a model;若被删模型是 gateway.default_model,重置为空串
+// (与 RemoveMissingProviderModels 同口径,防 bootstrap 悬空指向已删模型)。
 func DeleteModel(db *sql.DB, id int64) error {
-	res, err := db.Exec("DELETE FROM models WHERE id = ?", id)
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var name string
+	err = tx.QueryRow("SELECT name FROM models WHERE id = ?", id).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	res, err := tx.Exec("DELETE FROM models WHERE id = ?", id)
 	if err != nil {
 		return err
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return ErrNotFound
+	}
+	if err := clearDefaultModelIf(tx, name); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// clearDefaultModelIf 把指向指定模型名的 gateway.default_model 置空(事务内)。
+func clearDefaultModelIf(tx *sql.Tx, name string) error {
+	var dm string
+	err := tx.QueryRow("SELECT value FROM settings WHERE key = 'gateway.default_model'").Scan(&dm)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if dm == name {
+		if _, err := tx.Exec("UPDATE settings SET value = '' WHERE key = 'gateway.default_model'"); err != nil {
+			return err
+		}
 	}
 	return nil
 }
