@@ -60,6 +60,7 @@ export default function Users() {
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [q, setQ] = useState('')
+  const [busy, setBusy] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -90,6 +91,8 @@ export default function Users() {
   useEffect(() => { load(1, '') }, [load])
 
   async function create() {
+    if (busy) return // 双击守卫(审计2026-W9)
+    setBusy(true)
     try {
       await request('/api/admin/users', {
         method: 'POST',
@@ -102,10 +105,14 @@ export default function Users() {
       load(1, "")
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(false)
     }
   }
 
   async function toggleUser(u: User) {
+    if (busy) return // 双击守卫(审计2026-W9)
+    setBusy(true)
     try {
       await request(`/api/admin/users/${u.id}`, {
         method: 'PUT',
@@ -114,16 +121,22 @@ export default function Users() {
       load(page, q)
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(false)
     }
   }
 
   async function remove(u: User) {
+    if (busy) return // 双击守卫(审计2026-W9)
     if (!window.confirm(`确定删除用户 ${u.username}?`)) return
+    setBusy(true)
     try {
       await request(`/api/admin/users/${u.id}`, { method: 'DELETE' })
       load(page, q)
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(false)
     }
   }
 

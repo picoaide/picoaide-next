@@ -124,6 +124,11 @@ export default function Gateway() {
   }
 
   async function createModel() {
+    // 未选上游直接提示(审计2026-W10),不把 provider_id=0 提交给服务端
+    if (!modelForm.provider_id) {
+      setError('请选择所属上游')
+      return
+    }
     try {
       await request('/api/admin/models', {
         method: 'POST',

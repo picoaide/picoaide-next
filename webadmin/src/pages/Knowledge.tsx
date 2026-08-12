@@ -474,13 +474,13 @@ export default function Knowledge() {
                     <TableRow key={h.chunk_id}>
                       <TableCell>
                         <div className="font-medium">
-                          {h.title}
+                          {h.title ?? '—'}
                           {h.title_path && <span className="text-muted-foreground"> › {h.title_path}</span>}
                         </div>
-                        <div className="text-xs text-muted-foreground">{h.content.slice(0, 120)}…</div>
+                        <div className="text-xs text-muted-foreground">{(h.content ?? '').slice(0, 120)}…</div>
                       </TableCell>
                       <TableCell><Badge variant="secondary">分块</Badge></TableCell>
-                      <TableCell className="text-muted-foreground">score {h.score.toFixed(2)}</TableCell>
+                      <TableCell className="text-muted-foreground">score {typeof h.score === 'number' ? h.score.toFixed(2) : '—'}</TableCell>
                       <TableCell />
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-2">

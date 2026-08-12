@@ -21,3 +21,19 @@ export function deptTreeOptions(depts: { id: number; parent_id: number; name: st
   }
   return out
 }
+
+// 部门及其全部后代 id(编辑部门时从上级候选里剔除,防把部门挂到自己的子树下)
+export function deptSubtreeIds(depts: { id: number; parent_id: number }[], rootId: number): Set<number> {
+  const out = new Set<number>([rootId])
+  let grew = true
+  while (grew) {
+    grew = false
+    for (const d of depts) {
+      if (out.has(d.parent_id) && !out.has(d.id)) {
+        out.add(d.id)
+        grew = true
+      }
+    }
+  }
+  return out
+}

@@ -7,7 +7,7 @@ import { Badge } from '../components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
-import { deptTreeOptions } from '../lib/utils'
+import { deptSubtreeIds, deptTreeOptions } from '../lib/utils'
 
 interface Department {
   id: number
@@ -157,7 +157,11 @@ export default function Departments() {
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="0">无(顶层部门)</SelectItem>
-                  {deptTreeOptions(depts.filter((d) => d.id !== deptForm.id), 0, 0).map((o) => (
+                  {deptTreeOptions(
+                    depts.filter((d) => !deptSubtreeIds(depts, deptForm.id).has(d.id)),
+                    0,
+                    0,
+                  ).map((o) => (
                     <SelectItem key={o.id} value={String(o.id)}>{o.label}</SelectItem>
                   ))}
                 </SelectContent>

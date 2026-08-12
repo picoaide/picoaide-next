@@ -8,6 +8,10 @@ export class ApiError extends Error {
   }
 }
 
+// 管理页挂载基路径(与服务端路由与 BrowserRouter basename 一致;
+// 审计2026-W7:不得在请求层硬编码 /admin/)
+export const ADMIN_BASE = '/admin'
+
 let csrfToken = ''
 
 export function setCsrf(token: string) {
@@ -33,10 +37,10 @@ export async function request<T = any>(path: string, init: RequestInit = {}): Pr
     } catch {
       /* keep defaults */
     }
-    if (res.status === 401 && window.location.pathname !== '/admin/') {
+    if (res.status === 401 && window.location.pathname !== `${ADMIN_BASE}/`) {
       // 会话过期/失效:任何页面请求收到 401 都回到登录页(App 挂载时
       // 的 me() 检查会渲染 Login),而不是停留在已失效的界面
-      window.location.assign('/admin/')
+      window.location.assign(`${ADMIN_BASE}/`)
     }
     throw new ApiError(res.status, code, message)
   }
