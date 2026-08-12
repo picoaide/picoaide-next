@@ -2,6 +2,7 @@ package serverstore
 
 import (
 	"database/sql"
+	"errors"
 	"strings"
 )
 
@@ -9,6 +10,16 @@ import (
 type queryer interface {
 	QueryRow(query string, args ...any) *sql.Row
 	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// GroupByName returns a group id by name (COLLATE NOCASE) or ErrNotFound.
+func GroupByName(db queryer, name string) (int64, error) {
+	var id int64
+	err := db.QueryRow("SELECT id FROM groups WHERE name = ? COLLATE NOCASE", name).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return id, err
 }
 
 // GetOrCreateGroup returns a group id by name, creating it if missing.

@@ -201,6 +201,9 @@ func TestAdminKBRevokeGrant(t *testing.T) {
 	if _, err := serverstore.CreateUserWithPassword(db, "alice", "pw"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := serverstore.CreateDepartment(db, "devs", 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
 	if w, _ := kbReq(t, r, "PUT", fmt.Sprintf("/api/admin/kb/folders/%d/grant", folderID), `{"username":"alice"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("grant: %d", w.Code)
 	}
@@ -533,6 +536,9 @@ func TestAdminDeleteFolder(t *testing.T) {
 	// 有授权 → 拒绝
 	w, out = kbReq(t, r, "POST", "/api/admin/kb/folders", `{"name":"有授权"}`, hdr)
 	fid3 := int64(out["folder"].(map[string]any)["id"].(float64))
+	if _, err := serverstore.CreateDepartment(db, "研发部", 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
 	if w, _ := kbReq(t, r, "PUT", fmt.Sprintf("/api/admin/kb/folders/%d/grant", fid3), `{"group":"研发部"}`, hdr); w.Code != http.StatusOK {
 		t.Fatalf("grant: %d", w.Code)
 	}

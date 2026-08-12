@@ -231,8 +231,9 @@ func GrantFolderUser(db *sql.DB, folderID int64, username string) error {
 }
 
 // GrantFolderGroup grants folder access to a group by name (idempotent).
+// 组必须已存在(不自动创建):拼错的部门名不得静默建幽灵部门/永不生效
 func GrantFolderGroup(db *sql.DB, folderID int64, groupName string) error {
-	gid, err := GetOrCreateGroup(db, groupName)
+	gid, err := GroupByName(db, groupName)
 	if err != nil {
 		return err
 	}

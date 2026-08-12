@@ -58,6 +58,9 @@ func TestKBPermissions(t *testing.T) {
 	f1, _ := CreateKBFolder(db, "team-a", 0)
 	f2, _ := CreateKBFolder(db, "team-b", 0)
 	f3, _ := CreateKBFolder(db, "ops", 0)
+	if _, err := CreateDepartment(db, "devs", 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := GrantFolderUser(db, f1, "alice"); err != nil {
 		t.Fatalf("GrantFolderUser: %v", err)
@@ -113,6 +116,9 @@ func TestKBRevoke(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()
 	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateDepartment(db, "devs", 0, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	fid, err := CreateKBFolder(db, "team", 0)

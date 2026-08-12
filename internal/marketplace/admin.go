@@ -103,10 +103,15 @@ func setSkillGrant(c *gin.Context, db *sql.DB, grant bool) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "username 或 group 必填且只能二选一")
 		return
 	}
-	// 主体存在性校验:拼错的用户名不应静默落库永不生效
+	// 主体存在性校验:拼错的用户名/部门名不应静默落库永不生效
 	if t == serverstore.GranteeUser {
 		if _, err := serverstore.GetUserByUsername(db, subject); err != nil {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "用户不存在: "+subject)
+			return
+		}
+	} else if t == serverstore.GranteeGroup {
+		if _, err := serverstore.GroupByName(db, subject); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "部门不存在: "+subject)
 			return
 		}
 	}
@@ -167,6 +172,11 @@ func setMCPGrant(c *gin.Context, db *sql.DB, grant bool) {
 	if t == serverstore.GranteeUser {
 		if _, err := serverstore.GetUserByUsername(db, subject); err != nil {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "用户不存在: "+subject)
+			return
+		}
+	} else if t == serverstore.GranteeGroup {
+		if _, err := serverstore.GroupByName(db, subject); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "部门不存在: "+subject)
 			return
 		}
 	}

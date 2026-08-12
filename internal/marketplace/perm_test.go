@@ -284,6 +284,9 @@ func TestAdminGrantAPI(t *testing.T) {
 	if _, err := serverstore.AddMCPServer(db, &serverstore.MCPServer{Name: "time-now", Transport: "stdio", Command: "date", Enabled: 1}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := serverstore.CreateDepartment(db, "研发部", 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
 
 	// grant user + group on skill
 	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/data-extract/grant", `{"username":"alice"}`, hdr); w.Code != http.StatusOK {
@@ -338,6 +341,13 @@ func TestAdminGrantAPI(t *testing.T) {
 	// grants to a non-existent user → 400 (typos must not silently persist)
 	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/data-extract/grant", `{"username":"no-such-user"}`, hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("unknown user grant = %d, want 400", w.Code)
+	}
+	// grants to a non-existent group → 400(拼错的部门名不得静默落库)
+	if w, _ := mreq(t, r, "PUT", "/api/admin/skills/data-extract/grant", `{"group":"no-such-dept"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown group grant = %d, want 400", w.Code)
+	}
+	if w, _ := mreq(t, r, "PUT", "/api/admin/mcp/1/grant", `{"group":"no-such-dept"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown group mcp grant = %d, want 400", w.Code)
 	}
 }
 

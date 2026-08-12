@@ -373,6 +373,11 @@ func grantFolder(c *gin.Context, db *sql.DB) {
 		}
 		_ = serverstore.AuditLog(db, adminUsername(c), "kb_grant", fmt.Sprintf("folder#%d user:%s", folderID, req.Username))
 	} else {
+		// 拼错的部门名不得静默建幽灵部门:组必须已存在
+		if _, err := serverstore.GroupByName(db, req.Group); err != nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "部门不存在: "+req.Group)
+			return
+		}
 		if err := serverstore.GrantFolderGroup(db, folderID, req.Group); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "授权失败")
 			return
