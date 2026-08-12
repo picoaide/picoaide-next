@@ -173,13 +173,17 @@ func maxOutputFromDefaultParams(params string) (int64, bool, error) {
 }
 
 // applyMaxTokensDefault:客户端未传 max_tokens 时,从模型 default_params.max_output 注入。
-// 无 default_params/解析失败时原样返回。
+// 无 default_params/解析失败时原样返回。支持 max_completion_tokens 模型的同语义双键
+// (审计2026-L17:注入 max_tokens 与既有 max_completion_tokens 冲突)。
 func applyMaxTokensDefault(raw []byte, defaultParams string) ([]byte, error) {
 	var body map[string]any
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return raw, err
 	}
 	if _, ok := body["max_tokens"]; ok {
+		return raw, nil
+	}
+	if _, ok := body["max_completion_tokens"]; ok {
 		return raw, nil
 	}
 	v, ok, err := maxOutputFromDefaultParams(defaultParams)

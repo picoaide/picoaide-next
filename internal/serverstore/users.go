@@ -129,6 +129,30 @@ func UpdateUser(db *sql.DB, u *User) error {
 	return nil
 }
 
+// UpdateUserRevokingTokens 在同一事务内更新用户并吊销其全部 token:
+// 改密/降权/禁用后旧凭证必须与权限变更原子生效(审计2026-L16)
+func UpdateUserRevokingTokens(db *sql.DB, u *User) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE users SET display_name=?, email=?, password_hash=?, is_admin=?, status=?, updated_at=datetime('now','localtime')
+		WHERE id=?`,
+		nullIfEmpty(u.DisplayName), nullIfEmpty(u.Email), nullIfEmpty(u.PasswordHash),
+		boolInt(u.IsAdmin), u.Status, u.ID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.Exec("DELETE FROM api_tokens WHERE user_id = ?", u.ID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // ListUsers returns a page of users and the total count. q filters by
 // username substring (empty q = all users).
 func ListUsers(db *sql.DB, offset, limit int, q string) ([]User, int64, error) {

@@ -203,6 +203,10 @@ func (a *AdminAPI) listUsers(c *gin.Context) {
 	if page < 1 {
 		page = 1
 	}
+	// 页数上限:超大 page 的 (page-1)*size 会 int 溢出/负偏移(审计2026-L9)
+	if page > 100000 {
+		page = 100000
+	}
 	if size < 1 || size > 200 {
 		size = 20
 	}
@@ -279,6 +283,11 @@ func (a *AdminAPI) createUser(c *gin.Context) {
 	status := req.Status
 	if status == 0 {
 		status = 1
+	}
+	// status 只允许 0/1(审计2026-L6)
+	if status != 0 && status != 1 {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "status 只能是 0 或 1")
+		return
 	}
 	id, err := serverstore.CreateUserWithPassword(a.DB, req.Username, req.Password)
 	if errors.Is(err, serverstore.ErrDuplicate) {
@@ -374,20 +383,20 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 	if req.Status != nil {
 		u.Status = *req.Status
 	}
-	if err := serverstore.UpdateUser(a.DB, u); err != nil {
-		writeError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
-		return
-	}
 	// 权限敏感变更:改密 / 取消管理员 / 禁用 → 吊销全部 API token,
-	// 旧凭证立即失效(防已登录客户端继续以旧权限访问)
+	// 旧凭证立即失效(防已登录客户端继续以旧权限访问)。
+	// 与用户更新同事务(审计2026-L16):更新成功但吊销失败不再留下旧凭证
 	demote := (req.Password != nil && *req.Password != "") || (req.IsAdmin != nil && !*req.IsAdmin && wasAdmin) ||
 		(req.Status != nil && *req.Status != 1 && wasStatus == 1)
 	if demote {
-		if err := serverstore.RevokeAllUserTokens(a.DB, id); err != nil {
-			writeError(c, http.StatusInternalServerError, "INTERNAL", "令牌吊销失败")
+		if err := serverstore.UpdateUserRevokingTokens(a.DB, u); err != nil {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 			return
 		}
 		_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_tokens_revoked", u.Username)
+	} else if err := serverstore.UpdateUser(a.DB, u); err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+		return
 	}
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_update", u.Username)
 	c.JSON(http.StatusOK, gin.H{"user": userJSON(u)})
@@ -486,8 +495,23 @@ func (a *AdminAPI) revokeToken(c *gin.Context) {
 }
 
 func (a *AdminAPI) usage(c *gin.Context) {
-	from, _ := time.Parse("2006-01-02", c.DefaultQuery("from", ""))
-	to, _ := time.Parse("2006-01-02", c.DefaultQuery("to", ""))
+	// 日期解析失败 → 400,而不是静默无界范围(审计2026-L7)
+	fromRaw := c.DefaultQuery("from", "")
+	toRaw := c.DefaultQuery("to", "")
+	var from, to time.Time
+	var err error
+	if fromRaw != "" {
+		if from, err = time.Parse("2006-01-02", fromRaw); err != nil {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "from 日期格式错误(YYYY-MM-DD)")
+			return
+		}
+	}
+	if toRaw != "" {
+		if to, err = time.Parse("2006-01-02", toRaw); err != nil {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "to 日期格式错误(YYYY-MM-DD)")
+			return
+		}
+	}
 	group := c.DefaultQuery("group", "day")
 	if group != "day" && group != "model" && group != "user" {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "group 必须是 day|model|user")

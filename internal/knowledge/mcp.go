@@ -176,7 +176,11 @@ func toolKBRead(db *sql.DB, id json.RawMessage, args json.RawMessage, accessible
 	}
 	// chunk_ids: passage-level read, returns only the requested chunks —
 	// the LLM picks them from kb_search results instead of pulling the
-	// whole document into context.
+	// whole document into context。上限 100(审计2026-L3):无界数组会击穿
+	// SQLite 变量数上限(32766)且放大上下文。
+	if len(a.ChunkIDs) > 100 {
+		return textResponse(id, "chunk_ids 最多 100 个", true)
+	}
 	if len(a.ChunkIDs) > 0 {
 		chunks, err := serverstore.GetChunksByIDs(db, a.ChunkIDs)
 		if err != nil {
@@ -294,14 +298,20 @@ func accessibleFolders(db *sql.DB, username string, groups []string, isAdmin boo
 func formatDocResults(res []SearchResult) string {
 	lines := make([]string, 0, len(res))
 	for _, r := range res {
-		content := r.Content
-		if len(content) > 400 {
-			content = content[:400] + "…"
-		}
+		content := runeTruncate(r.Content, 400)
 		lines = append(lines, fmt.Sprintf("#doc:%d [folder %d] %s score %.2f: %s",
 			r.ID, r.FolderID, r.Title, r.Score, content))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// runeTruncate 按 rune 截断(审计2026-L2:字节截断会切开多字节字符)
+func runeTruncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 // formatChunkResults renders passage-level hits compactly (content truncated
@@ -310,10 +320,7 @@ func formatDocResults(res []SearchResult) string {
 func formatChunkResults(res []ChunkResult) string {
 	lines := make([]string, 0, len(res))
 	for _, r := range res {
-		content := r.Content
-		if len(content) > 400 {
-			content = content[:400] + "…"
-		}
+		content := runeTruncate(r.Content, 400)
 		path := r.TitlePath
 		if path == "" {
 			path = "-"

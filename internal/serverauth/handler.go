@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -72,7 +73,8 @@ func BearerAuth(db *sql.DB) gin.HandlerFunc {
 
 func bearerToken(c *gin.Context) string {
 	h := c.GetHeader("Authorization")
-	if len(h) > 7 && h[:7] == "Bearer " {
+	// RFC 6750:scheme 大小写不敏感(审计2026-L5)
+	if len(h) > 7 && strings.EqualFold(h[:7], "bearer ") {
 		return h[7:]
 	}
 	return ""
