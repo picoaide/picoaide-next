@@ -140,7 +140,8 @@ git rm -r desktop/src desktop/tests 2>/dev/null || rm -rf desktop/src desktop/te
 ```json
 {
   "name": "@deepseek-ai/dsh-web-frontend",
-  "version": "0.0.0-pico",
+  "version": "0.1.0-rc.6",
+  "picoaide": true,
   "private": true,
   "type": "module",
   "exports": {
@@ -229,7 +230,8 @@ export default defineConfig({ plugins: [react()], build: { outDir: 'dist', targe
 ```json
 {
   "name": "@deepseek-ai/dsh-client-ui-primitives",
-  "version": "0.0.0-pico",
+  "version": "0.1.0-rc.6",
+  "picoaide": true,
   "private": true,
   "type": "module",
   "exports": {
@@ -242,6 +244,8 @@ export default defineConfig({ plugins: [react()], build: { outDir: 'dist', targe
   }
 }
 ```
+
+> 版本号必须与依赖方声明范围(`^0.1.0-rc.6`)一致,否则无法去重、dsh-client-ui-* 会各自安装 registry 副本。识别"是我们的包"用 `"picoaide": true` 标记(web 包同样标记),不用版本号。
 
 `desktop/brand-shim/index.js`:
 
@@ -645,16 +649,16 @@ import { describe, expect, it } from 'vitest'
 const require = createRequire(import.meta.url)
 
 describe('brand override integrity', () => {
-  it('frontend resolves to our package version', () => {
+  it('frontend resolves to our web package', () => {
     const pkg = require.resolve('@deepseek-ai/dsh-web-frontend/package.json')
-    const manifest = JSON.parse(readFileSync(pkg, 'utf8')) as { version: string }
-    expect(manifest.version).toBe('0.0.0-pico')
+    const manifest = JSON.parse(readFileSync(pkg, 'utf8')) as { picoaide?: boolean }
+    expect(manifest.picoaide).toBe(true)
   })
 
   it('ui-primitives resolves to our shim', () => {
     const pkg = require.resolve('@deepseek-ai/dsh-client-ui-primitives/package.json')
-    const manifest = JSON.parse(readFileSync(pkg, 'utf8')) as { version: string }
-    expect(manifest.version).toBe('0.0.0-pico')
+    const manifest = JSON.parse(readFileSync(pkg, 'utf8')) as { picoaide?: boolean }
+    expect(manifest.picoaide).toBe(true)
   })
 
   it('shim shadows BrandWordmark/FishLogo (explicit export wins over star)', async () => {
