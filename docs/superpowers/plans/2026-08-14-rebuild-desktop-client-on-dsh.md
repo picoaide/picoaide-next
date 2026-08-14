@@ -93,7 +93,7 @@ git rm -r desktop/src desktop/tests 2>/dev/null || rm -rf desktop/src desktop/te
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "electron-vite build",
+    "build": "npm --prefix web run build && electron-vite build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
@@ -108,32 +108,28 @@ git rm -r desktop/src desktop/tests 2>/dev/null || rm -rf desktop/src desktop/te
     "@deepseek-ai/dsh-llm-deepseek": "0.1.0-rc.6",
     "@deepseek-ai/dsh-settings": "0.1.0-rc.6",
     "@deepseek-ai/dsh-web-app": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-web-frontend": "file:./web",
+    "@deepseek-ai/dsh-client-ui-primitives": "file:./brand-shim",
     "@deepseek-ai/schemastery": "3.18.1"
   },
   "devDependencies": {
     "@deepseek-ai/dsh": "0.1.0-rc.6",
     "@types/node": "^24.0.0",
-    "@vitejs/plugin-react": "^4.0.0",
     "electron": "43.4.0",
     "electron-builder": "^26.0.0",
     "electron-vite": "^4.0.0",
-    "esbuild": "^0.25.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "typescript": "^6.0.3",
     "vite": "^6.0.0",
     "vitest": "^4.1.8"
-  },
-  "overrides": {
-    "@deepseek-ai/dsh-web-frontend": "file:./web",
-    "@deepseek-ai/dsh-client-ui-primitives": "file:./brand-shim"
   }
 }
 ```
 
-> `@deepseek-ai/dsh`(CLI)放 devDependencies:只用于 `npx dsh --dump-config` 开发核对,不进运行时闭包(省 100MB+)。安装时若 rc.6 未发布,以 `npm view @deepseek-ai/dsh-app-boot dist-tags` 实际 rc 号统一替换全表(必须同号)。
+> 替换机制 = **顶层直接 file: 依赖 + 版本与上游一致**(不用 npm overrides,file: 在 overrides 中不稳定):两包 version 必须等于 dsh 内部依赖范围的匹配版本(当前 0.1.0-rc.6),npm 才会把全部传递引用去重到我们的包;加 `"picoaide": true` 标记字段作为"是我们的包"的断言依据(Task 4 测试用)。`@deepseek-ai/dsh`(CLI)放 devDependencies:只用于 `npx dsh --dump-config` 开发核对,不进运行时闭包(省 100MB+)。安装时若 rc.6 未发布,以 `npm view @deepseek-ai/dsh-app-boot dist-tags` 实际 rc 号统一替换全表(必须同号)。
 
-- [ ] **Step 3: 写 web 包雏形(overrides 的 file: 目标必须先存在)**
+- [ ] **Step 3: 写 web 包雏形(file: 目标必须先存在)**
 
 `desktop/web/package.json`:
 
@@ -325,14 +321,36 @@ git commit -m "chore(desktop): rebuild skeleton on dsh rc.6, web+shim overrides 
 - Create: `desktop/src/main/config-contract.test.ts`
 - Create: `desktop/src/main/dsh-boot.test.ts`(不 mock,真实 boot)
 - Create: `desktop/src/main/util/electron.ts`
+- Create: `desktop/tsconfig.json`(根 typecheck 门禁)
+- Modify: `desktop/package.json`(清理死依赖:根 devDeps 里无用的 `esbuild`、`@vitejs/plugin-react` 移除 + `npm install`)
 
-- [ ] **Step 1: 搬运 electron 工具模块**
+- [ ] **Step 1: 搬运 electron 工具模块 + 清理死依赖**
 
 ```bash
 git show master:desktop/src/main/util/electron.ts > desktop/src/main/util/electron.ts
+cd desktop && npm uninstall esbuild @vitejs/plugin-react 2>/dev/null || true
 ```
 
-- [ ] **Step 2: 写补丁层 TS 常量(吸收审计修正 9/10/11)**
+- [ ] **Step 2: 写根 tsconfig.json(typecheck 门禁)**
+
+`desktop/tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["src"]
+}
+```
+
+- [ ] **Step 3: 写补丁层 TS 常量(吸收审计修正 9/10/11)**
 
 `desktop/src/main/picoaide-patches.ts`:
 
@@ -381,7 +399,7 @@ import type { Plugin } from '@deepseek-ai/cordis'
 export const pluginEntries: Array<{ plugin: Plugin; config: Record<string, unknown> }> = []
 ```
 
-- [ ] **Step 3: 写契约测试(真实合成,升级主检测器)**
+- [ ] **Step 4: 写契约测试(真实合成,升级主检测器)**
 
 `desktop/src/main/config-contract.test.ts`:
 
@@ -444,7 +462,7 @@ describe('picoaide patch contract vs dsh bundles', () => {
 })
 ```
 
-- [ ] **Step 4: 写失败测试(真实 boot,不 mock)**
+- [ ] **Step 5: 写失败测试(真实 boot,不 mock)**
 
 `desktop/src/main/dsh-boot.test.ts`:
 
@@ -474,7 +492,7 @@ describe('real dsh boot (no mocks)', () => {
 
 > 前提:`desktop/web` 已 build(web-runtime 解析 dist)。测试前:`cd desktop/web && npm run build`。
 
-- [ ] **Step 5: 跑契约测试(先红后绿:字段漂移按 dump 修 ourPatches,不改断言意图)**
+- [ ] **Step 6: 跑契约测试(先红后绿:字段漂移按 dump 修 ourPatches,不改断言意图)**
 
 ```bash
 cd desktop && npx dsh --dump-config 2>/dev/null | grep -B1 -A12 -E 'permission|approval|ui-model-selection|session-telemetry' || true
@@ -482,7 +500,7 @@ npx vitest run src/main/config-contract.test.ts
 ```
 Expected: 首轮可能 FAIL(字段漂移)→ 按 dump 输出修正 `picoaide-patches.ts` → 直到 PASS。
 
-- [ ] **Step 6: 实现 dsh-boot.ts**
+- [ ] **Step 7: 实现 dsh-boot.ts**
 
 `desktop/src/main/dsh-boot.ts`:
 
@@ -551,12 +569,12 @@ export function webPort(ctx: Context): number {
 }
 ```
 
-- [ ] **Step 7: 跑真实 boot 测试(红 → 绿)**
+- [ ] **Step 8: 跑真实 boot 测试(红 → 绿)**
 
 Run: `cd desktop && npx vitest run src/main/dsh-boot.test.ts`
 Expected: 首轮 FAIL(boot 模块不存在)→ 实现后 PASS。
 
-- [ ] **Step 8: typecheck + Commit**
+- [ ] **Step 9: typecheck + Commit**
 
 ```bash
 cd desktop && npm run typecheck
