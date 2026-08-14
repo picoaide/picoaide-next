@@ -43,18 +43,16 @@
 ```
 desktop/
 ├─ package.json                  # electron 43 + dsh rc.6 精确版本 + overrides → 自建 frontend/品牌 shim
-├─ electron.vite.config.ts       # main 构建 + publicDir 拷贝 config
-├─ scripts/build-plugins.mjs     # esbuild 预构建插件 → out/main/config/plugins/
+├─ electron.vite.config.ts       # main 构建(dsh 包 external,其余全部打进 main bundle)
 ├─ src/
 │  ├─ main/
 │  │  ├─ index.ts                # Electron 入口:boot 编排/窗口/单实例/关闭 dispose
-│  │  ├─ dsh-boot.ts             # 进程内 boot(bareModuleBaseUrl 修正)
-│  │  ├─ config/
-│  │  │  ├─ cordis.yml           # `[]` 空根(boot 锚点)
-│  │  │  └─ picoaide.patch.yml   # 补丁层(permission 加固/telemetry 关/零配置/插件相对行)
+│  │  ├─ dsh-boot.ts             # 进程内 boot:程序化组装(补丁 = TS 常量,插件 = ctx.plugin 直挂)
+│  │  ├─ picoaide-patches.ts     # 补丁层 TS 常量(permission 加固/telemetry 关/零配置)
 │  │  ├─ plugins/
+│  │  │  ├─ index.ts             # pluginEntries 数组(boot 时统一挂载)
 │  │  │  ├─ session-service.ts   # SESSION_SERVICE 契约常量(唯一所有权)
-│  │  │  ├─ auth-gate/           # 登录路由 + 登录页 + tapIndex 门控
+│  │  │  ├─ auth-gate/           # 登录路由 + 登录页(?raw 内联)+ tapIndex 门控
 │  │  │  ├─ gateway-model/       # token env + baseURL settings
 │  │  │  └─ bootstrap/           # 会话服务 + bootstrap 拉取 → 模型清单/默认模型
 │  │  ├─ server-connector/       # 从 master 搬运:auth/bootstrap/health/tls/config(+测试)
@@ -65,6 +63,8 @@ desktop/
 └─ tests/                        # rebrand 断言 + 打包冒烟
 ```
 
+> 关键简化:无 yml 补丁文件、无 esbuild 预构建、无资源拷贝。我们的补丁层是 TS 常量(`picoaide-patches.ts`)传给 `boot()`;我们的插件是普通 TS 模块,带 `Plugin.Base.inject` 元数据,在 `boot()` 的 prepare 钩子里 `hostCtx.plugin(...)` 直接挂载(cordis 注册表原生支持函数插件元数据,vendor/cordis/src/registry.ts `Plugin.Base.inject`)。唯一 yml 是 2 行 `[]` 锚点文件,运行时生成到 DSH_HOME。
+
 ---
 
 ## Phase 0:MVP
@@ -73,7 +73,7 @@ desktop/
 
 **Files:**
 - Delete: `desktop/src`(整个旧客户端)、`desktop/tests`(如存在)
-- Create: `desktop/package.json`、`desktop/electron.vite.config.ts`、`desktop/scripts/build-plugins.mjs`
+- Create: `desktop/package.json`、`desktop/electron.vite.config.ts`
 - Create: `desktop/web/package.json`、`desktop/web/index.html`、`desktop/web/vite.config.ts`、`desktop/web/src/main.ts`、`desktop/web/tsconfig.json`、`desktop/web/public/favicon.svg`
 
 - [ ] **Step 1: 删除旧客户端源码**
@@ -92,9 +92,8 @@ git rm -r desktop/src desktop/tests 2>/dev/null || rm -rf desktop/src desktop/te
   "type": "module",
   "main": "out/main/index.js",
   "scripts": {
-    "dev": "npm run build:plugins && electron-vite dev",
-    "build": "npm run build:plugins && electron-vite build",
-    "build:plugins": "node scripts/build-plugins.mjs",
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
@@ -277,13 +276,12 @@ export const upstreamForDebug = upstream
 
 > 说明:显式命名导出遮蔽 `export *`(ES 语义)。若执行时发现 dsh 代码从该包导入**其他子路径**(如 `/icons`),在 shim 的 exports 补 `"./icons": "@deepseek-ai/dsh-client-ui-primitives-upstream/icons"` 类映射(通配:`"./*": "@deepseek-ai/dsh-client-ui-primitives-upstream/*"`)。执行时以 `grep -rh "dsh-client-ui-primitives" node_modules/@deepseek-ai/dsh-client-ui-* --include=*.js | grep -v upstream` 核对导入路径。
 
-- [ ] **Step 5: 写 electron-vite 与插件预构建脚本**
+- [ ] **Step 5: 写 electron-vite 配置**
 
 `desktop/electron.vite.config.ts`:
 
 ```ts
 import { defineConfig } from 'electron-vite'
-import { join } from 'node:path'
 
 export default defineConfig({
   main: {
@@ -295,37 +293,7 @@ export default defineConfig({
 })
 ```
 
-> config 两个 yml 与插件产物经 vite `publicDir` 拷贝:在 `src/main` 下建 `public/config/` 占位(内含 cordis.yml 与 picoaide.patch.yml,Task 2 写入),electron-vite 默认把 `main` 构建的 `public` 目录拷到 `out/main`。运行时路径统一 `join(import.meta.dirname, 'config')`(dev 与打包一致,asar 内)。
-
-`desktop/scripts/build-plugins.mjs`:
-
-```js
-// 把每个插件目录 src/index.ts 预构建为 out/main/config/plugins/<name>/index.js。
-// 补丁层用相对路径行 './plugins/<name>/index.js' 引用(相对 config 解析,
-// 不依赖 node_modules 包身份)。esbuild bundle,external 掉 dsh 与 node 内置。
-import { build } from 'esbuild'
-import { mkdirSync } from 'node:fs'
-import { join, dirname } from 'node:path'
-
-const ROOT = new URL('..', import.meta.url).pathname
-const PLUGINS = ['auth-gate', 'gateway-model', 'bootstrap']
-const OUT = join(ROOT, 'out/main/config/plugins')
-
-await Promise.all(PLUGINS.map(async (name) => {
-  mkdirSync(join(OUT, name), { recursive: true })
-  await build({
-    entryPoints: [join(ROOT, 'src/main/plugins', name, 'index.ts')],
-    outfile: join(OUT, name, 'index.js'),
-    bundle: true,
-    format: 'esm',
-    platform: 'node',
-    external: [/^@deepseek-ai\//, /^node:/, /^electron$/],
-  })
-}))
-console.log('plugins built ->', OUT)
-```
-
-> 注意 `dirname` 未用到可删;`electron` external 是因为插件经 `util/electron.ts` 懒加载。
+> 无 publicDir、无资源拷贝、无插件预构建:自研插件是普通 TS 模块,与 dsh-boot 一起被 electron-vite 打进 main bundle;登录页经 vite `?raw` import 内联。dsh 包保持 external,运行时从 node_modules(asar 内)解析。
 
 - [ ] **Step 6: 安装并验证(顺序:web 依赖 → 根)**
 
@@ -340,21 +308,19 @@ Expected: 分别解析到 `desktop/web/dist/index.html` 与 `desktop/brand-shim/
 - [ ] **Step 7: Commit**
 
 ```bash
-git add desktop/package.json desktop/package-lock.json desktop/electron.vite.config.ts desktop/scripts desktop/web desktop/brand-shim
+git add desktop/package.json desktop/package-lock.json desktop/electron.vite.config.ts desktop/web desktop/brand-shim
 git commit -m "chore(desktop): rebuild skeleton on dsh rc.6, web+shim overrides in place"
 ```
 
-### Task 2:进程内 dsh boot(契约测试 + 真实冒烟)
+### Task 2:进程内 dsh boot(程序化组装,契约测试 + 真实冒烟)
 
 **Files:**
 - Create: `desktop/src/main/dsh-boot.ts`
-- Create: `desktop/src/main/config/cordis.yml`
-- Create: `desktop/src/main/config/picoaide.patch.yml`
-- Create: `desktop/src/main/config/config-contract.test.ts`
+- Create: `desktop/src/main/picoaide-patches.ts`(补丁层 TS 常量)
+- Create: `desktop/src/main/plugins/index.ts`(pluginEntries 数组,初始为空)
+- Create: `desktop/src/main/config-contract.test.ts`
 - Create: `desktop/src/main/dsh-boot.test.ts`(不 mock,真实 boot)
 - Create: `desktop/src/main/util/electron.ts`
-- Create: `desktop/src/main/public/config/cordis.yml`(publicDir 拷贝源)
-- Create: `desktop/src/main/public/config/picoaide.patch.yml`
 
 - [ ] **Step 1: 搬运 electron 工具模块**
 
@@ -362,74 +328,58 @@ git commit -m "chore(desktop): rebuild skeleton on dsh rc.6, web+shim overrides 
 git show master:desktop/src/main/util/electron.ts > desktop/src/main/util/electron.ts
 ```
 
-- [ ] **Step 2: 写空根 cordis.yml(两份:public 拷贝源为准)**
+- [ ] **Step 2: 写补丁层 TS 常量(吸收审计修正 9/10/11)**
 
-`desktop/src/main/public/config/cordis.yml`:
+`desktop/src/main/picoaide-patches.ts`:
 
-```yaml
-# picoaide root — 空入口表,整棵树由补丁层构成。
-[]
+```ts
+/**
+ * picoaide 补丁层:应用在 dsh-base、dsh-web-app 两个 bundle 层之后。
+ * 语义:行 id 命中即整体替换 config(不是 deep-merge)。安全值在此层锁定。
+ */
+import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
+
+/** dsh 行覆盖 + 禁用清单。字段名以 `npx dsh --dump-config` 核对(契约测试兜底)。 */
+export const ourPatches: PatchOptions[] = [
+  // 安全默认(audit 修正 9):permission 行只保留安全预设,删除 danger-full-access。
+  // 整体替换语义 → 重述保留字段,字段名与 rc 版本对齐。
+  { id: 'permission', config: { presets: {
+    'read-only': { sandbox: 'read-only', approval: 'ask' },
+    'workspace-write': { sandbox: 'workspace-write', approval: 'ask' },
+  } } },
+  // 遥测关闭(audit 修正 10)
+  { id: 'session-telemetry-otel', disabled: true },
+  // 零配置:禁用全部用户可触达的配置/权限 UI 行
+  { id: 'ui-settings', disabled: true },
+  { id: 'ui-settings-general', disabled: true },
+  { id: 'ui-settings-models', disabled: true },
+  { id: 'ui-settings-plugins', disabled: true },
+  { id: 'ui-settings-plugin-inventory', disabled: true },
+  { id: 'ui-model-selection', disabled: true },
+  { id: 'ui-permission-presets', disabled: true },
+]
+
+// 说明:webserver 行不 patch(audit 修正 8),端口走官方 cmdline seam
+// provideCmdline(args=['--host','127.0.0.1','--port','0'])。
+// llm-deepseek 行不 patch:dsh-base 自带,baseURL 由 gateway-model 插件
+// 经 settings.update 写入(每请求解析)。
 ```
 
-- [ ] **Step 3: 写补丁层(吸收审计修正 8/9/10/11)**
+`desktop/src/main/plugins/index.ts`:
 
-`desktop/src/main/public/config/picoaide.patch.yml`:
+```ts
+/**
+ * 自研插件登记表:boot 的 prepare 钩子里逐个 ctx.plugin 直挂。
+ * Task 6/7 在此追加 auth-gate/gateway-model/bootstrap。
+ */
+import type { Plugin } from '@deepseek-ai/cordis'
 
-```yaml
-# picoaide 补丁层:应用在 dsh-base、dsh-web-app 两个 bundle 层之后。
-# 语义:行 id 命中即整体替换 config(不是 deep-merge)。安全值在此层锁定。
-
-# ── 安全默认(审计修正 9):permission 行只保留安全预设,删除 danger-full-access ──
-# 字段名以 npx dsh --dump-config 的 permission 行为准;整体替换需重述保留字段。
-- id: permission
-  config:
-    presets:
-      read-only: { sandbox: read-only, approval: ask }
-      workspace-write: { sandbox: workspace-write, approval: ask }
-
-# ── 遥测关闭(审计修正 10)──
-- id: session-telemetry-otel
-  disabled: true
-
-# ── 零配置:禁用全部用户可触达的配置/权限 UI 行 ──
-- id: ui-settings
-  disabled: true
-- id: ui-settings-general
-  disabled: true
-- id: ui-settings-models
-  disabled: true
-- id: ui-settings-plugins
-  disabled: true
-- id: ui-settings-plugin-inventory
-  disabled: true
-- id: ui-model-selection
-  disabled: true
-- id: ui-permission-presets
-  disabled: true
-
-# ── 自研插件:相对路径行(相对本文件所在 config 目录解析,audit 修正 3)──
-- insert:
-    - id: auth-gate
-      name: './plugins/auth-gate/index.js'
-      inject: [webServer]
-
-    - id: gateway-model
-      name: './plugins/gateway-model/index.js'
-      inject: [settings]
-
-    - id: bootstrap
-      name: './plugins/bootstrap/index.js'
-      inject: [settings]
-
-# 说明:webserver 行不 patch(audit 修正 8),端口走官方 cmdline seam
-# provideCmdline(args=['--host','127.0.0.1','--port','0'])。
-# llm-deepseek 行不 patch:dsh-base 自带,baseURL 由 gateway-model 插件
-# 经 settings.update 写入(每请求解析)。
+export const pluginEntries: Array<{ plugin: Plugin; config: Record<string, unknown> }> = []
 ```
 
-- [ ] **Step 4: 写契约测试(真实合成,升级主检测器)**
+- [ ] **Step 3: 写契约测试(真实合成,升级主检测器)**
 
-`desktop/src/main/config/config-contract.test.ts`:
+`desktop/src/main/config-contract.test.ts`:
 
 ```ts
 import { readFileSync } from 'node:fs'
@@ -437,6 +387,7 @@ import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { composeEntries, loadOverlayPatches } from '@deepseek-ai/dsh-app-boot'
+import { ourPatches } from './picoaide-patches'
 
 const require = createRequire(import.meta.url)
 const BIN = 'picoaide-contract'
@@ -450,9 +401,8 @@ function bundlePatches(bundle: string) {
 }
 
 function composedRows() {
-  const ours = loadOverlayPatches(BIN, join(import.meta.dirname, 'picoaide.patch.yml'))
   const rows = new Map<string, { id?: string; disabled?: boolean; config?: Record<string, unknown> }>()
-  for (const row of composeEntries([[...bundlePatches('@deepseek-ai/dsh-base'), ...bundlePatches('@deepseek-ai/dsh-web-app')], ours])) {
+  for (const row of composeEntries([[...bundlePatches('@deepseek-ai/dsh-base'), ...bundlePatches('@deepseek-ai/dsh-web-app')], ourPatches])) {
     if (typeof row.id === 'string') rows.set(row.id, row)
   }
   return rows
@@ -460,9 +410,8 @@ function composedRows() {
 
 describe('picoaide patch contract vs dsh bundles', () => {
   it('every patched row id exists in the composed tree (no silent patch-miss)', () => {
-    const ours = loadOverlayPatches(BIN, join(import.meta.dirname, 'picoaide.patch.yml'))
     const rows = composedRows()
-    for (const patch of ours) {
+    for (const patch of ourPatches) {
       expect(rows.get(patch.id!), `patch id ${patch.id} missing from composed tree`).toBeDefined()
     }
   })
@@ -491,7 +440,7 @@ describe('picoaide patch contract vs dsh bundles', () => {
 })
 ```
 
-- [ ] **Step 5: 写失败测试(真实 boot,不 mock)**
+- [ ] **Step 4: 写失败测试(真实 boot,不 mock)**
 
 `desktop/src/main/dsh-boot.test.ts`:
 
@@ -505,7 +454,7 @@ import { bootDsh, webPort } from './dsh-boot'
 describe('real dsh boot (no mocks)', () => {
   it('boots the full tree, binds loopback on an OS-assigned port, serves /', async () => {
     const home = mkdtempSync(join(tmpdir(), 'pico-boot-'))
-    const ctx = await bootDsh({ home, resources: join(import.meta.dirname, 'config') })
+    const ctx = await bootDsh({ home, appRoot: join(import.meta.dirname, '..', '..') })
     try {
       const port = webPort(ctx)
       expect(port).toBeGreaterThan(0)
@@ -519,38 +468,39 @@ describe('real dsh boot (no mocks)', () => {
 })
 ```
 
-> 前提:`desktop/web` 已 build(web-runtime 解析 dist)。测试前脚本:`cd desktop/web && npm run build`。
+> 前提:`desktop/web` 已 build(web-runtime 解析 dist)。测试前:`cd desktop/web && npm run build`。
 
-- [ ] **Step 6: 跑契约测试(先红后绿:首轮可能因字段名与 rc 版不符而红,按 dump 修 patch 不修测试语义)**
+- [ ] **Step 5: 跑契约测试(先红后绿:字段漂移按 dump 修 ourPatches,不改断言意图)**
 
 ```bash
 cd desktop && npx dsh --dump-config 2>/dev/null | grep -B1 -A12 -E 'permission|approval|ui-model-selection|session-telemetry' || true
-npx vitest run src/main/config/config-contract.test.ts
+npx vitest run src/main/config-contract.test.ts
 ```
-Expected: 首轮可能 FAIL(字段漂移)→ 按 dump 输出修正 patch 行(改 patch,不改断言意图)→ 直到 PASS。
+Expected: 首轮可能 FAIL(字段漂移)→ 按 dump 输出修正 `picoaide-patches.ts` → 直到 PASS。
 
-- [ ] **Step 7: 实现 dsh-boot.ts**
+- [ ] **Step 6: 实现 dsh-boot.ts**
 
 `desktop/src/main/dsh-boot.ts`:
 
 ```ts
 import { createRequire } from 'node:module'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { boot, loadOverlayPatches } from '@deepseek-ai/dsh-app-boot'
 import type { Context } from '@deepseek-ai/cordis'
 import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
+import { ourPatches } from './picoaide-patches'
+import { pluginEntries } from './plugins'
 
 export const BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] as const
 const BIN = 'picoaide'
 const require = createRequire(import.meta.url)
 
 export interface BootOptions {
+  /** 数据目录(userData/dsh),兼 DSH_HOME 与锚点文件位置。 */
   home: string
-  /** cordis.yml 与 picoaide.patch.yml 所在目录(out/main/config)。 */
-  resources: string
   /** 应用根(app.getAppPath();测试中=desktop 项目根),锚定裸包名解析。 */
   appRoot: string
   onCtx?: (ctx: Context) => void
@@ -571,11 +521,10 @@ export async function bootDsh(options: BootOptions): Promise<Context> {
   process.env.DSH_PERMISSION_MODE = 'workspace-write'
   process.env.DSH_TOOLS_MODE = 'native'
 
-  const patches: PatchOptions[] = [
-    ...BUNDLES.flatMap(loadBundlePatches),
-    ...loadOverlayPatches(BIN, join(options.resources, 'picoaide.patch.yml')),
-  ]
-  const rootConfig = join(options.resources, 'cordis.yml')
+  const patches: PatchOptions[] = [...BUNDLES.flatMap(loadBundlePatches), ...ourPatches]
+  // boot 需要真实 include 根文件锚定 baseUrl;内容恒为 `[]`,运行时生成,零静态资源。
+  const rootConfig = join(options.home, 'cordis.yml')
+  writeFileSync(rootConfig, '[]')
 
   // 审计修正 5:不 provide launch-env 快照 —— 登录后 gateway-model 写的
   // process.env token 要能被 credentials-local 每请求读到
@@ -583,6 +532,8 @@ export async function bootDsh(options: BootOptions): Promise<Context> {
   const ctx = await boot(BIN, rootConfig, patches, (hostCtx) => {
     // 审计修正 8:官方 cmdline seam 随机端口,不 patch webserver 行。
     provideCmdline(hostCtx, { args: ['--host', '127.0.0.1', '--port', '0'], exit: () => options.onExitRequested?.() })
+    // 自研插件直挂(cordis 注册表原生支持函数插件 inject 元数据)。
+    for (const entry of pluginEntries) hostCtx.plugin(entry.plugin, entry.config)
     options.onCtx?.(hostCtx)
   }, pathToFileURL(options.appRoot).href + '/')
 
@@ -596,17 +547,17 @@ export function webPort(ctx: Context): number {
 }
 ```
 
-- [ ] **Step 8: 跑真实 boot 测试(红 → 绿)**
+- [ ] **Step 7: 跑真实 boot 测试(红 → 绿)**
 
 Run: `cd desktop && npx vitest run src/main/dsh-boot.test.ts`
-Expected: 首轮 FAIL(boot 模块不存在)→ 实现后 PASS。若 FAIL 于插件行解析(bootstrap 插件未实现),临时把 `picoaide.patch.yml` 的 insert 三行注释掉跑通后恢复,并在 Task 6-8 各自完成后取消注释(每个任务自带"跑本测试确认绿"步骤)。
+Expected: 首轮 FAIL(boot 模块不存在)→ 实现后 PASS。
 
-- [ ] **Step 9: typecheck + Commit**
+- [ ] **Step 8: typecheck + Commit**
 
 ```bash
 cd desktop && npm run typecheck
-git add desktop/src/main/dsh-boot.ts desktop/src/main/dsh-boot.test.ts desktop/src/main/config desktop/src/main/util
-git commit -m "feat(desktop): in-process dsh boot with contract test and real smoke"
+git add desktop/src/main/dsh-boot.ts desktop/src/main/dsh-boot.test.ts desktop/src/main/picoaide-patches.ts desktop/src/main/plugins/index.ts desktop/src/main/config-contract.test.ts desktop/src/main/util
+git commit -m "feat(desktop): in-process dsh boot, programmatic patches and plugins"
 ```
 
 ### Task 3:Electron 入口(生命周期/单实例/关闭)
@@ -644,7 +595,6 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(async () => {
     ctx = await bootDsh({
       home: join(app.getPath('userData'), 'dsh'),
-      resources: join(import.meta.dirname, 'config'),
       appRoot: app.getAppPath(),
       onExitRequested: () => app.quit(),
     })
@@ -775,6 +725,8 @@ git commit -m "chore(desktop): port server-connector from old gateway"
 - Create: `desktop/src/main/plugins/auth-gate/index.ts`
 - Create: `desktop/src/main/plugins/auth-gate/index.test.ts`
 - Create: `desktop/src/main/plugins/auth-gate/login.html`
+- Modify: `desktop/src/main/plugins/index.ts`(登记 auth-gate)
+- Create: `desktop/src/vite-env.d.ts`(`*.html?raw` 类型)
 
 - [ ] **Step 1: 写共享契约模块(唯一所有权,audit G6)**
 
@@ -797,7 +749,18 @@ export function getSessionService(ctx: { get(key: string): unknown }): SessionSe
 }
 ```
 
-- [ ] **Step 2: 写失败测试**
+- [ ] **Step 2: 写 ?raw 类型声明**
+
+`desktop/src/vite-env.d.ts`:
+
+```ts
+declare module '*.html?raw' {
+  const content: string
+  export default content
+}
+```
+
+- [ ] **Step 3: 写失败测试**
 
 `desktop/src/main/plugins/auth-gate/index.test.ts`:
 
@@ -811,32 +774,42 @@ const { apply } = await import('./index')
 
 describe('auth-gate plugin', () => {
   it('registers login page route and auth routes', () => {
-    apply(fakeCtx as never, { loginPage: '/tmp/login.html', defaultServer: 'https://gw' })
+    apply(fakeCtx as never, { defaultServer: 'https://gw' })
     const paths = register.mock.calls.map(c => (c[0] as { path: string }).path)
     expect(paths).toEqual(expect.arrayContaining(['/login', '/api/pico/auth/login', '/api/pico/auth/state', '/api/pico/auth/logout']))
   })
 
+  it('login page html contains our title and injected default server', async () => {
+    apply(fakeCtx as never, { defaultServer: 'https://gw' })
+    const loginRoute = register.mock.calls.find(c => (c[0] as { path: string }).path === '/login')![0] as { handler(_: unknown, res: { writeHead(n: number, h: Record<string, string>): void; end(b: string): void }): void }
+    const chunks: string[] = []
+    loginRoute.handler({}, { writeHead: () => {}, end: (b: string) => chunks.push(b) })
+    const html = chunks.join('')
+    expect(html).toContain('PicoAide')
+    expect(html).toContain('https://gw')
+  })
+
   it('tapIndex injects redirect when not logged in', () => {
-    apply(fakeCtx as never, { loginPage: '/tmp/login.html', defaultServer: 'https://gw' })
+    apply(fakeCtx as never, { defaultServer: 'https://gw' })
     const transform = tapIndex.mock.calls[0][0] as (html: string) => string
     expect(transform('<html><head></head></html>')).toContain('location.replace("/login")')
   })
 
   it('tapIndex passes through when logged in', () => {
     fakeCtx.get.mockReturnValue({ isLoggedIn: () => true })
-    apply(fakeCtx as never, { loginPage: '/tmp/login.html', defaultServer: 'https://gw' })
+    apply(fakeCtx as never, { defaultServer: 'https://gw' })
     const transform = tapIndex.mock.calls[0][0] as (html: string) => string
     expect(transform('<html>x</html>')).toBe('<html>x</html>')
   })
 })
 ```
 
-- [ ] **Step 3: 跑测试确认失败**
+- [ ] **Step 4: 跑测试确认失败**
 
 Run: `cd desktop && npx vitest run src/main/plugins/auth-gate/index.test.ts`
 Expected: FAIL
 
-- [ ] **Step 4: 实现插件**
+- [ ] **Step 5: 实现插件(登录页 ?raw 内联,函数插件带 inject 元数据)**
 
 `desktop/src/main/plugins/auth-gate/index.ts`:
 
@@ -846,15 +819,16 @@ Expected: FAIL
  * 登录页表单 POST /api/pico/auth/login(走 server-connector 的
  * session.defaultSession.fetch → TOFU 生效);成功后经 SessionService
  * 通知 bootstrap/gateway-model 加载网关配置。
+ * 挂载方式:plugins/index.ts 登记 → boot prepare 钩子 ctx.plugin 直挂,
+ * inject 元数据保证 webServer 服务就绪后才执行(Plugin.Base.inject)。
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { readFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { login } from '../../server-connector/auth'
 import { getSessionService } from '../session-service'
+import loginHtml from './login.html?raw'
 
 export interface Config {
-  loginPage: string
   defaultServer: string
 }
 
@@ -868,7 +842,7 @@ export function apply(ctx: Context, config: Config): void {
     kind: 'exact', path: '/login',
     handler: (_req: IncomingMessage, res: ServerResponse) => {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-      res.end(readFileSync(config.loginPage, 'utf8').replaceAll('__DEFAULT_SERVER__', config.defaultServer))
+      res.end(loginHtml.replaceAll('__DEFAULT_SERVER__', config.defaultServer))
     },
   })
 
@@ -912,9 +886,12 @@ export function apply(ctx: Context, config: Config): void {
     )
   })
 }
+
+apply.inject = ['webServer']
+apply.name = 'auth-gate'
 ```
 
-- [ ] **Step 5: 写登录页**
+- [ ] **Step 6: 写登录页**
 
 `desktop/src/main/plugins/auth-gate/login.html`:
 
@@ -959,17 +936,31 @@ document.getElementById('f').addEventListener('submit', async (e) => {
 </body></html>
 ```
 
-> login.html 由 esbuild 拷贝:在 `scripts/build-plugins.mjs` 加一行 `copyFileSync(login.html → out/main/config/plugins/auth-gate/login.html)`。
+- [ ] **Step 7: 登记到 pluginEntries**
 
-- [ ] **Step 6: 跑测试确认通过 + typecheck + 冒烟(登录页出现)**
+`desktop/src/main/plugins/index.ts` 改为:
 
-Run: `cd desktop && npx vitest run src/main/plugins/auth-gate/index.test.ts && npm run typecheck && npm run build:plugins`
-Expected: PASS + 无类型错误。冒烟:起 app → 未登录 → 自动跳转 /login。
+```ts
+/**
+ * 自研插件登记表:boot 的 prepare 钩子里逐个 ctx.plugin 直挂。
+ */
+import type { Plugin } from '@deepseek-ai/cordis'
+import { apply as authGate } from './auth-gate'
 
-- [ ] **Step 7: Commit**
+export const pluginEntries: Array<{ plugin: Plugin; config: Record<string, unknown> }> = [
+  { plugin: authGate as unknown as Plugin, config: { defaultServer: '' } },
+]
+```
+
+- [ ] **Step 8: 跑测试确认通过 + typecheck + 冒烟(登录页出现)**
+
+Run: `cd desktop && npx vitest run src/main/plugins/auth-gate/index.test.ts && npm run typecheck`
+Expected: PASS + 无类型错误。冒烟(`npm run dev`):未登录 → 自动跳转 /login,登录页含 PicoAide 品牌。
+
+- [ ] **Step 9: Commit**
 
 ```bash
-git add desktop/src/main/plugins/session-service.ts desktop/src/main/plugins/auth-gate desktop/scripts/build-plugins.mjs
+git add desktop/src/main/plugins/session-service.ts desktop/src/main/plugins/auth-gate desktop/src/main/plugins/index.ts desktop/src/vite-env.d.ts
 git commit -m "feat(desktop): auth-gate plugin with login page and index gating"
 ```
 
@@ -1052,6 +1043,9 @@ export function apply(ctx: Context): void {
     })
   })
 }
+
+apply.inject = ['settings']
+apply.name = 'gateway-model'
 ```
 
 - [ ] **Step 4: 实现 bootstrap(会话服务 + 下发)**
@@ -1111,6 +1105,9 @@ export function apply(ctx: Context, config: Config): void {
   }
 }
 
+apply.inject = ['settings']
+apply.name = 'bootstrap'
+
 function loadPersisted(tokenFile: string): Session | null {
   try {
     const ss = require('electron')?.safeStorage
@@ -1163,29 +1160,51 @@ describe('bootstrap plugin', () => {
 })
 ```
 
-- [ ] **Step 6: 恢复补丁层 insert 行 + 跑全部测试**
+- [ ] **Step 6: 登记到 pluginEntries + 跑全部测试**
 
-取消 Task 2 Step 8 临时注释的三行 insert。Run: `cd desktop && npx vitest run`
-Expected: 全绿(契约测试 + boot 测试 + auth-gate + gateway-model + bootstrap)。
+`desktop/src/main/plugins/index.ts` 追加 gateway-model 与 bootstrap(置于 auth-gate 之后):
+
+```ts
+import { apply as authGate } from './auth-gate'
+import { apply as gatewayModel } from './gateway-model'
+import { apply as bootstrap } from './bootstrap'
+
+export const pluginEntries: Array<{ plugin: Plugin; config: Record<string, unknown> }> = [
+  { plugin: authGate as unknown as Plugin, config: { defaultServer: '' } },
+  { plugin: gatewayModel as unknown as Plugin, config: {} },
+  { plugin: bootstrap as unknown as Plugin, config: { tokenFile: '' } },
+]
+```
+
+同时 bootstrap 插件 apply 开头加一行兜底(不依赖 config 传路径):
+
+```ts
+const tokenFile = config.tokenFile || join(process.env.DSH_HOME!, 'session.json')
+```
+
+(替换 apply 内对 `config.tokenFile` 的三处引用。)
+
+Run: `cd desktop && npx vitest run`
+Expected: 全绿(契约测试 + 真实 boot + auth-gate + gateway-model + bootstrap)。
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add desktop/src/main/plugins/gateway-model desktop/src/main/plugins/bootstrap desktop/src/main/config/picoaide.patch.yml
+git add desktop/src/main/plugins/gateway-model desktop/src/main/plugins/bootstrap desktop/src/main/plugins/index.ts
 git commit -m "feat(desktop): gateway-model and bootstrap wire login into dsh models"
 ```
 
 ### Task 8:安全默认补丁核对 + 全链路验收
 
 **Files:**
-- Modify: `desktop/src/main/public/config/picoaide.patch.yml`(dump 核对后定稿)
+- Modify: `desktop/src/main/picoaide-patches.ts`(dump 核对后定稿)
 
-- [ ] **Step 1: dump 核对安全行并修正 patch**
+- [ ] **Step 1: dump 核对安全行并修正补丁常量**
 
 ```bash
 cd desktop && npx dsh --dump-config 2>/dev/null | grep -B1 -A15 -E 'permission|approval' | head -60
 ```
-逐项确认:permission presets 无 danger-full-access;approval policy = ask;session-telemetry-otel disabled;7 个 ui 行 disabled。字段与 patch 不符则改 `picoaide.patch.yml` 并重跑契约测试至绿。
+逐项确认:permission presets 无 danger-full-access;approval policy = ask;session-telemetry-otel disabled;7 个 ui 行 disabled。字段与补丁不符则改 `picoaide-patches.ts` 并重跑契约测试至绿。
 
 - [ ] **Step 2: 全链路验收(mock 上游 + 真服务端 + 客户端)**
 
@@ -1260,7 +1279,7 @@ auth-gate(登录)、gateway-model(网关)、bootstrap(配置下发)三个插件�
 - [ ] **Step 5: Commit**
 
 ```bash
-git add desktop/electron-builder.yml desktop/src/main/public/config/picoaide.patch.yml AGENTS.md docs/superpowers/specs/2026-08-01-picoaide-next-architecture-design.md
+git add desktop/electron-builder.yml desktop/src/main/picoaide-patches.ts AGENTS.md docs/superpowers/specs/2026-08-01-picoaide-next-architecture-design.md
 git commit -m "docs: security defaults verified and ADR D26 recorded"
 ```
 
@@ -1284,6 +1303,6 @@ git commit -m "docs: security defaults verified and ADR D26 recorded"
 
 **2. Placeholder 扫描**:两处标注"以 dump 为准"(permission 行字段、agent-default-model 字段)——均为对第三方快速迭代 API 的核对步骤,附有核对命令与修正路径,非 TBD;bootstrap 插件不实现技能下发(明确为 Phase 2,函数未留空壳)。
 
-**3. 类型一致性**:`SESSION_SERVICE`/`SessionService` 定义于 session-service.ts(Task 6),auth-gate 与 bootstrap 均从此导入;`TOKEN_ENV` 定义于 gateway-model,测试与 patch 引用一致;`bootDsh`/`webPort` 定义于 Task 2,Task 3 与测试引用一致;esbuild 产物路径 `out/main/config/plugins/<name>/index.js` 与补丁层相对行 `./plugins/<name>/index.js` 一致(相对 cordis.yml 所在目录 = out/main/config)。
+**3. 类型一致性**:`SESSION_SERVICE`/`SessionService` 定义于 session-service.ts(Task 6),auth-gate 与 bootstrap 均从此导入;`TOKEN_ENV` 定义于 gateway-model,测试引用一致;`bootDsh`/`webPort` 定义于 Task 2,Task 3 与测试引用一致;`pluginEntries` 定义于 plugins/index.ts(Task 2 建空表,Task 6/7 登记),boot prepare 钩子统一挂载;bootstrap 的 tokenFile 经 `process.env.DSH_HOME` 兜底推导(Task 7 Step 6)。
 
 **风险清单**:rc.6 版本号以安装时 registry 为准(Task 1 附替换说明);brand-shim 子路径导入面以执行时 grep 核对为准(Task 1 Step 4 说明);dsh 事件名 `pico.session-changed` 为自研协议(与 dsh 事件命名空间隔离,无冲突)。
