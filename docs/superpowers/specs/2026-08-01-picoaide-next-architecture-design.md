@@ -36,6 +36,7 @@
 | D23 | UI 组件 | shadcn/ui + Tailwind(客户端 renderer 与 webadmin 统一使用) | 官方 shadcn AI 组件已发布(替代 ai-elements 轨道);Vite + React 官方支持;复制粘贴式、样式全可控;聊天/表格/表单/弹窗组件开箱即用 |
 | D24 | 网关接入 | 自研 Go 网关;AI SDK provider baseURL 直连 | 不用 Vercel AI Gateway 云服务;客户端零密钥,计量在服务端 |
 | D25 | 浏览器操作 | 自研浏览器插件桥:客户端主进程**固定监听 127.0.0.1:54321**,Chrome/Edge 插件默认直连该端口,即装即用零配置 | 免 Playwright 系统依赖;插件以最小权限(MV3)桥接真实浏览器;仅回环地址;操作类工具审批兜底 |
+| D26 | 客户端引擎与 UI | 废弃自研 agent 引擎/UI/tools,Electron main 进程内嵌 dsh Cordis 树;UI 用 dsh Web UI(overrides 同名包 + 品牌 shim,不 fork);自研仅 auth-gate(登录)、gateway-model(网关)、bootstrap(配置下发)三个插件 | dsh 的会话日志/工具/审批/沙盒/skill/MCP 成熟度高于自研,UI 质量与维护成本优于自研;MVP 形态 = 壳 + 登录 + 网关配置注入 |
 
 ---
 
@@ -946,3 +947,20 @@ kb_folders / kb_documents / kb_folder_users / kb_folder_groups / kb_audit_logs
 | docs/06-database.md | 同上 |
 | docs/07-marketplace.md | 同上 |
 | docs/08-development.md | 同上 |
+
+---
+
+## ADR D26:桌面客户端引擎与 UI 全面采用 DeepSeek Harness(dsh)
+
+**状态**:已接受(2026-08-14)
+
+**决策**:废弃自研 agent 引擎/UI/tools,Electron main 进程内嵌 dsh Cordis
+树;UI 用 dsh Web UI(overrides 同名包 + 品牌 shim,不 fork);自研仅
+auth-gate(登录)、gateway-model(网关)、bootstrap(配置下发)三个插件。
+
+**理由**:dsh 的会话日志/工具/审批/沙盒/skill/MCP 成熟度高于自研,UI 质量
+与维护成本优于自研;MVP 形态 = 壳 + 登录 + 网关配置注入。
+
+**代价**:依赖 developer preview 的破坏性变更节奏(契约测试 + runbook 应对);
+屏幕/OCR/剪贴板/CDP 暂缺(Phase 2 插件回归);审批 60s 硬超时与 /api
+写面鉴权在 Phase 2;LLM 流式请求走 Node 证书校验(TOFU 仅覆盖登录面)。

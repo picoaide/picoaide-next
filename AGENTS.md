@@ -31,13 +31,10 @@
 ## 4. 架构总览
 
 ```
-renderer(React+shadcn) ──preload(contextBridge)──▶ main(Node)
-                                                     ├─ Agent 引擎:AI SDK streamText 多步循环 + 审批门控
-                                                     ├─ 本地工具:文件/终端/沙盒/web/屏幕/OCR/剪贴板
-                                                     ├─ 浏览器插件桥:CDP 服务 127.0.0.1:54321(插件直连)
-                                                     ├─ 本地 MCP 运行时 + Skill 运行时
-                                                     ├─ better-sqlite3(会话/消息/产物/设置)
-                                                     └─ 服务端连接器(登录/健康/bootstrap/商城/远程MCP/TLS)
+renderer = dsh Web UI(自建同名 frontend 包 + 品牌 shim)──HTTP/WS 127.0.0.1:随机端口──▶ Electron main
+  ├─ Cordis 树:dsh-base + dsh-web-app bundle + 自研插件(auth-gate/gateway-model/bootstrap)
+  ├─ 引擎/UI/工具/审批/沙盒/skill/MCP 全部来自 dsh;会话 = dsh jsonl 会话日志(DSH_HOME=userData/dsh)
+  └─ 服务端连接器(登录/健康/bootstrap/TLS,TOFU)
 main ──HTTPS/Bearer token──▶ Go 服务端
   ├─ 认证:local/LDAP/OIDC + api_tokens(90天过期)+ --bootstrap-admin
   ├─ AI 网关:/v1/chat/completions 代理 + per-user 限流 + usage 计量
@@ -58,11 +55,12 @@ main ──HTTPS/Bearer token──▶ Go 服务端
 ```
 cmd/server/            # 服务端入口(--bootstrap-admin 等)
 internal/              # serverauth/llmgateway/marketplace/knowledge/serverstore/util/bootstrap
-desktop/               # Electron 客户端
-  src/main/            #   index/ipc/cdp_server + agent/ + tools/ + mcp/ + skill/ + store/ + gateway/(auth/bootstrap/tls/health/remote_mcp/marketplace)
-  src/preload/         #   contextBridge 白名单 API
-  src/renderer/        #   api/ + components/(ui=shadcn + 业务组合) + pages/(Login/Main/Settings) + stores/(Zustand)
-  tests/               # E2E/冒烟预留(单测内嵌 src/**/*.test.ts)
+desktop/               # Electron 客户端(壳 + dsh 内嵌)
+  src/main/            #   index(生命周期)/dsh-boot(进程内 boot)/picoaide-patches(安全补丁层)/plugins/(auth-gate/gateway-model/bootstrap)/server-connector/(auth/bootstrap/health/tls/config)/util/
+  brand-shim/          #   自建 @deepseek-ai/dsh-client-ui-primitives(星导出遮蔽品牌组件)
+  web/                 #   自建 @deepseek-ai/dsh-web-frontend(vite 入口)
+  tests/               #   单测内嵌 src/**/*.test.ts
+tests/                 # 仓库级冒烟(brand shim 解析断言等)
 browser-extension/     # Chrome MV3 插件(默认 ws://127.0.0.1:54321)
 webadmin/              # 服务端管理页(Vite React + shadcn)
 docs/superpowers/      # 架构设计 + 实施计划(权威文档)
@@ -74,9 +72,9 @@ data/                  # 服务端运行时数据(0700,gitignore)
 
 - **事件协议**(主进程→renderer,`agent:event`):`text_delta`/`reasoning_delta`/`tool_start`/`tool_end`(含 `duration_ms`)/`tool_error`/`confirm_required`(含 `request_id`)/`artifact`/`done`/`canceled`/`error` —— 全部 snake_case
 - **REST 错误**:`{"error":{"code":"ERR_CODE","message":"..."}}`;`AUTH_REQUIRED`/`AUTH_FAILED`/`FORBIDDEN`(管理端)/`NOT_FOUND`/`VALIDATION`/`UPSTREAM`/`RATE_LIMITED`/`INTERNAL`
-- **bootstrap**:`{default_model, models, skills, mcp, web}`(1.16b 服务端 ↔ 2.4 客户端 `BootstrapConfig` 严格对齐)
+- **bootstrap**:`{default_model, models, skills, mcp, web}`(服务端 `internal/bootstrap` ↔ 客户端 `desktop/src/main/server-connector/config.ts` `BootstrapConfig` 严格对齐)
 - **CDP 桥**:固定 `127.0.0.1:54321`,JSON-RPC:`browser.tabInfo`/`getContent`/`click`/`type`/`navigate`/`scroll`/`executeScript`
-- **DB**:客户端 5 表(conversations 含 status+project_id/messages 含 tool_call_id+tool_name+is_error/artifacts/settings/projects 迁移 0010);服务端 20+ 表(迁移 0001-0016,0007 废弃;0013 trigram FTS、0014 kb_chunks、0015 kb_chunk_embeddings、0016 skill_grants/mcp_grants)
+- **DB**:客户端会话 = dsh session 持久化(jsonl 会话日志,DSH_HOME=userData/dsh);服务端 20+ 表(迁移 0001-0016,0007 废弃;0013 trigram FTS、0014 kb_chunks、0015 kb_chunk_embeddings、0016 skill_grants/mcp_grants)
 - **知识库检索契约**:块级检索(kb_chunks 800 rune+标题路径);`kb_search` 返回 doc/chunk id、标题路径、snippet 与 score,混合检索 = trigram/unicode61 词法 + 向量余弦(网关 /v1/embeddings,模型名存 settings `kb.embedding_model`)→ RRF(k=60)融合,无向量时纯词法降级;`kb_read(doc_id, chunk_ids?)` 支持分块定点读取;长词(≥3 rune)走 trigram、短词走 unicode61 前缀 + LIKE(含 d.title);所有 folder(含根目录)须显式授权(`GetAccessibleFolderIDs` 严格模式)
 - **项目体系**:项目 = 命名工作目录;项目内会话 workspace = `<项目目录>/<会话id>/`(chat:new 自动 mkdir),引擎工具 cwd/allowedDirs 以会话 workspace 为基准,无项目会话回退全局工作目录;删除项目仅解绑会话(移入未分类),不删文件
 - **自动标题**:首轮对话 done 后后台调网关默认模型生成 ≤20 字标题(15s 超时),失败兜底截取首条用户消息 20 字;仅 title 为空时触发
