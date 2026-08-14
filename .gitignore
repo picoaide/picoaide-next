@@ -8,7 +8,10 @@ data/
 *.db-shm
 desktop/dist/
 desktop/out/
+desktop/release/
 desktop/node_modules/
+desktop/web/node_modules/
+desktop/web/dist/
 webadmin/node_modules/
 !webadmin/dist/index.html
 webadmin/dist/
