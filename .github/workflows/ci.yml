@@ -58,19 +58,27 @@ jobs:
   package-windows:
     runs-on: windows-latest
     needs: [server, desktop, webadmin]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
-      - name: package
-        run: |
-          cd desktop
-          npm ci
-          npm test
-          npm run typecheck
-          npm run build
-          npx electron-builder --win
+      - name: npm ci
+        timeout-minutes: 10
+        run: cd desktop && npm ci
+      - name: npm test
+        timeout-minutes: 10
+        run: cd desktop && npm test
+      - name: typecheck
+        timeout-minutes: 5
+        run: cd desktop && npm run typecheck
+      - name: build
+        timeout-minutes: 10
+        run: cd desktop && npm run build
+      - name: electron-builder --win
+        timeout-minutes: 20
+        run: cd desktop && npx electron-builder --win
       - uses: actions/upload-artifact@v7
         with:
           name: picoaide-windows
@@ -79,6 +87,7 @@ jobs:
   package-linux:
     runs-on: ubuntu-latest
     needs: [server, desktop, webadmin]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -100,6 +109,7 @@ jobs:
   package-macos:
     runs-on: macos-latest
     needs: [server, desktop, webadmin]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
