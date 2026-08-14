@@ -12,11 +12,11 @@ fi
 
 echo
 echo "== Windows package =="
-echo "setup: $(ls dist/*.exe 2>/dev/null || echo 'not found')"
+echo "setup: $(ls release/*.exe 2>/dev/null || echo 'not found')"
 
 # Portable 标记:exe 同目录存在 portable.txt → 客户端数据落在运行目录/data
-touch dist/win-unpacked/portable.txt
-cd dist
+touch release/win-unpacked/portable.txt
+cd release
 rm -f picoaide-windows-portable.zip
 zip -qr picoaide-windows-portable.zip win-unpacked
 echo "portable zip: $(ls picoaide-windows-portable.zip 2>/dev/null || echo 'not found')"

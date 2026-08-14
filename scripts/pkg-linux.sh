@@ -5,8 +5,8 @@ cd "$(dirname "$0")/../desktop"
 npm run build
 npx electron-builder --linux --dir
 # Portable 标记:exe 同目录存在 portable.txt → 客户端数据落在运行目录/data
-touch dist/linux-unpacked/portable.txt
-cd dist
+touch release/linux-unpacked/portable.txt
+cd release
 rm -f picoaide-linux-portable.zip
 zip -qr picoaide-linux-portable.zip linux-unpacked
 
