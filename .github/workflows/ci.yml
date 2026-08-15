@@ -80,19 +80,43 @@ jobs:
         timeout-minutes: 20
         run: cd desktop && npx electron-builder --win
       - name: launch smoke (no immediate crash)
-        timeout-minutes: 5
+        timeout-minutes: 8
         shell: pwsh
         run: |
           $exe = Get-ChildItem -Path desktop/release/win-unpacked -Filter *.exe -Recurse | Select-Object -First 1
           Write-Host "launching $($exe.FullName)"
-          $p = Start-Process -FilePath $exe.FullName -PassThru
-          Start-Sleep -Seconds 20
-          if ($p.HasExited) {
-            Write-Error "app exited early with code $($p.ExitCode) — boot failed (native module ABI?)"
+          function Start-App {
+            $p = Start-Process -FilePath $exe.FullName -PassThru
+            Start-Sleep -Seconds 20
+            if ($p.HasExited) { return $p.ExitCode }
+            Stop-Process -Id $p.Id -Force
+            return 0
+          }
+          $rc = Start-App
+          if ($rc -ne 0) {
+            Write-Error "app exited early with code $rc — boot failed (native module ABI?)"
             exit 1
           }
-          Write-Host "app alive after 20s: $($p.Id)"
-          Stop-Process -Id $p.Id -Force
+          # 升级残留回归:home/node_modules junction 指向已消失目录 → 重启必须自愈,不得秒退
+          $roots = @("$env:APPDATA\picoaide-desktop", "$env:APPDATA\PicoAide")
+          $link = $null
+          foreach ($r in $roots) {
+            $candidate = Join-Path $r "dsh\node_modules"
+            if (Test-Path $candidate) { $link = $candidate; break }
+          }
+          if ($null -ne $link) {
+            Write-Host "corrupting junction: $link"
+            Remove-Item -Path $link -Force -Recurse
+            New-Item -ItemType Junction -Path $link -Target "C:\nonexistent-upgrade-residue" | Out-Null
+            $rc = Start-App
+            if ($rc -ne 0) {
+              Write-Error "app exited early with code $rc after stale-junction upgrade — self-heal failed"
+              exit 1
+            }
+            Write-Host "app survived stale-junction restart (self-healed)"
+          } else {
+            Write-Host "WARN: home junction not found, upgrade-residue scenario skipped"
+          }
       - uses: actions/upload-artifact@v7
         with:
           name: picoaide-windows
