@@ -84,21 +84,31 @@ jobs:
         shell: pwsh
         run: |
           $exe = Get-ChildItem -Path desktop/release/win-unpacked -Filter *.exe -Recurse | Select-Object -First 1
+          $userData = Join-Path $env:APPDATA "picoaide-desktop"
+          $bootErr = Join-Path $userData "boot-error.log"
           Write-Host "launching $($exe.FullName)"
           function Start-App {
+            Remove-Item -Path $bootErr -Force -ErrorAction SilentlyContinue
             $p = Start-Process -FilePath $exe.FullName -PassThru
             Start-Sleep -Seconds 20
+            if (Test-Path $bootErr) {
+              Write-Host "=== boot-error.log ==="
+              Get-Content $bootErr
+              Write-Host "=== end ==="
+              if (!$p.HasExited) { Stop-Process -Id $p.Id -Force }
+              return 2
+            }
             if ($p.HasExited) { return $p.ExitCode }
             Stop-Process -Id $p.Id -Force
             return 0
           }
           $rc = Start-App
           if ($rc -ne 0) {
-            Write-Error "app exited early with code $rc — boot failed (native module ABI?)"
+            Write-Error "app failed to boot (rc=$rc) — see boot-error.log above"
             exit 1
           }
           # 升级残留回归:home/node_modules junction 指向已消失目录 → 重启必须自愈,不得秒退
-          $roots = @("$env:APPDATA\picoaide-desktop", "$env:APPDATA\PicoAide")
+          $roots = @($userData, "$env:APPDATA\PicoAide")
           $link = $null
           foreach ($r in $roots) {
             $candidate = Join-Path $r "dsh\node_modules"
