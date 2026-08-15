@@ -88,8 +88,10 @@ jobs:
           $bootErr = Join-Path $userData "boot-error.log"
           Write-Host "launching $($exe.FullName)"
           function Start-App {
+            param([string]$ExePath)
+            if (!$ExePath) { $ExePath = $exe.FullName }
             Remove-Item -Path $bootErr -Force -ErrorAction SilentlyContinue
-            $p = Start-Process -FilePath $exe.FullName -PassThru
+            $p = Start-Process -FilePath $ExePath -PassThru
             Start-Sleep -Seconds 20
             if (Test-Path $bootErr) {
               Write-Host "=== boot-error.log ==="
@@ -128,6 +130,32 @@ jobs:
             Write-Host "app survived stale-junction restart (self-healed)"
           } else {
             Write-Host "WARN: home junction not found, upgrade-residue scenario skipped"
+          }
+          # NSIS 安装版冒烟:用户场景是安装版(非 win-unpacked),两者文件形态
+          # 可能不同(安装器解压/权限);静默安装后启动验证。
+          $installer = Get-ChildItem -Path desktop/release -Filter "*.exe" | Where-Object { $_.Name -notlike "Uninstall*" } | Select-Object -First 1
+          if ($null -ne $installer) {
+            $installDir = "C:\picoaide-installed"
+            Write-Host "silent-installing $($installer.Name) -> $installDir"
+            # NSIS:/S 静默,/D= 目标目录(必须最后且无引号)
+            $args = "/S /D=$installDir"
+            $ip = Start-Process -FilePath $installer.FullName -ArgumentList $args -Wait -PassThru
+            if ($ip.ExitCode -ne 0) { Write-Error "installer failed rc=$($ip.ExitCode)"; exit 1 }
+            $installedExe = Join-Path $installDir "PicoAide.exe"
+            if (!(Test-Path $installedExe)) {
+              # productName 目录形态:安装器可能带版本号目录
+              $installedExe = (Get-ChildItem -Path $installDir -Filter "PicoAide.exe" -Recurse | Select-Object -First 1).FullName
+            }
+            Write-Host "installed exe: $installedExe"
+            if ($null -eq $installedExe -or !(Test-Path $installedExe)) { Write-Error "installed exe missing"; exit 1 }
+            $rc = Start-App -ExePath $installedExe
+            if ($rc -ne 0) {
+              Write-Error "installed app failed to boot (rc=$rc) — see boot-error.log above"
+              exit 1
+            }
+            Write-Host "installed app survived launch (NSIS smoke passed)"
+          } else {
+            Write-Host "WARN: installer not found, NSIS smoke skipped"
           }
       - uses: actions/upload-artifact@v7
         with:
