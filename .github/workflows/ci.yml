@@ -79,6 +79,20 @@ jobs:
       - name: electron-builder --win
         timeout-minutes: 20
         run: cd desktop && npx electron-builder --win
+      - name: launch smoke (no immediate crash)
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path desktop/release/win-unpacked -Filter *.exe -Recurse | Select-Object -First 1
+          Write-Host "launching $($exe.FullName)"
+          $p = Start-Process -FilePath $exe.FullName -PassThru
+          Start-Sleep -Seconds 20
+          if ($p.HasExited) {
+            Write-Error "app exited early with code $($p.ExitCode) — boot failed (native module ABI?)"
+            exit 1
+          }
+          Write-Host "app alive after 20s: $($p.Id)"
+          Stop-Process -Id $p.Id -Force
       - uses: actions/upload-artifact@v7
         with:
           name: picoaide-windows
