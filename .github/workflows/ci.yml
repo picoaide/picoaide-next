@@ -94,9 +94,10 @@ jobs:
             $p = Start-Process -FilePath $ExePath -PassThru
             Start-Sleep -Seconds 20
             if (Test-Path $bootErr) {
-              Write-Host "=== boot-error.log (size=$((Get-Item $bootErr).Length)) ==="
-              Get-Content $bootErr -Encoding UTF8
-              Write-Host "=== end ==="
+              Write-Host "=== boot-error.log (size=$((Get-Item $bootErr).Length)) — head ==="
+              Get-Content $bootErr -TotalCount 40 -Encoding UTF8
+              Write-Host "=== head end ==="
+              Copy-Item $bootErr "$env:RUNNER_TEMP\boot-error.log" -Force
               if (!$p.HasExited) { Stop-Process -Id $p.Id -Force }
               return 2
             }
