@@ -106,8 +106,10 @@ jobs:
           }
           if ($null -ne $link) {
             Write-Host "corrupting junction: $link"
-            Remove-Item -Path $link -Force -Recurse
-            New-Item -ItemType Junction -Path $link -Target "C:\nonexistent-upgrade-residue" | Out-Null
+            # rmdir 只删 junction 链接本身;PowerShell Remove-Item -Recurse 会连目标一起删
+            cmd /c rmdir "$link"
+            New-Item -ItemType Directory -Path "C:\upgrade-residue" -Force | Out-Null
+            New-Item -ItemType Junction -Path $link -Target "C:\upgrade-residue" | Out-Null
             $rc = Start-App
             if ($rc -ne 0) {
               Write-Error "app exited early with code $rc after stale-junction upgrade — self-heal failed"
