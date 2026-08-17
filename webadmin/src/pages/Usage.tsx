@@ -82,7 +82,7 @@ export default function Usage() {
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>{group === 'day' ? '日期' : group === 'model' ? '模型' : '用户 ID'}</TableHead>
+            <TableHead>{group === 'day' ? '日期' : group === 'model' ? '模型' : '用户'}</TableHead>
             <TableHead>请求数</TableHead>
             <TableHead>输入 tokens</TableHead>
             <TableHead>输出 tokens</TableHead>

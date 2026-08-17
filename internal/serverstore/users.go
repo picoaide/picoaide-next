@@ -18,9 +18,16 @@ type User struct {
 	Source       string
 	IsAdmin      bool
 	Status       int
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// QuotaTokens is the per-user monthly traffic quota in tokens (0017):
+	// nil = follow the global default, 0 = unlimited, >0 = capped.
+	// Admins are always unlimited regardless of this value.
+	QuotaTokens *int64
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
+
+// userCols is the canonical user column list (kept in sync with scanUser).
+const userCols = "id, username, display_name, email, password_hash, source, is_admin, status, created_at, updated_at, quota_tokens"
 
 // CreateUserWithPassword creates a local user, hashing the plaintext password.
 func CreateUserWithPassword(db *sql.DB, username, password string) (int64, error) {
@@ -63,8 +70,9 @@ func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	var u User
 	var isAdmin, status int
 	var displayName, email, passwordHash sql.NullString
+	var quota sql.NullInt64
 	var createdAt, updatedAt string
-	if err := row.Scan(&u.ID, &u.Username, &displayName, &email, &passwordHash, &u.Source, &isAdmin, &status, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &displayName, &email, &passwordHash, &u.Source, &isAdmin, &status, &createdAt, &updatedAt, &quota); err != nil {
 		return nil, err
 	}
 	u.CreatedAt = parseSQLTime(createdAt)
@@ -74,15 +82,18 @@ func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	u.PasswordHash = passwordHash.String
 	u.IsAdmin = isAdmin == 1
 	u.Status = status
+	if quota.Valid {
+		u.QuotaTokens = &quota.Int64
+	}
 	return &u, nil
 }
 
 // CreateUser inserts a user row and returns its id.
 func CreateUser(db *sql.DB, u *User) (int64, error) {
-	res, err := db.Exec(`INSERT INTO users (username, display_name, email, password_hash, source, is_admin, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+	res, err := db.Exec(`INSERT INTO users (username, display_name, email, password_hash, source, is_admin, status, quota_tokens)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		u.Username, nullIfEmpty(u.DisplayName), nullIfEmpty(u.Email), nullIfEmpty(u.PasswordHash),
-		u.Source, boolInt(u.IsAdmin), u.Status)
+		u.Source, boolInt(u.IsAdmin), u.Status, nilIfNilInt64(u.QuotaTokens))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return 0, ErrDuplicate
@@ -94,7 +105,7 @@ func CreateUser(db *sql.DB, u *User) (int64, error) {
 
 // GetUserByUsername returns the user or ErrNotFound.
 func GetUserByUsername(db *sql.DB, username string) (*User, error) {
-	row := db.QueryRow(`SELECT id, username, display_name, email, password_hash, source, is_admin, status, created_at, updated_at
+	row := db.QueryRow(`SELECT `+userCols+`
 		FROM users WHERE username = ?`, username)
 	u, err := scanUser(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -104,7 +115,7 @@ func GetUserByUsername(db *sql.DB, username string) (*User, error) {
 }
 
 func GetUserByID(db *sql.DB, id int64) (*User, error) {
-	row := db.QueryRow(`SELECT id, username, display_name, email, password_hash, source, is_admin, status, created_at, updated_at
+	row := db.QueryRow(`SELECT `+userCols+`
 		FROM users WHERE id = ?`, id)
 	u, err := scanUser(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -115,10 +126,10 @@ func GetUserByID(db *sql.DB, id int64) (*User, error) {
 
 // UpdateUser updates display_name/email/password_hash/is_admin/status.
 func UpdateUser(db *sql.DB, u *User) error {
-	res, err := db.Exec(`UPDATE users SET display_name=?, email=?, password_hash=?, is_admin=?, status=?, updated_at=datetime('now','localtime')
+	res, err := db.Exec(`UPDATE users SET display_name=?, email=?, password_hash=?, is_admin=?, status=?, quota_tokens=?, updated_at=datetime('now','localtime')
 		WHERE id=?`,
 		nullIfEmpty(u.DisplayName), nullIfEmpty(u.Email), nullIfEmpty(u.PasswordHash),
-		boolInt(u.IsAdmin), u.Status, u.ID)
+		boolInt(u.IsAdmin), u.Status, nilIfNilInt64(u.QuotaTokens), u.ID)
 	if err != nil {
 		return err
 	}
@@ -140,14 +151,14 @@ func ListUsers(db *sql.DB, offset, limit int, q string) ([]User, int64, error) {
 		if err = db.QueryRow("SELECT COUNT(*) FROM users").Scan(&total); err != nil {
 			return nil, 0, err
 		}
-		rows, err = db.Query(`SELECT id, username, display_name, email, password_hash, source, is_admin, status, created_at, updated_at
+		rows, err = db.Query(`SELECT `+userCols+`
 			FROM users ORDER BY id LIMIT ? OFFSET ?`, limit, offset)
 	} else {
 		like := "%" + q + "%"
 		if err = db.QueryRow("SELECT COUNT(*) FROM users WHERE username LIKE ?", like).Scan(&total); err != nil {
 			return nil, 0, err
 		}
-		rows, err = db.Query(`SELECT id, username, display_name, email, password_hash, source, is_admin, status, created_at, updated_at
+		rows, err = db.Query(`SELECT `+userCols+`
 			FROM users WHERE username LIKE ? ORDER BY id LIMIT ? OFFSET ?`, like, limit, offset)
 	}
 	if err != nil {
@@ -192,6 +203,14 @@ func nullIfEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+
+// nilIfNilInt64 maps a nil *int64 to SQL NULL (tri-state quota_tokens).
+func nilIfNilInt64(v *int64) any {
+	if v == nil {
+		return nil
+	}
+	return *v
 }
 
 // DeleteUser removes a user and all their FK-referenced rows

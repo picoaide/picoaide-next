@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -568,4 +569,208 @@ func TestMatchModel(t *testing.T) {
 	if _, err := MatchModel(db, "nope"); !errors.Is(err, serverstore.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
+}
+
+// setUserQuota sets alice's (user id 1) monthly quota and optionally their
+// admin flag, then seeds the given monthly usage.
+func setUserQuota(t *testing.T, db *sql.DB, quota int64, admin bool, used int64) {
+	t.Helper()
+	u, err := serverstore.GetUserByID(db, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := quota
+	u.QuotaTokens = &q
+	u.IsAdmin = admin
+	if err := serverstore.UpdateUser(db, u); err != nil {
+		t.Fatal(err)
+	}
+	if used > 0 {
+		if _, err := serverstore.RecordUsage(db, 1, "deepseek-chat", used, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestQuotaBlocksOverLimit(t *testing.T) {
+	f := newFakeUpstream(t)
+	r, db, token := newGateway(t, f)
+	setUserQuota(t, db, 100, false, 100) // used == quota → blocked
+
+	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", w.Code)
+	}
+	var out map[string]any
+	json.Unmarshal(w.Body.Bytes(), &out)
+	if code := out["error"].(map[string]any)["code"]; code != "QUOTA_EXCEEDED" {
+		t.Fatalf("code = %v", code)
+	}
+	if n := f.requests.Load(); n != 0 {
+		t.Fatalf("upstream calls = %d, want 0 (blocked before forwarding)", n)
+	}
+}
+
+func TestQuotaBoundaryBlocks(t *testing.T) {
+	f := newFakeUpstream(t)
+	r, db, token := newGateway(t, f)
+	setUserQuota(t, db, 100, false, 99) // 99 < 100 → passes
+	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("under quota status = %d, want 200", w.Code)
+	}
+	setUserQuota(t, db, 100, false, 100) // 100 == 100 → blocked
+	w = doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("at quota status = %d, want 429", w.Code)
+	}
+}
+
+func TestQuotaStreamBlocked(t *testing.T) {
+	f := newFakeUpstream(t)
+	r, db, token := newGateway(t, f)
+	setUserQuota(t, db, 50, false, 60)
+
+	w := doPost(t, r, "/v1/chat/completions",
+		`{"model":"deepseek-chat","messages":[],"stream":true}`, token, nil)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", w.Code)
+	}
+	if n := f.requests.Load(); n != 0 {
+		t.Fatalf("upstream calls = %d, want 0", n)
+	}
+	// no pending usage row must be left behind
+	var rows int
+	if err := db.QueryRow("SELECT COUNT(*) FROM usage").Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 { // the seeded 60-token row
+		t.Fatalf("usage rows = %d, want 1", rows)
+	}
+}
+
+func TestQuotaAdminExempt(t *testing.T) {
+	f := newFakeUpstream(t)
+	r, db, token := newGateway(t, f)
+	setUserQuota(t, db, 1, true, 100000) // admin, tiny quota, huge usage
+
+	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (admin exempt)", w.Code)
+	}
+	if n := f.requests.Load(); n != 1 {
+		t.Fatalf("upstream calls = %d, want 1", n)
+	}
+}
+
+func TestQuotaGlobalDefault(t *testing.T) {
+	f := newFakeUpstream(t)
+	r, db, token := newGateway(t, f)
+	// global default quota 100 via settings; user has no override (nil)
+	if err := serverstore.SetSetting(db, serverstore.MonthlyQuotaSetting, "100"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.RecordUsage(db, 1, "deepseek-chat", 100, 0); err != nil {
+		t.Fatal(err)
+	}
+	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429 (global default enforced)", w.Code)
+	}
+	// user override 0 = unlimited wins over the global default
+	setUserQuota(t, db, 0, false, 0)
+	w = doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (override unlimited)", w.Code)
+	}
+}
+
+// 审计修复:流式响应的 usage 已回填后客户端才断连,真实计量必须保留
+// (回退前无条件 DeleteUsage 会把已回填的真实用量删掉 → 统计丢失)。
+func TestProxyStreamBackfilledThenDisconnectKeepsUsage(t *testing.T) {
+	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/backfill.db", t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	uid, err := serverstore.CreateUser(db, &serverstore.User{Username: "alice", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	usageID, err := serverstore.RecordUsage(db, uid, "deepseek-chat", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// upstream emits the usage chunk first, then a second line that is held
+	// until the test releases it after cancelling the client context
+	usageLine := "data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n"
+	body := &stepReader{
+		steps:     []string{usageLine, "data: held\n\n"},
+		holdAfter: 1,
+		blocked:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(body),
+	}
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	ctx, cancel := context.WithCancel(context.Background())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		a := &API{DB: db}
+		a.serveStream(c, resp, usageID)
+		close(done)
+	}()
+	<-body.blocked // usage chunk read + backfilled; stream is now holding
+	cancel()       // client disconnects mid-stream
+	close(body.release)
+	<-done
+
+	var pt, ct int64
+	if err := db.QueryRow("SELECT prompt_tokens, completion_tokens FROM usage WHERE id = ?", usageID).Scan(&pt, &ct); err != nil {
+		t.Fatal(err)
+	}
+	if pt != 10 || ct != 5 {
+		t.Fatalf("usage backfilled then dropped: pt=%d ct=%d, want 10/5", pt, ct)
+	}
+}
+
+// stepReader emits lines in order; reads at index >= holdAfter block on a
+// channel and signal via blocked (closed when the hold begins) until the test
+// closes release.
+type stepReader struct {
+	steps     []string
+	idx       int
+	holdAfter int
+	blocked   chan struct{}
+	release   chan struct{}
+	mu        sync.Mutex
+	released  bool
+}
+
+func (r *stepReader) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	if r.idx >= len(r.steps) {
+		r.mu.Unlock()
+		return 0, io.EOF
+	}
+	if r.idx >= r.holdAfter && !r.released {
+		r.released = true
+		r.mu.Unlock()
+		close(r.blocked)
+		<-r.release
+	} else {
+		r.mu.Unlock()
+	}
+	s := r.steps[r.idx]
+	r.idx++
+	return copy(p, s), nil
 }

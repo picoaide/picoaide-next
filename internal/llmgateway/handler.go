@@ -85,6 +85,10 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusTooManyRequests, "RATE_LIMITED", "请求过于频繁,请稍后再试")
 		return
 	}
+	if blocked, msg := a.quotaBlocked(user); blocked {
+		serverauth.WriteError(c, http.StatusTooManyRequests, "QUOTA_EXCEEDED", msg)
+		return
+	}
 
 	ups, err := MatchModels(a.DB, req.Model)
 	if err != nil {
@@ -319,6 +323,7 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 	fl, _ := c.Writer.(http.Flusher)
 	br := bufio.NewReader(resp.Body)
 	clientGone := false
+	backfilled := false // usage row received real tokens (must not be dropped)
 	for {
 		// 5#9/5#10: stop pumping once the client context is gone
 		if c.Request.Context().Err() != nil {
@@ -333,6 +338,8 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 				} else if ok && usageID > 0 {
 					if uerr := serverstore.UpdateUsageTokens(a.DB, usageID, pt, ct); uerr != nil {
 						log.Printf("gateway: backfill usage: %v", uerr)
+					} else if pt+ct > 0 {
+						backfilled = true
 					}
 				}
 			}
@@ -355,7 +362,10 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64) {
 			break
 		}
 	}
-	if clientGone && usageID > 0 {
+	// Drop the pending row only when it was never backfilled with real tokens:
+	// a client disconnect after the final usage chunk must not erase real
+	// metering (审计: 流式已回填却删除 → 统计丢失).
+	if clientGone && usageID > 0 && !backfilled {
 		if err := serverstore.DeleteUsage(a.DB, usageID); err != nil {
 			log.Printf("gateway: delete pending usage: %v", err)
 		}
@@ -421,6 +431,30 @@ func (a *API) rateLimitPerMinute() int {
 		return defaultRateLimit
 	}
 	return n
+}
+
+// quotaBlocked reports whether the user has exhausted their calendar-month
+// token quota (429 QUOTA_EXCEEDED at the caller). Admins are always exempt;
+// 0 quota means unlimited. Lookup failures degrade open (fail-open), matching
+// the rate-limiter's fail-open behaviour.
+func (a *API) quotaBlocked(user *serverstore.User) (bool, string) {
+	quota, err := serverstore.EffectiveQuota(a.DB, user)
+	if err != nil {
+		log.Printf("gateway: quota lookup: %v", err)
+		return false, ""
+	}
+	if quota <= 0 {
+		return false, ""
+	}
+	used, err := serverstore.UserMonthlyUsage(a.DB, user.ID)
+	if err != nil {
+		log.Printf("gateway: usage lookup: %v", err)
+		return false, ""
+	}
+	if used >= quota {
+		return true, "本月流量配额已用尽"
+	}
+	return false, ""
 }
 
 // rateLimiter is a per-user token bucket with bounded map and lazy cleanup.

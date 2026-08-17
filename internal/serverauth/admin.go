@@ -166,6 +166,16 @@ func (a *AdminAPI) listUsers(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
+	// 批量附本月流量用量(配额对照):单条 SQL 避免 N+1
+	ids := make([]int64, 0, len(users))
+	for i := range users {
+		ids = append(ids, users[i].ID)
+	}
+	usageByUser, err := serverstore.UserMonthlyUsageBatch(a.DB, ids)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
 	out := make([]gin.H, 0, len(users))
 	for _, u := range users {
 		uj := userJSON(&u)
@@ -173,6 +183,7 @@ func (a *AdminAPI) listUsers(c *gin.Context) {
 		if uj["groups"] == nil {
 			uj["groups"] = []string{}
 		}
+		uj["monthly_usage"] = usageByUser[u.ID] // tokens used this calendar month (0 when none)
 		out = append(out, uj)
 	}
 	c.JSON(http.StatusOK, gin.H{"users": out, "total": total, "page": page, "size": size})
@@ -310,6 +321,8 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 		Password    *string `json:"password"`
 		IsAdmin     *bool   `json:"is_admin"`
 		Status      *int    `json:"status"`
+		QuotaTokens *int64  `json:"quota_tokens"`
+		QuotaClear  bool    `json:"quota_clear"` // reset quota_tokens to NULL (follow global default)
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
@@ -351,6 +364,16 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 	}
 	if req.Status != nil {
 		u.Status = *req.Status
+	}
+	if req.QuotaClear {
+		u.QuotaTokens = nil
+	} else if req.QuotaTokens != nil {
+		if *req.QuotaTokens < 0 {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "quota_tokens 不能为负数")
+			return
+		}
+		q := *req.QuotaTokens
+		u.QuotaTokens = &q
 	}
 	if err := serverstore.UpdateUser(a.DB, u); err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")

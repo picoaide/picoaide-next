@@ -323,6 +323,23 @@ func TestAdminModelsAndDefaultModel(t *testing.T) {
 	if w.Code != http.StatusOK || out["server_base_url"] != "https://picoaide.example.com" {
 		t.Fatalf("server_base_url not persisted: %d %v", w.Code, out)
 	}
+	// monthly_quota:全局默认员工月配额,读写并拒绝负数
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"monthly_quota":"-5"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("negative monthly_quota accepted: %d", w.Code)
+	}
+	w, _ = adminReq(t, r, "PUT", "/api/admin/gateway", `{"monthly_quota":"100000"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("set monthly_quota: %d %s", w.Code, w.Body.String())
+	}
+	w, out = adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	if w.Code != http.StatusOK || out["monthly_quota"] != "100000" {
+		t.Fatalf("monthly_quota not persisted: %d %v", w.Code, out)
+	}
+	// 未配置时 GET 返回 "0"(不限)
+	w, _ = adminReq(t, r, "PUT", "/api/admin/gateway", `{"monthly_quota":"0"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("reset monthly_quota: %d", w.Code)
+	}
 	// delete model
 	if w, _ := adminReq(t, r, "DELETE", "/api/admin/models/1", "", hdr); w.Code != http.StatusOK {
 		t.Fatalf("delete model: %d", w.Code)
