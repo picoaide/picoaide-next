@@ -187,6 +187,10 @@ func (a *API) handleEmbeddings(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusTooManyRequests, "RATE_LIMITED", "请求过于频繁,请稍后再试")
 		return
 	}
+	if blocked, msg := a.quotaBlocked(user); blocked {
+		serverauth.WriteError(c, http.StatusTooManyRequests, "QUOTA_EXCEEDED", msg)
+		return
+	}
 	ups, err := MatchModels(a.DB, req.Model)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "模型路由查询失败")
