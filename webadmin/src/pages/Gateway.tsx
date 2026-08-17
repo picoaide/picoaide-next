@@ -54,7 +54,7 @@ export default function Gateway() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [models, setModels] = useState<Model[]>([])
   const [channels, setChannels] = useState<Channel[]>([])
-  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', allow_private: false, search_endpoint: '', server_base_url: '' })
+  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', monthly_quota: '0', allow_private: false, search_endpoint: '', server_base_url: '' })
   const [error, setError] = useState('')
   const [okMsg, setOkMsg] = useState('')
   const [syncMsg, setSyncMsg] = useState('')
@@ -205,6 +205,11 @@ export default function Gateway() {
             <div className="space-y-1">
               <Label>每用户网关限流(次/分钟)</Label>
               <Input value={cfg.rate_limit} onChange={(e) => setCfg({ ...cfg, rate_limit: e.target.value })} />
+            </div>
+            <div className="space-y-1">
+              <Label>每用户默认月配额(token)</Label>
+              <Input value={cfg.monthly_quota} onChange={(e) => setCfg({ ...cfg, monthly_quota: e.target.value })} />
+              <p className="text-xs text-muted-foreground">0 = 不限;员工默认按月统计,可在用户页单独覆盖</p>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-4">

@@ -400,10 +400,15 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 	if rateLimit == "" {
 		rateLimit = "60"
 	}
+	monthlyQuota := settings[serverstore.MonthlyQuotaSetting]
+	if monthlyQuota == "" {
+		monthlyQuota = "0"
+	}
 	allowPrivate := settings["web.allow_private"] == "true"
 	c.JSON(http.StatusOK, gin.H{
 		"default_model":   settings["gateway.default_model"],
 		"rate_limit":      rateLimit,
+		"monthly_quota":   monthlyQuota, // default per-user monthly tokens (0 = unlimited)
 		"allow_private":   allowPrivate,
 		"search_endpoint": settings["web.search_endpoint"],
 		"server_base_url": settings["server.base_url"],
@@ -415,6 +420,7 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	var req struct {
 		DefaultModel   string `json:"default_model"`
 		RateLimit      string `json:"rate_limit"`
+		MonthlyQuota   string `json:"monthly_quota"`
 		AllowPrivate   bool   `json:"allow_private"`
 		SearchEndpoint string `json:"search_endpoint"`
 		ServerBaseURL  string `json:"server_base_url"`
@@ -433,6 +439,12 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 			return
 		}
 	}
+	if req.MonthlyQuota != "" {
+		if n, err := strconv.Atoi(req.MonthlyQuota); err != nil || n < 0 {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "monthly_quota 必须是非负整数")
+			return
+		}
+	}
 	if req.DefaultModel != "" {
 		if err := serverstore.SetSetting(db, "gateway.default_model", req.DefaultModel); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
@@ -441,6 +453,12 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	}
 	if req.RateLimit != "" {
 		if err := serverstore.SetSetting(db, "gateway.rate_limit", req.RateLimit); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+	}
+	if req.MonthlyQuota != "" {
+		if err := serverstore.SetSetting(db, serverstore.MonthlyQuotaSetting, req.MonthlyQuota); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}

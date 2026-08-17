@@ -15,6 +15,8 @@ interface User {
   is_admin: boolean
   status: number
   groups?: string[]
+  quota_tokens?: number | null // null = follow global default, 0 = unlimited, >0 = monthly cap
+  monthly_usage?: number // tokens used this calendar month
 }
 
 interface Department {
@@ -40,6 +42,24 @@ interface ApiToken {
 
 function fmtTime(s: string): string {
   return s ? s.slice(0, 16).replace('T', ' ') : '—'
+}
+
+function fmtTokens(n: number): string {
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`
+  return String(n)
+}
+
+// quotaLabel renders the effective monthly quota for a user row.
+function quotaLabel(q: number | null | undefined): string {
+  if (q === null || q === undefined) return '跟随默认'
+  if (q === 0) return '不限'
+  return `${fmtTokens(q)} / 月`
+}
+
+function usageRate(used: number, quota: number | null | undefined): number {
+  if (!quota || quota <= 0) return 0
+  return Math.min(100, Math.round((used / quota) * 100))
 }
 
 // 部门树选项(缩进层级显示):平铺 → "研发部"、"研发部 / 前端组"
@@ -70,6 +90,8 @@ export default function Users() {
   const [tokens, setTokens] = useState<ApiToken[]>([])
   const [deptUser, setDeptUser] = useState<User | null>(null)
   const [deptSelect, setDeptSelect] = useState('0')
+  const [quotaUser, setQuotaUser] = useState<User | null>(null)
+  const [quotaInput, setQuotaInput] = useState('')
 
   const load = useCallback(async (p: number, search: string) => {
     try {
@@ -182,6 +204,28 @@ export default function Users() {
     }
   }
 
+  // ---- 员工流量配额(跟随全局 / 不限 / 按月限额) ----
+  function openQuota(u: User) {
+    setQuotaUser(u)
+    setQuotaInput(u.quota_tokens === null || u.quota_tokens === undefined ? '' : String(u.quota_tokens))
+  }
+
+  async function saveQuota() {
+    if (!quotaUser) return
+    const v = quotaInput.trim()
+    try {
+      // 空 = 跟随全局默认(清空覆盖);"0" = 不限;正数 = 月配额
+      await request(`/api/admin/users/${quotaUser.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(v === '' ? { quota_clear: true } : { quota_tokens: Number(v) }),
+      })
+      setQuotaUser(null)
+      load(page, q)
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
   const pages = Math.max(1, Math.ceil(total / 20))
 
   return (
@@ -210,6 +254,7 @@ export default function Users() {
             <TableHead>部门</TableHead>
             <TableHead>角色</TableHead>
             <TableHead>状态</TableHead>
+            <TableHead>本月流量</TableHead>
             <TableHead className="text-right">操作</TableHead>
           </TableRow>
         </TableHeader>
@@ -225,9 +270,30 @@ export default function Users() {
               </TableCell>
               <TableCell>{u.is_admin ? <Badge>管理员</Badge> : <Badge variant="secondary">员工</Badge>}</TableCell>
               <TableCell>{u.status === 1 ? <Badge variant="success">启用</Badge> : <Badge variant="destructive">禁用</Badge>}</TableCell>
+              <TableCell>
+                {u.is_admin ? (
+                  <span className="text-xs text-muted-foreground">豁免</span>
+                ) : (
+                  <div className="space-y-0.5">
+                    <div className="text-xs">
+                      <span className="font-medium">{fmtTokens(u.monthly_usage ?? 0)}</span>
+                      <span className="text-muted-foreground"> / {quotaLabel(u.quota_tokens)}</span>
+                    </div>
+                    {u.quota_tokens && u.quota_tokens > 0 && (
+                      <Badge
+                        variant={usageRate(u.monthly_usage ?? 0, u.quota_tokens) >= 90 ? 'destructive' : 'secondary'}
+                        className="h-4 px-1.5 text-[10px]"
+                      >
+                        {usageRate(u.monthly_usage ?? 0, u.quota_tokens)}%
+                      </Badge>
+                    )}
+                  </div>
+                )}
+              </TableCell>
               <TableCell className="text-right space-x-2">
                 <Button size="sm" variant="outline" onClick={() => openTokens(u)}>令牌</Button>
                 <Button size="sm" variant="outline" onClick={() => openDept(u)}>部门</Button>
+                <Button size="sm" variant="outline" onClick={() => openQuota(u)}>配额</Button>
                 <Button size="sm" variant="outline" onClick={() => toggleUser(u)}>
                   {u.status === 1 ? '禁用' : '启用'}
                 </Button>
@@ -288,6 +354,34 @@ export default function Users() {
               </Select>
             </div>
             <Button onClick={saveDept} className="w-full">保存</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 员工流量配额(跟随默认 / 不限 / 按月限额) */}
+      <Dialog open={!!quotaUser} onOpenChange={(open) => { if (!open) setQuotaUser(null) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>流量配额 · {quotaUser?.username}</DialogTitle>
+            <DialogDescription>
+              本月已用 {fmtTokens(quotaUser?.monthly_usage ?? 0)} tokens。配额按月统计,每月 1 日重置。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-1">
+              <Label>月度配额(token 数)</Label>
+              <Input
+                type="number"
+                min={0}
+                placeholder="留空 = 跟随全局默认;0 = 不限"
+                value={quotaInput}
+                onChange={(e) => setQuotaInput(e.target.value)}
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              留空:跟随网关「全局设置」中的默认月配额;输入 0:该员工不限流量;输入正数:按月限额。管理员(admin)不受配额限制。
+            </p>
+            <Button className="w-full" onClick={saveQuota}>保存</Button>
           </div>
         </DialogContent>
       </Dialog>

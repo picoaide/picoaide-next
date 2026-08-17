@@ -280,6 +280,52 @@ func TestDeleteUserCleansKBFolderGrants(t *testing.T) {
 	}
 }
 
+// 0017: quota_tokens tri-state — nil (follow global) / 0 (unlimited) / >0 (cap).
+func TestUserQuotaTriState(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	i64p := func(n int64) *int64 { return &n }
+
+	id, err := CreateUser(db, &User{Username: "quota-tri", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := GetUserByID(db, id)
+	if u.QuotaTokens != nil {
+		t.Fatalf("default quota_tokens = %d, want nil (follow global)", *u.QuotaTokens)
+	}
+
+	u.QuotaTokens = i64p(0) // explicit unlimited
+	if err := UpdateUser(db, u); err != nil {
+		t.Fatal(err)
+	}
+	u2, _ := GetUserByID(db, id)
+	if u2.QuotaTokens == nil || *u2.QuotaTokens != 0 {
+		t.Fatalf("unlimited quota_tokens = %v, want 0", u2.QuotaTokens)
+	}
+
+	u2.QuotaTokens = i64p(5000) // explicit cap
+	if err := UpdateUser(db, u2); err != nil {
+		t.Fatal(err)
+	}
+	u3, _ := GetUserByID(db, id)
+	if u3.QuotaTokens == nil || *u3.QuotaTokens != 5000 {
+		t.Fatalf("capped quota_tokens = %v, want 5000", u3.QuotaTokens)
+	}
+
+	u3.QuotaTokens = nil // back to follow-global
+	if err := UpdateUser(db, u3); err != nil {
+		t.Fatal(err)
+	}
+	u4, _ := GetUserByID(db, id)
+	if u4.QuotaTokens != nil {
+		t.Fatalf("nil quota_tokens read back as %d, want nil", *u4.QuotaTokens)
+	}
+}
+
 func TestSettings(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()

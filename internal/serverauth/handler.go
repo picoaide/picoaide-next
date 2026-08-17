@@ -251,10 +251,15 @@ func (a *API) handleMe(c *gin.Context) {
 }
 
 func userJSON(u *serverstore.User) gin.H {
+	var quota any
+	if u.QuotaTokens != nil {
+		quota = *u.QuotaTokens
+	}
 	return gin.H{
-		"id":       u.ID,
-		"username": u.Username,
-		"is_admin": u.IsAdmin,
-		"status":   u.Status,
+		"id":           u.ID,
+		"username":     u.Username,
+		"is_admin":     u.IsAdmin,
+		"status":       u.Status,
+		"quota_tokens": quota, // null = follow global default, 0 = unlimited, >0 = capped
 	}
 }

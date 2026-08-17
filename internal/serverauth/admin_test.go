@@ -669,3 +669,90 @@ func TestExternalUserPasswordRejected(t *testing.T) {
 		t.Fatalf("external user mutated: source=%s hash=%q", u.Source, u.PasswordHash)
 	}
 }
+
+// 员工流量配额:updateUser 设置 quota_tokens,listUsers 返回配额与本月用量。
+func TestAdminUserQuota(t *testing.T) {
+	r, db := adminRouter(t)
+	defer db.Close()
+
+	// login as admin
+	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", w.Code, w.Body.String())
+	}
+	csrf := out["csrf_token"].(string)
+	cookies := w.Result().Cookies()
+	var sess string
+	for _, ck := range cookies {
+		if ck.Name == sessionCookieName {
+			sess = ck.Value
+		}
+	}
+	hdr := func() map[string]string {
+		return map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
+	}
+
+	// create a regular user
+	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("create user: %d %s", w.Code, w.Body.String())
+	}
+	id := int64(out["user"].(map[string]any)["id"].(float64))
+	// default quota_tokens is null (follow global default)
+	if q, ok := out["user"].(map[string]any)["quota_tokens"]; ok && q != nil {
+		t.Fatalf("default quota_tokens = %v, want null", q)
+	}
+
+	// record usage this month, set an explicit quota, then verify the list
+	if _, err := serverstore.RecordUsage(db, id, "deepseek-chat", 100, 50); err != nil {
+		t.Fatal(err)
+	}
+	w, out = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", id), `{"quota_tokens":5000}`, hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("set quota: %d %s", w.Code, w.Body.String())
+	}
+	w, out = doJSON(t, r, "GET", "/api/admin/users", "", hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("list users: %d %s", w.Code, w.Body.String())
+	}
+	found := false
+	for _, u := range out["users"].([]any) {
+		um := u.(map[string]any)
+		if um["username"] == "alice" {
+			found = true
+			if q := um["quota_tokens"].(float64); q != 5000 {
+				t.Fatalf("quota_tokens = %v, want 5000", q)
+			}
+			if mu := um["monthly_usage"].(float64); mu != 150 {
+				t.Fatalf("monthly_usage = %v, want 150", mu)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("alice missing from user list")
+	}
+
+	// negative quota rejected
+	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", id), `{"quota_tokens":-1}`, hdr())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("negative quota = %d, want 400", w.Code)
+	}
+
+	// quota_clear resets to NULL (follow global default)
+	w, out = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", id), `{"quota_clear":true}`, hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("clear quota: %d %s", w.Code, w.Body.String())
+	}
+	w, out = doJSON(t, r, "GET", "/api/admin/users", "", hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("list users: %d %s", w.Code, w.Body.String())
+	}
+	for _, u := range out["users"].([]any) {
+		um := u.(map[string]any)
+		if um["username"] == "alice" {
+			if q, present := um["quota_tokens"]; !present || q != nil {
+				t.Fatalf("quota_tokens after clear = %v, want null", q)
+			}
+		}
+	}
+}
