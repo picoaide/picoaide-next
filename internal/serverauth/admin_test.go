@@ -199,7 +199,7 @@ func TestAdminUsage(t *testing.T) {
 	recordUsage(t, db, 1, "deepseek-chat", 10, 20)
 	recordUsage(t, db, 1, "deepseek-chat", 30, 40)
 
-	w, out = doJSON(t, r, "GET", "/api/admin/usage?group=day", "", hdr)
+	w, out = doJSON(t, r, "GET", "/api/admin/usage?group=day&from="+time.Now().Format("2006-01-02")+"&to="+time.Now().Format("2006-01-02"), "", hdr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("usage: %d %s", w.Code, w.Body.String())
 	}
@@ -214,6 +214,92 @@ func TestAdminUsage(t *testing.T) {
 	// invalid group
 	if w, _ := doJSON(t, r, "GET", "/api/admin/usage?group=nope", "", hdr); w.Code != http.StatusBadRequest {
 		t.Fatalf("bad group: %d", w.Code)
+	}
+	// 缺省 from/to 默认近 90 天窗口且按日补零(审计中2)
+	if w, out := doJSON(t, r, "GET", "/api/admin/usage?group=day", "", hdr); w.Code != http.StatusOK {
+		t.Fatalf("usage default window: %d %s", w.Code, w.Body.String())
+	} else if n := len(out["rows"].([]any)); n != usageDefaultWindowDays {
+		t.Fatalf("usage default window rows = %d, want %d", n, usageDefaultWindowDays)
+	}
+}
+
+// TestAdminUsageRangeValidation: 服务端区间校验与截断(审计中2):
+//  1. to < from → 400 VALIDATION;
+//  2. from/to 缺省 → 服务端默认近 90 天窗口(100 天前行不在内,10 天前在内);
+//  3. group=user 超上限 → 截断并返回 truncated=true。
+func TestAdminUsageRangeValidation(t *testing.T) {
+	r, db := adminRouter(t)
+	defer db.Close()
+	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	csrf := out["csrf_token"].(string)
+	sess := ""
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == sessionCookieName {
+			sess = ck.Value
+		}
+	}
+	hdr := map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
+
+	// 1) to < from → 400
+	if w, _ := doJSON(t, r, "GET", "/api/admin/usage?group=day&from=2026-08-10&to=2026-08-01", "", hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("to<from: %d, want 400", w.Code)
+	}
+
+	// 2) 缺省窗口:100 天前的行应被排除,10 天前的行应包含
+	if _, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, created_at)
+		VALUES (1, 'm-old', 5, 5, datetime('now','localtime','-100 days'))`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, created_at)
+		VALUES (1, 'm-recent', 7, 3, datetime('now','localtime','-10 days'))`); err != nil {
+		t.Fatal(err)
+	}
+	w, out = doJSON(t, r, "GET", "/api/admin/usage?group=model", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("usage default window: %d %s", w.Code, w.Body.String())
+	}
+	labels := map[string]bool{}
+	for _, row := range out["rows"].([]any) {
+		labels[row.(map[string]any)["label"].(string)] = true
+	}
+	if labels["m-old"] {
+		t.Fatal("100-day-old row included in default window")
+	}
+	if !labels["m-recent"] {
+		t.Fatal("10-day-old row missing from default window")
+	}
+
+	// 3) group=user 截断:501 个用户各一条用量 → 返回 ≤500 行且 truncated=true
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 501; i++ {
+		res, err := tx.Exec(`INSERT INTO users (username, source, is_admin, status) VALUES (?, 'local', 0, 1)`, fmt.Sprintf("bulk%03d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, created_at)
+			VALUES (?, 'm', 1, 1, datetime('now','localtime'))`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	w, out = doJSON(t, r, "GET", "/api/admin/usage?group=user", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("usage group=user: %d %s", w.Code, w.Body.String())
+	}
+	if n := len(out["rows"].([]any)); n > maxUserUsageRows {
+		t.Fatalf("group=user rows = %d, want <= %d", n, maxUserUsageRows)
+	}
+	if tr, _ := out["truncated"].(bool); !tr {
+		t.Fatal("group=user truncated flag missing/false")
 	}
 }
 

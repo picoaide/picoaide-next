@@ -43,6 +43,25 @@ func TestApplyMigrations(t *testing.T) {
 	}
 }
 
+// TestUsageCreatedAtIndex: 迁移 0025 必须创建 created_at 单列索引,
+// 否则 UsageAggregate 的纯日期范围聚合会全表扫描(审计高3)。
+func TestUsageCreatedAtIndex(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatalf("ApplyMigrations: %v", err)
+	}
+	var name string
+	if err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_usage_time'`).Scan(&name); err != nil {
+		t.Fatalf("idx_usage_time missing after migration: %v", err)
+	}
+	// 索引应覆盖 created_at(纯日期范围过滤的驱动列)
+	if _, err := db.Exec(`SELECT COUNT(*) FROM usage WHERE created_at >= '2026-01-01' AND created_at < '2026-02-01'`); err != nil {
+		t.Fatalf("query with created_at range: %v", err)
+	}
+}
+
 func TestApplyMigrationsFailure(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()

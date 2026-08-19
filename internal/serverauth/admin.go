@@ -555,6 +555,14 @@ func (a *AdminAPI) revokeToken(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+// usageDefaultWindowDays 是 /api/admin/usage 缺省 from/to 时的默认回溯窗口
+// (天),防止无界全表聚合(审计中2)。
+const usageDefaultWindowDays = 90
+
+// maxUserUsageRows 是 group=user 聚合的最大返回行数,超出截断并置
+// truncated=true(审计中2)。
+const maxUserUsageRows = 500
+
 func (a *AdminAPI) usage(c *gin.Context) {
 	// 日期解析失败 → 400,而不是静默无界范围(审计2026-L7)
 	fromRaw := c.DefaultQuery("from", "")
@@ -573,6 +581,20 @@ func (a *AdminAPI) usage(c *gin.Context) {
 			return
 		}
 	}
+	// to < from → 400,拒绝静默空结果(审计中2)
+	if !from.IsZero() && !to.IsZero() && from.After(to) {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "起始日期不能晚于结束日期")
+		return
+	}
+	// 缺省区间 → 服务端默认近 90 天窗口,避免无界全表聚合(审计中2)
+	if from.IsZero() && to.IsZero() {
+		to = time.Now()
+		from = to.AddDate(0, 0, -usageDefaultWindowDays+1)
+	} else if from.IsZero() {
+		from = to.AddDate(0, 0, -usageDefaultWindowDays+1)
+	} else if to.IsZero() {
+		to = from.AddDate(0, 0, usageDefaultWindowDays-1)
+	}
 	group := c.DefaultQuery("group", "day")
 	if group != "day" && group != "week" && group != "month" && group != "model" && group != "user" {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "group 必须是 day|week|month|model|user")
@@ -587,7 +609,14 @@ func (a *AdminAPI) usage(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "统计失败")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"rows": rows, "group": group})
+	// group=user 行数上限:超出截断并置 truncated,避免超大响应拖垮
+	// 前端渲染与网络(审计中2)
+	truncated := false
+	if group == "user" && len(rows) > maxUserUsageRows {
+		rows = rows[:maxUserUsageRows]
+		truncated = true
+	}
+	c.JSON(http.StatusOK, gin.H{"rows": rows, "group": group, "truncated": truncated})
 }
 
 func currentAdmin(c *gin.Context) *serverstore.User {
