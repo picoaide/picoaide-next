@@ -33,6 +33,7 @@ export default function Departments() {
   const [depts, setDepts] = useState<Department[]>([])
   const [users, setUsers] = useState<UserOption[]>([])
   const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false) // L10:提交/删除双击守卫
   const [deptDialog, setDeptDialog] = useState(false)
   const [deptForm, setDeptForm] = useState({ id: 0, name: '', parent_id: '0', leader_id: '0', description: '', budget_money: '' })
 
@@ -44,12 +45,30 @@ export default function Departments() {
       ])
       setDepts(d.departments ?? [])
       setUsers(u.users ?? [])
+      setError('') // 成功后清空错误(中3 同口径)
     } catch (err: any) {
       setError(err.message)
     }
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  // 中6:沿祖先链找第一个配置了预算的部门(继承预算语义:
+  // 部门预算约束其全部子部门成员,子部门自身无预算 ≠ 不限)。
+  function inheritedBudget(d: Department): { name: string; budget: number } | undefined {
+    let pid = d.parent_id
+    let guard = 0
+    while (pid !== 0 && guard < 100) {
+      guard++
+      const p = depts.find((x) => x.id === pid)
+      if (!p) return undefined
+      if (p.budget_money !== null && p.budget_money !== undefined && p.budget_money > 0) {
+        return { name: p.name, budget: p.budget_money }
+      }
+      pid = p.parent_id
+    }
+    return undefined
+  }
 
   function openDeptEdit(d?: Department) {
     setDeptForm({
@@ -64,6 +83,7 @@ export default function Departments() {
   }
 
   async function saveDeptForm() {
+    if (busy) return // L10:双击守卫
     const payload: Record<string, any> = {
       name: deptForm.name,
       parent_id: Number(deptForm.parent_id),
@@ -73,6 +93,7 @@ export default function Departments() {
     // 预算:留空 = 不变;0 = 清除(不限);>0 = 月度金额预算
     if (deptForm.budget_money.trim() !== '') payload.budget_money = Number(deptForm.budget_money)
     const body = JSON.stringify(payload)
+    setBusy(true)
     try {
       if (deptForm.id > 0) {
         await request(`/api/admin/departments/${deptForm.id}`, { method: 'PUT', body })
@@ -83,16 +104,22 @@ export default function Departments() {
       load()
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(false)
     }
   }
 
   async function removeDept(d: Department) {
+    if (busy) return // L10:双击守卫
     if (!window.confirm(`确定删除部门「${d.name}」?有关联(成员/子部门/授权)时将被拒绝。`)) return
+    setBusy(true)
     try {
       await request(`/api/admin/departments/${d.id}`, { method: 'DELETE' })
       load()
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -137,7 +164,15 @@ export default function Departments() {
                 <TableCell>{d.child_count}</TableCell>
                 <TableCell>
                   {d.budget_money === null || d.budget_money === undefined || d.budget_money <= 0 ? (
-                    <span className="text-xs text-muted-foreground">不限</span>
+                    // 中6:本部门无预算 ≠ 不限——祖先部门预算仍约束其成员
+                    (() => {
+                      const ib = inheritedBudget(d)
+                      return ib ? (
+                        <span className="text-xs text-muted-foreground" title={`受 ${ib.name} 部门预算约束`}>继承上级({ib.name} ¥{fmtMoney(ib.budget)})</span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">不限</span>
+                      )
+                    })()
                   ) : (
                     <div className="space-y-0.5">
                       <div className="text-xs">
@@ -213,6 +248,10 @@ export default function Departments() {
                   ))}
                 </SelectContent>
               </Select>
+              {/* L15:主管候选截断提示(接口 size 上限 200) */}
+              {users.length >= 200 && (
+                <p className="text-xs text-muted-foreground">用户较多,仅展示前 200 名,超出部分无法在此选择主管</p>
+              )}
             </div>
             <div className="space-y-1">
               <Label htmlFor="dept-desc">描述(可选)</Label>
