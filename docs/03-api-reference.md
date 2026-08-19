@@ -50,17 +50,17 @@
 | PUT | `/api/admin/providers/:id` | 更新上游 |
 | DELETE | `/api/admin/providers/:id` | 删除上游 |
 | GET | `/api/admin/models` | 模型列表 |
-| POST | `/api/admin/models` | 创建模型 `{name, provider_id, display_name?, default_params?, input_price_per_1m?, output_price_per_1m?}`(价格 = 元/百万 token,缺省 = 未定价) |
-| PUT | `/api/admin/models/:id` | 更新模型(价格留空不覆盖;价格修改只影响之后产生的费用) |
+| POST | `/api/admin/models` | 创建模型 `{name, provider_id, display_name?, default_params?, input_price_per_1m?, output_price_per_1m?, offpeak_discount?}`(价格 = 元/百万 token,缺省 = 未定价;offpeak_discount 0<d≤1 低谷折扣) |
+| PUT | `/api/admin/models/:id` | 更新模型(价格/折扣留空不覆盖;修改只影响之后产生的费用) |
 | DELETE | `/api/admin/models/:id` | 删除模型 |
-| GET | `/api/admin/gateway` | 网关配置:`{rate_limit, monthly_quota, monthly_quota_money, default_model, allow_private, search_endpoint}` |
-| PUT | `/api/admin/gateway` | 写网关配置(settings:`gateway.rate_limit`、`gateway.default_model`、`usage.monthly_quota`(员工默认月 token 配额)、`usage.monthly_quota_money`(员工默认月金额配额)、`web.allow_private`、`web.search_endpoint`) |
+| GET | `/api/admin/gateway` | 网关配置:`{rate_limit, monthly_quota, monthly_quota_money, peak_windows, default_model, allow_private, search_endpoint}` |
+| PUT | `/api/admin/gateway` | 写网关配置(settings:`gateway.rate_limit`、`gateway.default_model`、`usage.monthly_quota`(员工默认月 token 配额)、`usage.monthly_quota_money`(员工默认月金额配额)、`usage.peak_windows`(高峰时段 JSON,北京时间,空=无峰谷)、`web.allow_private`、`web.search_endpoint`) |
 
 ## 5. AI 网关(客户端用,Bearer)
 
 ### POST `/v1/chat/completions`
 
-OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹配上游 provider 代理转发;非流式/流式(SSE)均支持;响应按 per-user 令牌桶限流(`gateway.rate_limit`,默认 60/min),计量写入 usage 表(含按模型定价折算的 `cost` 费用,元);转发前按**月度 token 配额与金额配额**检查(`EffectiveQuota` / `EffectiveMoneyQuota`),任一超限返回 429 `QUOTA_EXCEEDED`(admin 豁免)。
+OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹配上游 provider 代理转发;非流式/流式(SSE)均支持;响应按 per-user 令牌桶限流(`gateway.rate_limit`,默认 60/min),计量写入 usage 表(含按模型定价折算的 `cost` 费用,元;配置 `usage.peak_windows` 后,高峰窗口外按模型 `offpeak_discount` 打折);转发前按**月度 token 配额 / 金额配额 / 部门预算**检查(`EffectiveQuota` / `EffectiveMoneyQuota` / `EffectiveDeptBudget`),任一超限返回 429 `QUOTA_EXCEEDED`(admin 豁免)。
 
 ### GET `/v1/models`
 

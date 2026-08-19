@@ -196,3 +196,24 @@
 5. `bf113e9` webadmin Users/Gateway:用户金额配额对话框;网关全局金额配额;模型价格列+编辑弹窗
 
 **验证**:go test ./internal/... 8 包全绿;webadmin 35 passed + typecheck 0 + build 成功;已 commit。
+
+## Round 12(2026-08-19):DeepSeek 峰谷价格 + 部门金额预算
+
+**背景**:用户要求继续企业级高级项,且必须考虑 DeepSeek 峰谷价格。
+
+**事实核验**(子代理,官方文档直连 + GitHub 镜像/源码双通道,报告见 `docs/research-usage-page/README.md` 与定价核验结论):
+- DeepSeek 官方当前政策(2026-08-16 生效):**高峰 = 北京时间 09:00-12:00、14:00-18:00**,其余为空闲时段,**空闲价 = 高峰价 × 50%**(含缓存命中价);适用 deepseek-v4-flash/pro。
+- 记忆中"16:30-00:30 五折、deepseek-chat/reasoner"是 **2025 旧政策**,已废弃。
+- 主流网关:new-api 支持时段折扣表达式(billingexpr hour(tz));one-api/LiteLLM/Helicone 均无时段计价。
+
+**实施**(TDD 红-绿-commit):
+1. `b37adcc` serverstore 0023 `models.offpeak_discount`;费用记录时按时刻折算
+2. `a270c61` **峰谷窗口改为配置驱动**:settings `usage.peak_windows`(高峰时段 JSON,北京时间 UTC+8 判定,半开区间);窗口外(空闲)按 offpeak_discount 打折;未配置窗口 → 全标准价(防误打折);DeepSeek 当前政策为默认配置
+3. `7f6f93a` + `b63d4c8` admin API:模型 offpeak_discount 增改校验(0<d≤1);网关 peak_windows 读写 + 非法 JSON 拒绝
+4. `b3396dd` + `d318ebd` webadmin:模型价格对话框谷折扣 + deepseek 渠道自动预填 0.5;网关全局设置高峰时段配置 + 「DeepSeek 当前政策」一键预设;修正旧政策文案
+5. `4ee15d6` serverstore 0024 `groups.budget_money` 部门预算;`EffectiveDeptBudget`(归属部门+祖先链,链上全部预算生效,父=子树封顶)、`DeptMonthlyCost`/Batch(树内 SUM(cost))
+6. `4f221c7` 网关 deptBudgetBlocked:任一链上部门预算超限 → 429(admin 豁免)
+7. `dd8b7dd` admin API:部门预算设置/清除、列表附 budget_money + monthly_cost(批量)
+8. `45489c9` webadmin 部门页:预算列(进度条 80% 琥珀/超额红)+ 编辑弹窗预算字段
+
+**验证**:go test ./internal/... 全绿(serverstore 17+ 新增用例);webadmin 40 passed + typecheck 0 + build;已 commit。
