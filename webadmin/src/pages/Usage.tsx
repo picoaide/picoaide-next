@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { VChart } from '@visactor/react-vchart'
 import type { ISpec } from '@visactor/vchart'
 import {
-  Activity, Coins, ArrowDownToLine, ArrowUpFromLine, WalletCards, Download,
+  Activity, Coins, ArrowDownToLine, ArrowUpFromLine, WalletCards, Download, CircleDollarSign, TriangleAlert,
 } from 'lucide-react'
 import { request } from '../api'
 import { Button } from '../components/ui/button'
@@ -16,8 +16,8 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../components/ui/dialog'
 import {
-  fmtTokens, fmtFull, usageRate, quotaPercent, quotaOver,
-  rangePreset, monthRange, ymd,
+  fmtTokens, fmtFull, fmtMoney, fmtMoneyFull, usageRate, quotaPercent, quotaOver,
+  moneyRate, moneyPercent, moneyOver, rangePreset, monthRange, ymd,
 } from '../lib/format'
 
 interface UsageRow {
@@ -27,6 +27,7 @@ interface UsageRow {
   requests: number
   embed_requests?: number
   embed_tokens?: number
+  cost?: number // 0022:该桶费用合计(元),未定价模型贡献 0
 }
 
 interface QuotaUser {
@@ -35,10 +36,14 @@ interface QuotaUser {
   is_admin: boolean
   quota_tokens: number | null
   monthly_usage: number
+  quota_money: number | null // 0022
+  monthly_cost: number // 0022
 }
 
 type Group = 'day' | 'week' | 'month' | 'model' | 'user'
 type ChartTab = 'trend' | 'proportion' | 'rank'
+// 统计口径:tokens(原指标)或 money(金额,0022 企业费用维度)
+type Metric = 'tokens' | 'money'
 
 const RANK_TOP = 10
 
@@ -48,12 +53,15 @@ const GROUP_LABEL: Record<Group, string> = {
 
 export default function Usage() {
   const [group, setGroup] = useState<Group>('day')
+  const [metric, setMetric] = useState<Metric>('money') // 企业端第一指标 = 金额
   // 默认近 30 天:避免无界全表聚合(修复 F5)
   const [from, setFrom] = useState(() => rangePreset(30).from)
   const [to, setTo] = useState(() => rangePreset(30).to)
   const [rows, setRows] = useState<UsageRow[]>([])
   const [quotaUsers, setQuotaUsers] = useState<QuotaUser[]>([])
   const [defaultQuota, setDefaultQuota] = useState<number | null>(null)
+  const [defaultMoneyQuota, setDefaultMoneyQuota] = useState<number | null>(null)
+  const [hasUnpricedModels, setHasUnpricedModels] = useState(false) // 存在未定价模型(金额口径提示)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [chartTab, setChartTab] = useState<ChartTab>('trend')
@@ -86,16 +94,25 @@ export default function Usage() {
     if (g !== group) setGroup(g)
   }
 
-  // 用户列表 + 全局默认配额只拉一次(配额面板与查询区间无关,恒为当月)
+  // 用户列表 + 全局默认配额(含金额) + 模型定价状态只拉一次
   useEffect(() => {
     Promise.all([
       request('/api/admin/users?size=200'),
       request('/api/admin/gateway').catch(() => null),
-    ]).then(([users, gw]: [any, any]) => {
+      request('/api/admin/models').catch(() => null),
+    ]).then(([users, gw, models]: [any, any, any]) => {
       const all: QuotaUser[] = (users.users ?? []).filter((u: QuotaUser) => !u.is_admin)
       setQuotaUsers(all)
       const q = gw?.monthly_quota
       setDefaultQuota(q === undefined || q === null || q === '' ? null : Number(q))
+      const mq = gw?.monthly_quota_money
+      setDefaultMoneyQuota(mq === undefined || mq === null || mq === '' ? null : Number(mq))
+      // 未定价模型 = 价格缺省或为 0 → 金额配额可能被低估,显式提示
+      const unpriced = (models?.models ?? []).some(
+        (m: any) => m?.input_price_per_1m === null || m?.input_price_per_1m === undefined || Number(m.input_price_per_1m) <= 0
+          || m?.output_price_per_1m === null || m?.output_price_per_1m === undefined || Number(m.output_price_per_1m) <= 0
+      )
+      setHasUnpricedModels(unpriced)
     }).catch(() => { /* 配额面板失败不阻塞主查询 */ })
   }, [])
 
@@ -177,52 +194,62 @@ export default function Usage() {
 
   // ---- 汇总统计 ----
   const totals = useMemo(() => {
-    let requests = 0, prompt = 0, completion = 0, embed = 0, embedReq = 0
+    let requests = 0, prompt = 0, completion = 0, embed = 0, embedReq = 0, cost = 0
     for (const r of rows) {
       requests += r.requests
       prompt += r.prompt_tokens
       completion += r.completion_tokens
       embed += r.embed_tokens ?? 0
       embedReq += r.embed_requests ?? 0
+      cost += r.cost ?? 0
     }
-    return { requests, prompt, completion, total: prompt + completion, embed, embedReq, chatReq: requests - embedReq }
+    return { requests, prompt, completion, total: prompt + completion, embed, embedReq, chatReq: requests - embedReq, cost }
   }, [rows])
 
   // ---- 配额统计(含"跟随全局默认"的员工,修复 F4)----
   const quotaStats = useMemo(() => {
     const eff = (u: QuotaUser): number | null => u.quota_tokens ?? defaultQuota
+    const effMoney = (u: QuotaUser): number | null => u.quota_money ?? defaultMoneyQuota
     const tracked = quotaUsers.filter((u) => {
       const q = eff(u)
-      return q !== null && q > 0
+      const mq = effMoney(u)
+      return (q !== null && q > 0) || (mq !== null && mq > 0)
     })
-    const over = tracked.filter((u) => quotaOver(u.monthly_usage, eff(u)))
-    const near = tracked.filter((u) => !quotaOver(u.monthly_usage, eff(u)) && usageRate(u.monthly_usage, eff(u)) >= 90)
-    const sorted = [...tracked].sort((a, b) => (b.monthly_usage / eff(b)!) - (a.monthly_usage / eff(a)!))
-    return { over, near, sorted, eff }
-  }, [quotaUsers, defaultQuota])
+    const over = tracked.filter((u) => quotaOver(u.monthly_usage, eff(u)) || moneyOver(u.monthly_cost, effMoney(u)))
+    const near = tracked.filter((u) => !over.includes(u) &&
+      ((!quotaOver(u.monthly_usage, eff(u)) && usageRate(u.monthly_usage, eff(u)) >= 90) ||
+        (!moneyOver(u.monthly_cost, effMoney(u)) && moneyRate(u.monthly_cost, effMoney(u)) >= 90)))
+    const sorted = [...tracked].sort((a, b) => {
+      const ra = Math.max(usageRate(a.monthly_usage, eff(a)), moneyRate(a.monthly_cost, effMoney(a)))
+      const rb = Math.max(usageRate(b.monthly_usage, eff(b)), moneyRate(b.monthly_cost, effMoney(b)))
+      return rb - ra
+    })
+    return { over, near, sorted, eff, effMoney }
+  }, [quotaUsers, defaultQuota, defaultMoneyQuota])
 
   // ---- 图表数据 ----
   // 趋势图:服务端已按日/周/月补零(缺桶填 0),前端直接渲染
+  // 口径切换:tokens(原值)或 money(费用,¥)
   const trendData = useMemo(
-    () => rows.map((r) => ({ label: r.label, total: r.prompt_tokens + r.completion_tokens })),
-    [rows]
+    () => rows.map((r) => ({ label: r.label, value: metric === 'money' ? (r.cost ?? 0) : r.prompt_tokens + r.completion_tokens })),
+    [rows, metric]
   )
 
   const pieData = useMemo(
-    () => rows.map((r) => ({ name: r.label, value: r.prompt_tokens + r.completion_tokens })),
-    [rows]
+    () => rows.map((r) => ({ name: r.label, value: metric === 'money' ? (r.cost ?? 0) : r.prompt_tokens + r.completion_tokens })),
+    [rows, metric]
   )
 
   // 排行:Top N + "其他"桶(修复 F3,避免 group=user 时 200+ 柱)
   const rankData = useMemo(() => {
     const sorted = [...rows]
-      .map((r) => ({ label: r.label, total: r.prompt_tokens + r.completion_tokens }))
-      .sort((a, b) => b.total - a.total)
+      .map((r) => ({ label: r.label, value: metric === 'money' ? (r.cost ?? 0) : r.prompt_tokens + r.completion_tokens }))
+      .sort((a, b) => b.value - a.value)
     if (sorted.length <= RANK_TOP) return sorted
     const top = sorted.slice(0, RANK_TOP)
-    const rest = sorted.slice(RANK_TOP).reduce((s, r) => s + r.total, 0)
-    return [...top, { label: '其他', total: rest }]
-  }, [rows])
+    const rest = sorted.slice(RANK_TOP).reduce((s, r) => s + r.value, 0)
+    return [...top, { label: '其他', value: rest }]
+  }, [rows, metric])
 
   // 明细过滤:饼图/排行点击联动
   const filteredRows = useMemo(
@@ -230,14 +257,17 @@ export default function Usage() {
     [rows, filterName]
   )
 
+  const yLabel = metric === 'money' ? '费用(元)' : 'tokens'
+  const axisFmt = (v: any) => (metric === 'money' ? fmtMoney(Number(v)) : fmtTokens(Number(v)))
+
   const trendSpec: ISpec = {
     type: 'line',
     data: { values: trendData },
     xField: 'label',
-    yField: 'total',
+    yField: 'value',
     point: { visible: true },
     axes: [
-      { orient: 'left', title: { visible: true, text: 'tokens' }, label: { formatMethod: (v: any) => fmtTokens(Number(v)) } },
+      { orient: 'left', title: { visible: true, text: yLabel }, label: { formatMethod: axisFmt } },
       { orient: 'bottom', label: { visible: true, style: { fontSize: 11 } } },
     ],
     tooltip: { visible: true },
@@ -258,10 +288,10 @@ export default function Usage() {
     type: 'bar',
     data: { values: rankData },
     xField: 'label',
-    yField: 'total',
+    yField: 'value',
     axes: [
       { orient: 'left', label: { visible: true, style: { fontSize: 11 } } },
-      { orient: 'bottom', title: { visible: true, text: 'tokens' }, label: { formatMethod: (v: any) => fmtTokens(Number(v)) } },
+      { orient: 'bottom', title: { visible: true, text: yLabel }, label: { formatMethod: axisFmt } },
     ],
     tooltip: { visible: true },
   }
@@ -287,12 +317,12 @@ export default function Usage() {
 
   const drillSpec: ISpec = {
     type: 'line',
-    data: { values: drillRows.map((r) => ({ label: r.label, total: r.prompt_tokens + r.completion_tokens })) },
+    data: { values: drillRows.map((r) => ({ label: r.label, value: metric === 'money' ? (r.cost ?? 0) : r.prompt_tokens + r.completion_tokens })) },
     xField: 'label',
-    yField: 'total',
+    yField: 'value',
     point: { visible: true },
     axes: [
-      { orient: 'left', title: { visible: true, text: 'tokens' }, label: { formatMethod: (v: any) => fmtTokens(Number(v)) } },
+      { orient: 'left', title: { visible: true, text: yLabel }, label: { formatMethod: axisFmt } },
       { orient: 'bottom', label: { visible: true, style: { fontSize: 11 } } },
     ],
     tooltip: { visible: true },
@@ -305,21 +335,23 @@ export default function Usage() {
   }, [compareTotal, totals.total])
 
   const statCards = [
-    { title: '请求数', value: totals.requests, icon: Activity, desc: `chat ${totals.chatReq.toLocaleString()} · embedding ${totals.embedReq.toLocaleString()}` },
     {
-      title: '总 tokens', value: totals.total, icon: Coins,
-      desc: compareDelta === null ? '输入 + 输出(不含 embedding)'
-        : `输入 + 输出(不含 embedding) · 环比 ${compareDelta >= 0 ? '+' : ''}${compareDelta}%`,
+      title: '总费用', value: totals.cost, icon: CircleDollarSign,
+      desc: compareDelta === null ? '按模型定价折算(未定价模型计 0)'
+        : `按模型定价折算 · 环比 ${compareDelta >= 0 ? '+' : ''}${compareDelta}%`,
+      money: true,
     },
+    { title: '请求数', value: totals.requests, icon: Activity, desc: `chat ${totals.chatReq.toLocaleString()} · embedding ${totals.embedReq.toLocaleString()}` },
+    { title: '总 tokens', value: totals.total, icon: Coins, desc: '输入 + 输出(不含 embedding)' },
     { title: '输入 tokens', value: totals.prompt, icon: ArrowDownToLine, desc: '含 embedding ' + fmtTokens(totals.embed) },
     { title: '输出 tokens', value: totals.completion, icon: ArrowUpFromLine, desc: 'completion 部分' },
   ]
 
-  // 导出 CSV(带 BOM 保证 Excel 中文不乱码)
+  // 导出 CSV(带 BOM 保证 Excel 中文不乱码;0022 增 cost 列)
   function exportCsv() {
     if (rows.length === 0) return
-    const head = ['label', 'requests', 'prompt_tokens', 'completion_tokens', 'total_tokens']
-    const lines = rows.map((r) => [r.label, r.requests, r.prompt_tokens, r.completion_tokens, r.prompt_tokens + r.completion_tokens].join(','))
+    const head = ['label', 'requests', 'prompt_tokens', 'completion_tokens', 'total_tokens', 'cost']
+    const lines = rows.map((r) => [r.label, r.requests, r.prompt_tokens, r.completion_tokens, r.prompt_tokens + r.completion_tokens, (r.cost ?? 0).toFixed(4)].join(','))
     const csv = '\uFEFF' + [head.join(','), ...lines].join('\n')
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
@@ -334,11 +366,17 @@ export default function Usage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold">用量统计</h1>
-        <span className="text-sm text-muted-foreground">token 用量与配额对照(管理员豁免)</span>
+        <span className="text-sm text-muted-foreground">费用与配额对照(金额/token 双维度,管理员豁免)</span>
       </div>
       {error && <div className="text-sm text-destructive">{error}</div>}
+      {hasUnpricedModels && (
+        <div className="flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          <TriangleAlert className="h-4 w-4" />
+          存在未配置价格的模型(网关「模型管理」):其费用按 0 计,金额配额可能被低估。
+        </div>
+      )}
 
-      {/* 筛选区:分组 + 快捷区间 + 日期 */}
+      {/* 筛选区:分组 + 快捷区间 + 日期 + 统计口径 */}
       <Card>
         <CardContent className="flex flex-wrap items-end gap-3 pt-6">
           <div>
@@ -351,6 +389,16 @@ export default function Usage() {
                 <SelectItem value="month">按月</SelectItem>
                 <SelectItem value="model">按模型</SelectItem>
                 <SelectItem value="user">按用户</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <Label className="mb-1 block text-sm text-muted-foreground">统计口径</Label>
+            <Select value={metric} onValueChange={(v) => setMetric(v as Metric)}>
+              <SelectTrigger className="w-28" aria-label="统计口径"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="money">金额(元)</SelectItem>
+                <SelectItem value="tokens">tokens</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -374,8 +422,8 @@ export default function Usage() {
         </CardContent>
       </Card>
 
-      {/* 汇总统计卡(对齐企业面板 stat-card 模式) */}
-      <div data-testid="stat-cards" className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      {/* 汇总统计卡:总费用为第一指标(企业面板 stat-card 模式) */}
+      <div data-testid="stat-cards" className="grid grid-cols-2 gap-4 lg:grid-cols-5">
         {statCards.map((c) => (
           <Card key={c.title}>
             <CardContent className="pt-6">
@@ -388,9 +436,9 @@ export default function Usage() {
               ) : (
                 <div
                   className="mt-1 text-2xl font-bold tabular-nums tracking-tight"
-                  title={fmtFull(c.value)}
+                  title={c.money ? fmtMoneyFull(c.value) : fmtFull(c.value)}
                 >
-                  {fmtTokens(c.value)}
+                  {c.money ? `¥${fmtMoney(c.value)}` : fmtTokens(c.value)}
                 </div>
               )}
               <div className="mt-1 text-xs text-muted-foreground">{c.desc}</div>
@@ -406,7 +454,11 @@ export default function Usage() {
             <div className="flex items-center gap-2">
               <Coins className="h-4 w-4 text-muted-foreground" />
               <CardTitle className="text-base">用量分析</CardTitle>
-              <CardDescription>Total: {fmtTokens(totals.total)} tokens</CardDescription>
+              <CardDescription>
+                {metric === 'money'
+                  ? `Total: ¥${fmtMoney(totals.cost)}`
+                  : `Total: ${fmtTokens(totals.total)} tokens`}
+              </CardDescription>
             </div>
             <TabsList>
               <TabsTrigger value="trend">趋势</TabsTrigger>
@@ -435,7 +487,7 @@ export default function Usage() {
         </Tabs>
       </Card>
 
-      {/* 配额占用面板 */}
+      {/* 配额占用面板(token + 金额双维度) */}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
@@ -450,45 +502,81 @@ export default function Usage() {
           </div>
           <CardDescription>
             按自然月统计(每月 1 日重置),与上方查询区间无关;管理员豁免。
-            {defaultQuota !== null && defaultQuota > 0 && ` 全局默认配额 ${fmtTokens(defaultQuota)}/月(跟随默认的员工已计入)`}
+            {defaultQuota !== null && defaultQuota > 0 && ` 默认 token 配额 ${fmtTokens(defaultQuota)}/月`}
+            {defaultMoneyQuota !== null && defaultMoneyQuota > 0 && ` · 默认金额配额 ¥${fmtMoney(defaultMoneyQuota)}/月`}
+            (跟随默认的员工已计入)
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-3">
+        <CardContent className="space-y-4">
           {quotaStats.sorted.length === 0 ? (
             <div className="text-sm text-muted-foreground">暂无配额数据</div>
           ) : (
             <div data-testid="quota-list">
               {quotaStats.sorted.map((u) => {
                 const q = quotaStats.eff(u)
+                const mq = quotaStats.effMoney(u)
                 const rate = usageRate(u.monthly_usage, q)
                 const pct = quotaPercent(u.monthly_usage, q)
-                const over = quotaOver(u.monthly_usage, q)
+                const over = quotaOver(u.monthly_usage, q) || moneyOver(u.monthly_cost, mq)
+                const mRate = moneyRate(u.monthly_cost, mq)
+                const mPct = moneyPercent(u.monthly_cost, mq)
+                const mOver = moneyOver(u.monthly_cost, mq)
                 return (
-                  <div key={u.id} className="space-y-1">
+                  <div key={u.id} className="space-y-2 rounded-md border p-3">
                     <div className="flex items-center justify-between text-sm">
                       <span className="flex items-center gap-1.5 font-medium">
                         {u.username}
                         {over && <Badge variant="destructive" className="h-4 px-1.5 text-[10px]">超额</Badge>}
-                        {!over && rate >= 90 && <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">临近</Badge>}
+                        {!over && (rate >= 90 || mRate >= 90) && <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">临近</Badge>}
                       </span>
                       <span className="text-muted-foreground tabular-nums">
-                        {pct === null ? '不限' : `${pct}%`}
-                        {' · '}
-                        {fmtTokens(u.monthly_usage)} / {q ? fmtTokens(q) : '—'}
+                        {pct === null && mPct === null ? '不限'
+                          : `${Math.max(pct ?? 0, mPct ?? 0)}%`}
                       </span>
                     </div>
-                    <div
-                      className="h-2 w-full overflow-hidden rounded-full bg-muted"
-                      role="progressbar"
-                      aria-valuenow={pct ?? 0}
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      aria-label={`${u.username} 配额占用 ${pct === null ? '不限' : pct + '%'}`}
-                    >
+                    {/* token 行 */}
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-xs text-muted-foreground">
+                        <span>token 流量</span>
+                        <span className="tabular-nums">
+                          {fmtTokens(u.monthly_usage)} / {q ? fmtTokens(q) : '—'}
+                        </span>
+                      </div>
                       <div
-                        className={`h-full rounded-full ${over ? 'bg-destructive' : rate >= 90 ? 'bg-amber-500' : 'bg-primary'}`}
-                        style={{ width: `${over ? 100 : rate}%` }}
-                      />
+                        className="h-2 w-full overflow-hidden rounded-full bg-muted"
+                        role="progressbar"
+                        aria-valuenow={pct ?? 0}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-label={`${u.username} token 配额占用 ${pct === null ? '不限' : pct + '%'}`}
+                      >
+                        <div
+                          className={`h-full rounded-full ${quotaOver(u.monthly_usage, q) ? 'bg-destructive' : rate >= 90 ? 'bg-amber-500' : 'bg-primary'}`}
+                          style={{ width: `${quotaOver(u.monthly_usage, q) ? 100 : rate}%` }}
+                        />
+                      </div>
+                    </div>
+                    {/* 金额行(0022) */}
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-xs text-muted-foreground">
+                        <span>金额(¥)</span>
+                        <span className="tabular-nums">
+                          ¥{fmtMoney(u.monthly_cost)} / {mq ? `¥${fmtMoney(mq)}` : '—'}
+                        </span>
+                      </div>
+                      <div
+                        className="h-2 w-full overflow-hidden rounded-full bg-muted"
+                        role="progressbar"
+                        aria-valuenow={mPct ?? 0}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-label={`${u.username} 金额配额占用 ${mPct === null ? '不限' : mPct + '%'}`}
+                      >
+                        <div
+                          className={`h-full rounded-full ${mOver ? 'bg-destructive' : mRate >= 90 ? 'bg-amber-500' : 'bg-primary'}`}
+                          style={{ width: `${mOver ? 100 : mRate}%` }}
+                        />
+                      </div>
                     </div>
                   </div>
                 )
@@ -523,6 +611,7 @@ export default function Usage() {
                   <TableHead className="text-right">输入 tokens</TableHead>
                   <TableHead className="text-right">输出 tokens</TableHead>
                   <TableHead className="text-right">合计 tokens</TableHead>
+                  <TableHead className="text-right">费用(¥)</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -537,6 +626,7 @@ export default function Usage() {
                     <TableCell className="text-right tabular-nums">{fmtTokens(r.prompt_tokens)}</TableCell>
                     <TableCell className="text-right tabular-nums">{fmtTokens(r.completion_tokens)}</TableCell>
                     <TableCell className="text-right tabular-nums">{fmtTokens(r.prompt_tokens + r.completion_tokens)}</TableCell>
+                    <TableCell className="text-right tabular-nums" title={fmtMoneyFull(r.cost ?? 0)}>¥{fmtMoney(r.cost ?? 0)}</TableCell>
                   </TableRow>
                 ))}
                 {filteredRows.length > 0 && (
@@ -546,10 +636,11 @@ export default function Usage() {
                     <TableCell className="text-right tabular-nums">{fmtTokens(filteredRows.reduce((s, r) => s + r.prompt_tokens, 0))}</TableCell>
                     <TableCell className="text-right tabular-nums">{fmtTokens(filteredRows.reduce((s, r) => s + r.completion_tokens, 0))}</TableCell>
                     <TableCell className="text-right tabular-nums">{fmtTokens(filteredRows.reduce((s, r) => s + r.prompt_tokens + r.completion_tokens, 0))}</TableCell>
+                    <TableCell className="text-right tabular-nums">¥{fmtMoney(filteredRows.reduce((s, r) => s + (r.cost ?? 0), 0))}</TableCell>
                   </TableRow>
                 )}
                 {filteredRows.length === 0 && (
-                  <TableRow><TableCell colSpan={5} className="text-center text-muted-foreground">暂无数据</TableCell></TableRow>
+                  <TableRow><TableCell colSpan={6} className="text-center text-muted-foreground">暂无数据</TableCell></TableRow>
                 )}
               </TableBody>
             </Table>
@@ -563,7 +654,7 @@ export default function Usage() {
           <DialogHeader>
             <DialogTitle>用户用量 · {drillUser}</DialogTitle>
             <DialogDescription>
-              区间 {from || '全部'} ~ {to || '全部'} 的日 token 趋势
+              区间 {from || '全部'} ~ {to || '全部'} 的日趋势({metric === 'money' ? '金额' : 'tokens'})
             </DialogDescription>
           </DialogHeader>
           {drillLoading ? (

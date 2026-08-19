@@ -66,3 +66,37 @@ export function fillMissingDays(
   }
   return out
 }
+
+// ---- 金额(费用)格式化与配额计算(0022) ----
+// 费用单位:元(¥)。展示两位小数(小额)或紧凑格式(大额),与 token 口径分开。
+
+// 金额紧凑格式:>=1e6 → 123.5万,>=1e4 → 1.2万,>=1000 → 1,234,其余两位小数
+export function fmtMoney(n: number): string {
+  if (!isFinite(n)) return '—'
+  if (n >= 1_000_000) return `${Number((n / 10000).toFixed(1))}万`
+  if (n >= 10000) return `${Number((n / 10000).toFixed(1))}万`
+  if (n >= 1000) return n.toLocaleString('zh-CN', { maximumFractionDigits: 0 })
+  return n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+// 完整金额(千分位 + 两位小数),用于悬浮 title 展示精确值
+export function fmtMoneyFull(n: number): string {
+  return `¥${n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
+
+// 金额配额使用率(0-100,clamp;quota=0/null 表示不限 → 返回 0)
+export function moneyRate(used: number, quota: number | null | undefined): number {
+  if (!quota || quota <= 0) return 0
+  return Math.min(100, Math.round((used / quota) * 100))
+}
+
+// 实际占用百分比(可 >100% 用于超额展示;quota=0/null 返回 null)
+export function moneyPercent(used: number, quota: number | null | undefined): number | null {
+  if (!quota || quota <= 0) return null
+  return Math.round((used / quota) * 100)
+}
+
+// 是否超额(used > quota,且 quota 有限)
+export function moneyOver(used: number, quota: number | null | undefined): boolean {
+  return !!quota && quota > 0 && used > quota
+}
