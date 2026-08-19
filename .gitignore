@@ -6,15 +6,11 @@ data/
 *.db
 *.db-wal
 *.db-shm
-desktop/dist/
-desktop/out/
-desktop/node_modules/
 webadmin/node_modules/
 !webadmin/dist/index.html
 webadmin/dist/
 *.log
 .DS_Store
-desktop/test-results/
 picoaide-data/
 .picoaide-data/
 .worktrees/

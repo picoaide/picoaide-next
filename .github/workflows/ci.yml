@@ -24,18 +24,7 @@ jobs:
           GOOS=linux GOARCH=amd64 go build -o /tmp/picoaide-amd64 ./cmd/server
           GOOS=linux GOARCH=arm64 go build -o /tmp/picoaide-arm64 ./cmd/server
 
-  desktop:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-      - name: desktop tests
-        run: |
-          if [ -f desktop/package.json ]; then
-            cd desktop && npm ci && npm test && npm run typecheck && npm run build
-          fi
+  # 客户端已下线(2026-08):仅保留服务端 + webadmin,不再构建桌面包。
 
   webadmin:
     runs-on: ubuntu-latest
@@ -54,48 +43,3 @@ jobs:
           name: webadmin-dist
           path: webadmin/dist/
           if-no-files-found: ignore
-
-  package-windows:
-    runs-on: windows-latest
-    needs: [server, desktop, webadmin]
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-      - uses: step-security/msvc-dev-cmd@v1   # better-sqlite3 原生模块需要 MSVC 编译环境(node24 runtime,上游 ilammy 已停更)
-      - name: package
-        run: |
-          cd desktop
-          npm ci --ignore-scripts   # 跳过 better-sqlite3 的 node-ABI 编译(Windows 需 VS)
-          node node_modules/electron/install.js   # 下载 Electron 二进制(--ignore-scripts 跳过了 install 脚本)
-          npm run postinstall        # electron-rebuild:仅按 Electron ABI 重建 better-sqlite3
-          npm test
-          npm run typecheck
-          npm run build
-          npx electron-builder --win
-      - uses: actions/upload-artifact@v7
-        with:
-          name: picoaide-windows
-          path: desktop/dist/*.exe
-
-  package-macos:
-    runs-on: macos-latest
-    needs: [server, desktop, webadmin]
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-      - name: package
-        run: |
-          cd desktop
-          npm ci
-          npm test
-          npm run typecheck
-          npm run build
-          npx electron-builder --mac
-      - uses: actions/upload-artifact@v7
-        with:
-          name: picoaide-macos
-          path: desktop/dist/*.dmg
