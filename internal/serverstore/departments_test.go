@@ -464,6 +464,53 @@ func TestDepartmentEveryoneRowRenameGuard(t *testing.T) {
 	}
 }
 
+// UpdateDepartmentWithBudget:改名/改上级/改主管与预算设置必须原子生效
+// (审计 M2:此前 updateDepartment 与 SetDeptBudget 是两个独立事务,
+// 预算失败会留下已改名的半更新状态)。
+func TestUpdateDepartmentWithBudgetAtomic(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	devID, _ := CreateDepartment(db, "研发部", 0, 0, "")
+	budget := 500.0
+	if err := UpdateDepartmentWithBudget(db, devID, "技术中心", 0, 0, "", &budget); err != nil {
+		t.Fatalf("update with budget: %v", err)
+	}
+	// 名字与预算同事务生效
+	g, err := GroupByID(db, devID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Name != "技术中心" {
+		t.Fatalf("name = %q, want 技术中心", g.Name)
+	}
+	if b, err := GetDeptBudget(db, devID); err != nil || b != 500 {
+		t.Fatalf("budget = %v err=%v, want 500", b, err)
+	}
+	// 预算 0 = 清除
+	zero := 0.0
+	if err := UpdateDepartmentWithBudget(db, devID, "技术中心", 0, 0, "", &zero); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := GetDeptBudget(db, devID); b != 0 {
+		t.Fatalf("budget after clear = %v, want 0", b)
+	}
+	// 预算 nil = 不变
+	if err := UpdateDepartmentWithBudget(db, devID, "技术中心", 0, 0, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	// 负预算 → ErrValidation,且名字不被改动(原子回滚)
+	neg := -1.0
+	if err := UpdateDepartmentWithBudget(db, devID, "不应该改", 0, 0, "", &neg); err != ErrValidation {
+		t.Fatalf("negative budget err = %v, want ErrValidation", err)
+	}
+	if g, _ := GroupByID(db, devID); g.Name != "技术中心" {
+		t.Fatalf("name changed despite rejected budget: %q", g.Name)
+	}
+}
+
 // RevokeFolderGroup 大小写不敏感(与授权解析一致)
 func TestRevokeFolderGroupCaseInsensitive(t *testing.T) {
 	db := openTestDB(t)

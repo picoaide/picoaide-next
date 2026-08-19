@@ -674,9 +674,10 @@ func (a *AdminAPI) updateDepartment(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "budget_money 不能为负数")
 		return
 	}
-	if err := serverstore.UpdateDepartment(a.DB, id, strings.TrimSpace(req.Name), req.ParentID, req.LeaderID, req.Description); err != nil {
+	// 预算与部门更新同一事务(审计 M2):预算失败整体回滚,不留半更新状态
+	if err := serverstore.UpdateDepartmentWithBudget(a.DB, id, strings.TrimSpace(req.Name), req.ParentID, req.LeaderID, req.Description, req.BudgetMoney); err != nil {
 		if errors.Is(err, serverstore.ErrValidation) {
-			writeError(c, http.StatusBadRequest, "VALIDATION", "上级部门不能是自身或子部门")
+			writeError(c, http.StatusBadRequest, "VALIDATION", "上级部门不能是自身或子部门,或预算非法")
 			return
 		}
 		if errors.Is(err, serverstore.ErrDuplicate) {
@@ -689,13 +690,6 @@ func (a *AdminAPI) updateDepartment(c *gin.Context) {
 		}
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 		return
-	}
-	// 部门预算(0024):与部门更新同事务语义 —— 更新后再设预算,失败不落脏
-	if req.BudgetMoney != nil {
-		if err := serverstore.SetDeptBudget(a.DB, id, *req.BudgetMoney); err != nil {
-			writeError(c, http.StatusInternalServerError, "INTERNAL", "保存预算失败")
-			return
-		}
 	}
 	detail := fmt.Sprintf("%s→%s parent:%d→%d leader:%d→%d",
 		before.Name, req.Name, before.ParentID, req.ParentID, before.LeaderID, req.LeaderID)
