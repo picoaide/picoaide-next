@@ -310,16 +310,22 @@ type modelReq struct {
 	DefaultParams    string   `json:"default_params"`
 	InputPricePer1M  *float64 `json:"input_price_per_1m"`
 	OutputPricePer1M *float64 `json:"output_price_per_1m"`
+	OffpeakDiscount  *float64 `json:"offpeak_discount"` // 0023:0<d<1 低谷折扣;nil/1 = 无峰谷
 }
 
-// validateModelPrices rejects negative prices (nil = 未定价,允许)。
-func validateModelPrices(c *gin.Context, in, out *float64) bool {
+// validateModelPrices rejects negative prices (nil = 未定价,允许) and
+// out-of-range off-peak discounts (must satisfy 0 < d <= 1; nil/1 = none).
+func validateModelPrices(c *gin.Context, in, out, offpeak *float64) bool {
 	if in != nil && *in < 0 {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "input_price_per_1m 不能为负数")
 		return false
 	}
 	if out != nil && *out < 0 {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "output_price_per_1m 不能为负数")
+		return false
+	}
+	if offpeak != nil && (*offpeak <= 0 || *offpeak > 1) {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "offpeak_discount 必须在 (0,1] 之间(1 = 无峰谷价)")
 		return false
 	}
 	return true
@@ -340,13 +346,13 @@ func createModel(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "模型名和 provider 必填")
 		return
 	}
-	if !validateModelPrices(c, req.InputPricePer1M, req.OutputPricePer1M) {
+	if !validateModelPrices(c, req.InputPricePer1M, req.OutputPricePer1M, req.OffpeakDiscount) {
 		return
 	}
 	m := &serverstore.Model{
 		Name: req.Name, ProviderID: req.ProviderID, DisplayName: req.DisplayName,
 		DefaultParams: req.DefaultParams, InputPricePer1M: req.InputPricePer1M,
-		OutputPricePer1M: req.OutputPricePer1M,
+		OutputPricePer1M: req.OutputPricePer1M, OffpeakDiscount: req.OffpeakDiscount,
 	}
 	if _, err := serverstore.AddModel(db, m); err != nil {
 		if errors.Is(err, serverstore.ErrDuplicate) {
@@ -379,7 +385,7 @@ func updateModel(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
 		return
 	}
-	if !validateModelPrices(c, req.InputPricePer1M, req.OutputPricePer1M) {
+	if !validateModelPrices(c, req.InputPricePer1M, req.OutputPricePer1M, req.OffpeakDiscount) {
 		return
 	}
 	if req.Name != "" {
@@ -399,6 +405,9 @@ func updateModel(c *gin.Context, db *sql.DB) {
 	}
 	if req.OutputPricePer1M != nil {
 		m.OutputPricePer1M = req.OutputPricePer1M
+	}
+	if req.OffpeakDiscount != nil {
+		m.OffpeakDiscount = req.OffpeakDiscount
 	}
 	if err := serverstore.UpdateModel(db, m); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")

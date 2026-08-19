@@ -449,3 +449,46 @@ func TestAdminModelPricing(t *testing.T) {
 		t.Fatalf("negative price accepted: %d", w.Code)
 	}
 }
+
+// TestAdminModelOffpeakDiscount: 模型低谷折扣率增改与校验(0023)。
+func TestAdminModelOffpeakDiscount(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	if w, _ := adminReq(t, r, "POST", "/api/admin/providers",
+		`{"name":"deepseek","base_url":"https://api.deepseek.com","api_key":"k","models":[]}`, hdr); w.Code != http.StatusOK {
+		t.Fatal("create provider failed")
+	}
+	// 新增带峰谷折扣
+	w, _ := adminReq(t, r, "POST", "/api/admin/models",
+		`{"name":"deepseek-chat","provider_id":1,"display_name":"聊天","input_price_per_1m":2,"output_price_per_1m":8,"offpeak_discount":0.5}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create model with offpeak: %d %s", w.Code, w.Body.String())
+	}
+	m, err := serverstore.GetModel(db, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.OffpeakDiscount == nil || *m.OffpeakDiscount != 0.5 {
+		t.Fatalf("offpeak_discount = %v, want 0.5", m.OffpeakDiscount)
+	}
+	// 更新折扣
+	w, _ = adminReq(t, r, "PUT", "/api/admin/models/1", `{"offpeak_discount":0.6}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("update offpeak: %d %s", w.Code, w.Body.String())
+	}
+	m, _ = serverstore.GetModel(db, 1)
+	if *m.OffpeakDiscount != 0.6 {
+		t.Fatalf("offpeak after update = %v, want 0.6", *m.OffpeakDiscount)
+	}
+	// 非法值拒绝:0 与 >1
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/models/1", `{"offpeak_discount":0}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("offpeak 0 accepted: %d", w.Code)
+	}
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/models/1", `{"offpeak_discount":1.5}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("offpeak 1.5 accepted: %d", w.Code)
+	}
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/models/1", `{"offpeak_discount":-0.5}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("offpeak -0.5 accepted: %d", w.Code)
+	}
+}
