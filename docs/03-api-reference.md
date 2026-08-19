@@ -74,6 +74,7 @@ OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/marketplace/skills` | 技能建议清单 `[{name, version, description, author}]` |
+| GET | `/api/marketplace/skills/updates?installed=name:ver,...` | 技能版本检测(客户端自动升级):上报已装 `name:version`(逗号分隔,≤100 项),返回服务端较新的技能 `{updates:[{name, version, description, author, archive_url}], count}`;授权/下架技能不返回 |
 | GET | `/api/marketplace/skills/:name` | 单个技能详情 |
 | GET | `/api/marketplace/skills/:name/archive` | 下载技能包 `cacheDir/<name>-<version>.tar.gz` |
 | GET | `/api/marketplace/mcp` | MCP 插件建议清单 |

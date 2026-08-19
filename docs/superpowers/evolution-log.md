@@ -241,3 +241,15 @@
 - 服务端接口**全部保留**(/api/auth/*、/v1/*、/api/config/bootstrap、/api/admin/*),供第三方/自研客户端接入
 
 **验证**:go test ./internal/... 8 包全绿;make webadmin 构建成功;已 commit 至 server-webadmin-only。
+
+## Round 15(2026-08-19):Skill 版本检测接口(供 harness 客户端自动升级)
+
+**背景**:为 https://github.com/picoaide/picoaide-harness(feat/enterprise)客户端提供技能自动升级能力。已阅读 harness:`plugins/dsh-enterprise` 经本地代理 `/api/pico/skills`(prefix)转发网关 `/api/marketplace/skills` 与 `/archive`;bootstrap 下发 skills 目录(含 version);客户端无本地已装版本记录,技能中心仅手动下载。
+
+**设计**:`GET /api/marketplace/skills/updates?installed=name:version,...`——GET+query 与 harness 现有 prefix 代理天然兼容(`/api/pico/skills/updates?...` 直接透传),客户端零代理改造。响应仅含"较新"技能(最新 version/archive_url);严格授权过滤(admin 全量、普通用户仅授权,未授权/下架不返回,不泄露存在性)。
+
+**实施**(TDD 红-绿):`1a95312` marketplace `skillUpdates` handler + `parseInstalled`(≤100 项、SafePathSegment、name:version 格式);6 用例(有更新/无更新/下架/未授权→授权后出现/非法输入 400/未登录 401)。
+
+**验证**:marketplace 全量 ok;服务端 8 包全绿;已 commit 推送 server-webadmin-only。
+
+**harness 侧后续**(不在本仓库):技能中心「获取」时记录本地已装版本 → 登录/进中心调 `/api/pico/skills/updates` → 自动下载 archive(X-Skill-Version/Checksum 校验)替换。
