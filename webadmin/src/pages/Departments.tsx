@@ -8,6 +8,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { deptSubtreeIds, deptTreeOptions } from '../lib/utils'
+import { fmtMoney, fmtMoneyFull, moneyPercent, moneyOver } from '../lib/format'
 
 interface Department {
   id: number
@@ -19,6 +20,8 @@ interface Department {
   member_count: number
   child_count: number
   granted_count: number
+  budget_money?: number | null // 0024:月度金额预算(元),nil = 未配置
+  monthly_cost?: number // 0024:部门树当月费用(元)
 }
 
 interface UserOption {
@@ -31,7 +34,7 @@ export default function Departments() {
   const [users, setUsers] = useState<UserOption[]>([])
   const [error, setError] = useState('')
   const [deptDialog, setDeptDialog] = useState(false)
-  const [deptForm, setDeptForm] = useState({ id: 0, name: '', parent_id: '0', leader_id: '0', description: '' })
+  const [deptForm, setDeptForm] = useState({ id: 0, name: '', parent_id: '0', leader_id: '0', description: '', budget_money: '' })
 
   const load = useCallback(async () => {
     try {
@@ -55,17 +58,21 @@ export default function Departments() {
       parent_id: String(d?.parent_id ?? 0),
       leader_id: String(d?.leader_id ?? 0),
       description: d?.description ?? '',
+      budget_money: d?.budget_money === null || d?.budget_money === undefined ? '' : String(d.budget_money),
     })
     setDeptDialog(true)
   }
 
   async function saveDeptForm() {
-    const body = JSON.stringify({
+    const payload: Record<string, any> = {
       name: deptForm.name,
       parent_id: Number(deptForm.parent_id),
       leader_id: Number(deptForm.leader_id),
       description: deptForm.description,
-    })
+    }
+    // 预算:留空 = 不变;0 = 清除(不限);>0 = 月度金额预算
+    if (deptForm.budget_money.trim() !== '') payload.budget_money = Number(deptForm.budget_money)
+    const body = JSON.stringify(payload)
     try {
       if (deptForm.id > 0) {
         await request(`/api/admin/departments/${deptForm.id}`, { method: 'PUT', body })
@@ -107,6 +114,7 @@ export default function Departments() {
             <TableHead>部门主管</TableHead>
             <TableHead>成员</TableHead>
             <TableHead>子部门</TableHead>
+            <TableHead>月度金额预算</TableHead>
             <TableHead className="text-right">操作</TableHead>
           </TableRow>
         </TableHeader>
@@ -127,6 +135,32 @@ export default function Departments() {
                 <TableCell>{d.leader_name || '—'}</TableCell>
                 <TableCell>{d.member_count}</TableCell>
                 <TableCell>{d.child_count}</TableCell>
+                <TableCell>
+                  {d.budget_money === null || d.budget_money === undefined || d.budget_money <= 0 ? (
+                    <span className="text-xs text-muted-foreground">不限</span>
+                  ) : (
+                    <div className="space-y-0.5">
+                      <div className="text-xs">
+                        <span className="font-medium tabular-nums">¥{fmtMoney(d.monthly_cost ?? 0)}</span>
+                        <span className="text-muted-foreground"> / ¥{fmtMoney(d.budget_money)}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <div className="h-1.5 w-20 overflow-hidden rounded-full bg-muted" role="progressbar" aria-valuenow={moneyPercent(d.monthly_cost ?? 0, d.budget_money) ?? 0} aria-valuemin={0} aria-valuemax={100} aria-label={`${d.name} 预算占用`}>
+                          <div
+                            className={`h-full rounded-full ${moneyOver(d.monthly_cost ?? 0, d.budget_money) ? 'bg-destructive' : moneyPercent(d.monthly_cost ?? 0, d.budget_money)! >= 80 ? 'bg-amber-500' : 'bg-primary'}`}
+                            style={{ width: `${Math.min(100, moneyPercent(d.monthly_cost ?? 0, d.budget_money) ?? 0)}%` }}
+                          />
+                        </div>
+                        <span
+                          className={`text-[10px] tabular-nums ${moneyOver(d.monthly_cost ?? 0, d.budget_money) ? 'text-destructive' : ''}`}
+                          title={fmtMoneyFull(d.monthly_cost ?? 0)}
+                        >
+                          {moneyPercent(d.monthly_cost ?? 0, d.budget_money)}%
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </TableCell>
                 <TableCell className="text-right space-x-2">
                   <Button size="sm" variant="outline" onClick={() => openDeptEdit(d)}>编辑</Button>
                   <Button size="sm" variant="destructive" onClick={() => removeDept(d)}>删除</Button>
@@ -135,7 +169,7 @@ export default function Departments() {
             )
           })}
           {depts.length === 0 && (
-            <TableRow><TableCell colSpan={6} className="text-center text-muted-foreground">暂无部门,点击「新建部门」开始搭建组织架构</TableCell></TableRow>
+            <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">暂无部门,点击「新建部门」开始搭建组织架构</TableCell></TableRow>
           )}
         </TableBody>
       </Table>
@@ -182,6 +216,22 @@ export default function Departments() {
             <div className="space-y-1">
               <Label>描述(可选)</Label>
               <Input value={deptForm.description} onChange={(e) => setDeptForm({ ...deptForm, description: e.target.value })} />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="dept-budget">月度金额预算(元,可选)</Label>
+              <Input
+                id="dept-budget"
+                type="number"
+                min={0}
+                step="0.01"
+                placeholder="留空 = 不变;0 = 不限;>0 = 部门树月度费用上限"
+                value={deptForm.budget_money}
+                onChange={(e) => setDeptForm({ ...deptForm, budget_money: e.target.value })}
+              />
+              <p className="text-xs text-muted-foreground">
+                预算约束该部门及全部子部门成员:树内当月累计费用超限即拦截(与员工个人金额配额叠加生效)。
+                子部门成员同时受其上级部门预算约束。
+              </p>
             </div>
             <Button className="w-full" disabled={!deptForm.name.trim()} onClick={saveDeptForm}>保存</Button>
           </div>
