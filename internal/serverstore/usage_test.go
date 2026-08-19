@@ -856,3 +856,172 @@ func TestUpdateUsageTokensOffpeakRecompute(t *testing.T) {
 		t.Fatalf("backfilled off-peak cost = %v, want 3.0", cost)
 	}
 }
+
+// ---- 部门金额预算(0024) ----
+
+// mustDept 创建部门(返回 id)。
+func mustDept(t *testing.T, db *sql.DB, name string, parent int64) int64 {
+	t.Helper()
+	id, err := CreateDepartment(db, name, parent, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// TestDeptBudgetEffective: 员工生效预算 = 归属部门 + 祖先链(最近配置者胜)。
+func TestDeptBudgetEffective(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	// 树:研发(预算 1000)→ 前端(无)→ 前端A组(预算 500)
+	rd := mustDept(t, db, "研发部", 0)
+	qd := mustDept(t, db, "前端部", rd)
+	qa := mustDept(t, db, "前端A组", qd)
+	if err := SetDeptBudget(db, rd, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetDeptBudget(db, qa, 500); err != nil {
+		t.Fatal(err)
+	}
+
+	// 普通成员挂前端A组:链上全部预算生效(研发 1000 是子树封顶,A组 500 更严)
+	uid, err := CreateUser(db, &User{Username: "alice", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := AddUserGroup(db, uid, qa); err != nil {
+		t.Fatal(err)
+	}
+	eff, err := EffectiveDeptBudget(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eff) != 2 || eff[0].Budget != 1000 || eff[0].Name != "研发部" || eff[1].Budget != 500 || eff[1].Name != "前端A组" {
+		t.Fatalf("alice effective budget = %+v, want [研发部 1000, 前端A组 500]", eff)
+	}
+
+	// 挂前端部(祖先链 研发1000, 前端无):最近配置 = 研发 1000
+	uid2, err := CreateUser(db, &User{Username: "bob", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := AddUserGroup(db, uid2, qd); err != nil {
+		t.Fatal(err)
+	}
+	eff2, err := EffectiveDeptBudget(db, uid2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eff2) != 1 || eff2[0].Budget != 1000 {
+		t.Fatalf("bob effective budget = %+v, want [研发部 1000]", eff2)
+	}
+
+	// 无部门:无部门预算
+	uid3, err := CreateUser(db, &User{Username: "carl", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eff3, err := EffectiveDeptBudget(db, uid3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eff3) != 0 {
+		t.Fatalf("carl effective budget = %+v, want none", eff3)
+	}
+}
+
+// TestDeptBudgetChainMultiBudget: 一条链上多级配置预算 → 全部生效(都需守住)。
+func TestDeptBudgetChainMultiBudget(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	rd := mustDept(t, db, "研发部", 0)
+	qd := mustDept(t, db, "前端部", rd)
+	qa := mustDept(t, db, "前端A组", qd)
+	if err := SetDeptBudget(db, rd, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetDeptBudget(db, qd, 600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetDeptBudget(db, qa, 500); err != nil {
+		t.Fatal(err)
+	}
+	uid, err := CreateUser(db, &User{Username: "alice", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := AddUserGroup(db, uid, qa); err != nil {
+		t.Fatal(err)
+	}
+	eff, err := EffectiveDeptBudget(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 3 级预算全部生效(排序:祖先 → 自己)
+	if len(eff) != 3 || eff[0].Budget != 1000 || eff[1].Budget != 600 || eff[2].Budget != 500 {
+		t.Fatalf("chain budgets = %+v", eff)
+	}
+}
+
+// TestDeptBudgetCost: 部门当月费用 = 树内全部成员 SUM(cost)。
+func TestDeptBudgetCost(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	rd := mustDept(t, db, "研发部", 0)
+	qd := mustDept(t, db, "前端部", rd)
+	mustPricedModel(t, db, "priced-model", 2.0, 8.0)
+
+	// 研发直属成员 + 前端部成员
+	uid1, _ := CreateUser(db, &User{Username: "a1", Source: "local", Status: 1})
+	_ = AddUserGroup(db, uid1, rd)
+	uid2, _ := CreateUser(db, &User{Username: "a2", Source: "local", Status: 1})
+	_ = AddUserGroup(db, uid2, qd)
+	// 无部门用户(不计入)
+	uid3, _ := CreateUser(db, &User{Username: "a3", Source: "local", Status: 1})
+
+	id, _ := RecordUsage(db, uid1, "priced-model", 1_000_000, 0) // 2 元
+	setCreatedAt(t, db, id, time.Now().Format("2006-01-02")+" 09:00:00")
+	id2, _ := RecordUsage(db, uid2, "priced-model", 500_000, 0) // 1 元
+	setCreatedAt(t, db, id2, time.Now().Format("2006-01-02")+" 09:00:00")
+	id3, _ := RecordUsage(db, uid3, "priced-model", 1_000_000, 0) // 2 元,不计
+	setCreatedAt(t, db, id3, time.Now().Format("2006-01-02")+" 09:00:00")
+
+	cost, err := DeptMonthlyCost(db, rd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cost != 3.0 { // 研发树 = a1 2 + a2 1(前端是子树)
+		t.Fatalf("dept monthly cost = %v, want 3.0", cost)
+	}
+	cost, err = DeptMonthlyCost(db, qd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cost != 1.0 {
+		t.Fatalf("sub dept monthly cost = %v, want 1.0", cost)
+	}
+}
+
+// TestDeptBudgetCostBatch: 批量部门费用(部门列表页 N+1 防护)。
+func TestDeptBudgetCostBatch(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	rd := mustDept(t, db, "研发部", 0)
+	qd := mustDept(t, db, "前端部", rd)
+	mustPricedModel(t, db, "priced-model", 2.0, 8.0)
+	uid1, _ := CreateUser(db, &User{Username: "a1", Source: "local", Status: 1})
+	_ = AddUserGroup(db, uid1, qd)
+	id, _ := RecordUsage(db, uid1, "priced-model", 1_000_000, 0)
+	setCreatedAt(t, db, id, time.Now().Format("2006-01-02")+" 09:00:00")
+
+	costs, err := DeptMonthlyCostBatch(db, []int64{rd, qd, 9999})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if costs[rd] != 2.0 || costs[qd] != 2.0 {
+		t.Fatalf("batch costs = %+v, want rd=qd=2.0", costs)
+	}
+	if costs[9999] != 0 {
+		t.Fatalf("missing dept cost = %v, want 0", costs[9999])
+	}
+}

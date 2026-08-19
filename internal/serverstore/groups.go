@@ -122,3 +122,13 @@ func SyncUserGroups(db *sql.DB, userID int64, names []string) error {
 	}
 	return tx.Commit()
 }
+
+// AddUserGroup adds a single group membership (department assignment),
+// preserving existing memberships. Used by tests and budget chain setup.
+func AddUserGroup(db *sql.DB, userID, groupID int64) error {
+	if _, err := GroupByID(db, groupID); err != nil {
+		return err
+	}
+	_, err := db.Exec("INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)", userID, groupID)
+	return err
+}
