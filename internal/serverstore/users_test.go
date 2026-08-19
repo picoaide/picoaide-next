@@ -391,3 +391,41 @@ func TestDeleteUserClearsDeptLeadership(t *testing.T) {
 		t.Fatalf("update dept after leader delete: %v", err)
 	}
 }
+
+// 用户名搜索必须转义 LIKE 通配符(审计 L5):搜 "%"/"_" 不得匹配全部/任意单字符
+func TestListUsersEscapesLikeWildcards(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"alice_1", "bob1", "100%", "carol"} {
+		if _, err := CreateUserWithPassword(db, name, "pw123456"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 搜 "%" → 只应命中含字面 % 的 "100%"
+	users, total, err := ListUsers(db, 0, 20, "%")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(users) != 1 || users[0].Username != "100%" {
+		t.Fatalf("search '%%' total=%d users=%+v, want only 100%%", total, users)
+	}
+	// 搜 "_" → 不应命中任意单字符(alice_1 含字面下划线,可命中)
+	users, total, err = ListUsers(db, 0, 20, "_")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || users[0].Username != "alice_1" {
+		t.Fatalf("search '_' total=%d users=%+v, want only alice_1", total, users)
+	}
+	// 搜 "1" 正常子串仍命中(alice_1/bob1/100% 都含 '1')
+	users, total, err = ListUsers(db, 0, 20, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 {
+		t.Fatalf("search '1' total=%d, want 3 (alice_1, bob1, 100%%)", total)
+	}
+}
