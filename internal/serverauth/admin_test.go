@@ -904,3 +904,106 @@ func TestAdminUsageCost(t *testing.T) {
 		t.Fatalf("usage row cost = %v, want 6.0", c)
 	}
 }
+
+// TestAdminDeptBudget: 部门预算设置/清除,列表附 budget_money 与 monthly_cost。
+func TestAdminDeptBudget(t *testing.T) {
+	r, db := adminRouter(t)
+	defer db.Close()
+
+	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", w.Code, w.Body.String())
+	}
+	csrf := out["csrf_token"].(string)
+	cookies := w.Result().Cookies()
+	var sess string
+	for _, ck := range cookies {
+		if ck.Name == sessionCookieName {
+			sess = ck.Value
+		}
+	}
+	hdr := func() map[string]string {
+		return map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
+	}
+
+	// 建部门
+	w, out = doJSON(t, r, "POST", "/api/admin/departments", `{"name":"研发部"}`, hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("create dept: %d %s", w.Code, w.Body.String())
+	}
+	deptID := int64(out["department"].(map[string]any)["id"].(float64))
+
+	// 员工挂部门 + 产生费用
+	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("create user: %d %s", w.Code, w.Body.String())
+	}
+	uid := int64(out["user"].(map[string]any)["id"].(float64))
+	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d/department", uid), fmt.Sprintf(`{"group_id":%d}`, deptID), hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("assign dept: %d %s", w.Code, w.Body.String())
+	}
+	pid, err := serverstore.AddGatewayProvider(db, &serverstore.GatewayProvider{Name: "prov-p", BaseURL: "http://x", APIKeyEnc: "k", Enabled: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, out2 := 2.0, 8.0
+	if _, err := serverstore.AddModel(db, &serverstore.Model{Name: "priced-model", ProviderID: pid, InputPricePer1M: &in, OutputPricePer1M: &out2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.RecordUsage(db, uid, "priced-model", 1_000_000, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// 设置预算 100
+	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/departments/%d", deptID), `{"name":"研发部","budget_money":100}`, hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("set dept budget: %d %s", w.Code, w.Body.String())
+	}
+
+	// 列表附 budget_money 与 monthly_cost
+	w, out = doJSON(t, r, "GET", "/api/admin/departments", "", hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("list depts: %d %s", w.Code, w.Body.String())
+	}
+	found := false
+	for _, d := range out["departments"].([]any) {
+		dm := d.(map[string]any)
+		if dm["name"] == "研发部" {
+			found = true
+			if b := dm["budget_money"].(float64); b != 100 {
+				t.Fatalf("budget_money = %v, want 100", b)
+			}
+			if mc := dm["monthly_cost"].(float64); mc != 2.0 {
+				t.Fatalf("monthly_cost = %v, want 2.0", mc)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("研发部 missing from list")
+	}
+
+	// 负预算拒绝
+	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/departments/%d", deptID), `{"name":"研发部","budget_money":-5}`, hdr())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("negative budget accepted: %d", w.Code)
+	}
+
+	// 清除预算(0)
+	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/departments/%d", deptID), `{"name":"研发部","budget_money":0}`, hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("clear budget: %d %s", w.Code, w.Body.String())
+	}
+	w, out = doJSON(t, r, "GET", "/api/admin/departments", "", hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("list depts: %d", w.Code)
+	}
+	for _, d := range out["departments"].([]any) {
+		dm := d.(map[string]any)
+		if dm["name"] == "研发部" {
+			if b, present := dm["budget_money"]; !present || b != nil {
+				t.Fatalf("budget_money after clear = %v, want null", b)
+			}
+		}
+	}
+}

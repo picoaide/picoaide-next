@@ -602,6 +602,8 @@ type deptReq struct {
 	ParentID    int64  `json:"parent_id"`
 	LeaderID    int64  `json:"leader_id"`
 	Description string `json:"description"`
+	// BudgetMoney 部门月度金额预算(元,0024):nil = 不变,0 = 清除(不限),>0 = 预算。
+	BudgetMoney *float64 `json:"budget_money"`
 }
 
 // listDepartments 返回部门树平铺(含主管/成员数/子部门数/授权引用数)。
@@ -656,6 +658,10 @@ func (a *AdminAPI) updateDepartment(c *gin.Context) {
 		writeError(c, http.StatusNotFound, "NOT_FOUND", "部门不存在")
 		return
 	}
+	if req.BudgetMoney != nil && *req.BudgetMoney < 0 {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "budget_money 不能为负数")
+		return
+	}
 	if err := serverstore.UpdateDepartment(a.DB, id, strings.TrimSpace(req.Name), req.ParentID, req.LeaderID, req.Description); err != nil {
 		if errors.Is(err, serverstore.ErrValidation) {
 			writeError(c, http.StatusBadRequest, "VALIDATION", "上级部门不能是自身或子部门")
@@ -672,8 +678,18 @@ func (a *AdminAPI) updateDepartment(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 		return
 	}
+	// 部门预算(0024):与部门更新同事务语义 —— 更新后再设预算,失败不落脏
+	if req.BudgetMoney != nil {
+		if err := serverstore.SetDeptBudget(a.DB, id, *req.BudgetMoney); err != nil {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "保存预算失败")
+			return
+		}
+	}
 	detail := fmt.Sprintf("%s→%s parent:%d→%d leader:%d→%d",
 		before.Name, req.Name, before.ParentID, req.ParentID, before.LeaderID, req.LeaderID)
+	if req.BudgetMoney != nil {
+		detail += fmt.Sprintf(" budget:%.2f", *req.BudgetMoney)
+	}
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "dept_update", detail)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

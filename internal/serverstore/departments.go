@@ -28,6 +28,10 @@ type DepartmentInfo struct {
 	ChildCount  int64  `json:"child_count"`
 	// GrantedCount counts grant references (kb/skill/mcp) — deletion guard.
 	GrantedCount int64 `json:"granted_count"`
+	// BudgetMoney 部门月度金额预算(元,0024);nil = 未配置(不限)。
+	BudgetMoney *float64 `json:"budget_money"`
+	// MonthlyCost 部门树当月累计费用 SUM(cost)(元,0024)。
+	MonthlyCost float64 `json:"monthly_cost"`
 }
 
 // ListDepartments returns every department with admin-view fields.
@@ -38,7 +42,8 @@ func ListDepartments(db *sql.DB) ([]DepartmentInfo, error) {
 		(SELECT COUNT(*) FROM groups c WHERE c.parent_id = g.id),
 		(SELECT COUNT(*) FROM kb_folder_groups kfg WHERE kfg.group_id = g.id)
 		+ (SELECT COUNT(*) FROM skill_grants sg WHERE sg.grantee_type = 'group' AND sg.grantee = g.name COLLATE NOCASE)
-		+ (SELECT COUNT(*) FROM mcp_grants mg WHERE mg.grantee_type = 'group' AND mg.grantee = g.name COLLATE NOCASE)
+		+ (SELECT COUNT(*) FROM mcp_grants mg WHERE mg.grantee_type = 'group' AND mg.grantee = g.name COLLATE NOCASE),
+		g.budget_money
 		FROM groups g LEFT JOIN users u ON u.id = g.leader_id
 		ORDER BY g.id`)
 	if err != nil {
@@ -48,13 +53,32 @@ func ListDepartments(db *sql.DB) ([]DepartmentInfo, error) {
 	var out []DepartmentInfo
 	for rows.Next() {
 		var d DepartmentInfo
+		var b sql.NullFloat64
 		if err := rows.Scan(&d.ID, &d.Name, &d.ParentID, &d.LeaderID, &d.Description,
-			&d.LeaderName, &d.MemberCount, &d.ChildCount, &d.GrantedCount); err != nil {
+			&d.LeaderName, &d.MemberCount, &d.ChildCount, &d.GrantedCount, &b); err != nil {
 			return nil, err
+		}
+		if b.Valid {
+			d.BudgetMoney = &b.Float64
 		}
 		out = append(out, d)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// 批量附部门树当月费用(单次查询,避免 N+1)
+	ids := make([]int64, 0, len(out))
+	for i := range out {
+		ids = append(ids, out[i].ID)
+	}
+	costs, err := DeptMonthlyCostBatch(db, ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].MonthlyCost = costs[out[i].ID]
+	}
+	return out, nil
 }
 
 // GroupByID returns one group.
