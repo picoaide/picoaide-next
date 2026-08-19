@@ -13,7 +13,7 @@
 | `VALIDATION` | 400 | 参数校验失败 |
 | `UPSTREAM` | 502 | 上游 LLM 错误 |
 | `RATE_LIMITED` | 429 | 触发限流 |
-| `QUOTA_EXCEEDED` | 429 | 员工本月流量配额已用尽(admin 豁免;每用户配额见 users.quota_tokens / 全局 usage.monthly_quota) |
+| `QUOTA_EXCEEDED` | 429 | 员工本月 token 或金额配额已用尽(admin 豁免;每用户配额见 users.quota_tokens / users.quota_money,全局默认见 usage.monthly_quota / usage.monthly_quota_money) |
 | `INTERNAL` | 500 | 内部错误 |
 
 ## 2. 鉴权方式
@@ -40,9 +40,9 @@
 | POST | `/api/admin/login` | 管理员登录(仅 `is_admin=1` 用户;非管理员 → 403) |
 | GET | `/api/admin/me` | 当前管理员信息 |
 | POST | `/api/admin/logout` | 登出(清 session) |
-| GET | `/api/admin/users` | 用户列表(附带 `quota_tokens` 与 `monthly_usage` 本月用量) |
+| GET | `/api/admin/users` | 用户列表(附带 `quota_tokens`/`quota_money` 与 `monthly_usage`/`monthly_cost` 本月用量/费用) |
 | POST | `/api/admin/users` | 创建用户 `{username, password?, display_name?, email?, is_admin?, source?}` |
-| PUT | `/api/admin/users/:id` | 更新用户(改密/管理员/启用停用);`quota_tokens` 设置月度配额(0=不限),`quota_clear:true` 恢复跟随全局默认 |
+| PUT | `/api/admin/users/:id` | 更新用户(改密/管理员/启用停用);`quota_tokens`/`quota_money` 设置月度配额(0=不限),`quota_clear:true`/`quota_money_clear:true` 恢复跟随全局默认 |
 | DELETE | `/api/admin/users/:id` | 删除用户 |
 | GET | `/api/admin/usage` | 用量汇总(按用户/模型/时间;`group=user` 展示用户名) |
 | GET | `/api/admin/providers` | 网关上游列表 |
@@ -50,17 +50,17 @@
 | PUT | `/api/admin/providers/:id` | 更新上游 |
 | DELETE | `/api/admin/providers/:id` | 删除上游 |
 | GET | `/api/admin/models` | 模型列表 |
-| POST | `/api/admin/models` | 创建模型 `{name, provider_id, display_name?, default_params?}` |
-| PUT | `/api/admin/models/:id` | 更新模型 |
+| POST | `/api/admin/models` | 创建模型 `{name, provider_id, display_name?, default_params?, input_price_per_1m?, output_price_per_1m?}`(价格 = 元/百万 token,缺省 = 未定价) |
+| PUT | `/api/admin/models/:id` | 更新模型(价格留空不覆盖;价格修改只影响之后产生的费用) |
 | DELETE | `/api/admin/models/:id` | 删除模型 |
-| GET | `/api/admin/gateway` | 网关配置:`{rate_limit, monthly_quota, default_model, allow_private, search_endpoint}` |
-| PUT | `/api/admin/gateway` | 写网关配置(settings:`gateway.rate_limit`、`gateway.default_model`、`usage.monthly_quota`(员工默认月配额)、`web.allow_private`、`web.search_endpoint`) |
+| GET | `/api/admin/gateway` | 网关配置:`{rate_limit, monthly_quota, monthly_quota_money, default_model, allow_private, search_endpoint}` |
+| PUT | `/api/admin/gateway` | 写网关配置(settings:`gateway.rate_limit`、`gateway.default_model`、`usage.monthly_quota`(员工默认月 token 配额)、`usage.monthly_quota_money`(员工默认月金额配额)、`web.allow_private`、`web.search_endpoint`) |
 
 ## 5. AI 网关(客户端用,Bearer)
 
 ### POST `/v1/chat/completions`
 
-OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹配上游 provider 代理转发;非流式/流式(SSE)均支持;响应按 per-user 令牌桶限流(`gateway.rate_limit`,默认 60/min),计量写入 usage 表;转发前按**月度 token 配额**检查(`EffectiveQuota`),超限返回 429 `QUOTA_EXCEEDED`(admin 豁免)。
+OpenAI 兼容请求体 `{model, messages, stream?, ...}`。服务端按模型匹配上游 provider 代理转发;非流式/流式(SSE)均支持;响应按 per-user 令牌桶限流(`gateway.rate_limit`,默认 60/min),计量写入 usage 表(含按模型定价折算的 `cost` 费用,元);转发前按**月度 token 配额与金额配额**检查(`EffectiveQuota` / `EffectiveMoneyQuota`),任一超限返回 429 `QUOTA_EXCEEDED`(admin 豁免)。
 
 ### GET `/v1/models`
 

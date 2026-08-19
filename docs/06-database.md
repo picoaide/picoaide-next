@@ -15,13 +15,14 @@
 | is_admin | 0/1 |
 | status | 1=启用 |
 | quota_tokens | 0021 新增,月流量配额三态:NULL=跟随全局默认(`usage.monthly_quota`),0=不限,>0=按月限额;admin 一律豁免(网关强制) |
+| quota_money | 0022 新增,月金额配额三态:NULL=跟随全局默认(`usage.monthly_quota_money`),0=不限,>0=按月金额上限(元);admin 一律豁免(网关强制) |
 | created_at / updated_at | datetime,localtime |
 
 ### groups + user_groups(0001)
 `groups(id, name 唯一, created_at)`;`user_groups(user_id, group_id, PK 复合)`。组用于知识库授权(本地账号无组映射,以用户级授权兜底)。
 
 ### settings(0001)
-`settings(key PK, value)`。键: `auth.mode` / `ldap.*` / `oidc.*` / `gateway.default_model` / `gateway.rate_limit` / `usage.monthly_quota`(员工默认月配额,0=不限)/ `web.allow_private` / `web.search_endpoint` 等(见 04-auth.md、03-api-reference.md)。
+`settings(key PK, value)`。键: `auth.mode` / `ldap.*` / `oidc.*` / `gateway.default_model` / `gateway.rate_limit` / `usage.monthly_quota`(员工默认月 token 配额,0=不限)/ `usage.monthly_quota_money`(员工默认月金额配额,元,0=不限)/ `web.allow_private` / `web.search_endpoint` 等(见 04-auth.md、03-api-reference.md)。
 
 ### api_tokens(0002)
 `id, user_id→users, token_hash(唯一), name(默认 'desktop'), created_at, expires_at(NOT NULL), last_used_at, revoked(0/1)`;索引 `idx_tokens_user`。明文 token 不落库,只存哈希;90 天过期。
@@ -29,9 +30,11 @@
 ### gateway_providers + models(0003)
 - `gateway_providers(id, name 唯一, base_url, api_key_enc, models JSON '[]', enabled 0/1)`——`api_key_enc` 为 AES-GCM 密文(`enc:v1:`)。
 - `models(id, name 唯一, provider_id→providers, display_name, default_params JSON '{}')`。
+- 0022 新增 `input_price_per_1m REAL` / `output_price_per_1m REAL`(元/百万 token):NULL/0 = 未定价,费用按 0 计(页面标注「未定价」);embedding 复用 input 价。
 
 ### usage(0004)
 `id, user_id, model, prompt_tokens, completion_tokens, created_at`;索引 `idx_usage_user_time`。网关每次调用计量写入;`CleanupPendingUsage` 清理挂起记录(全零待定行)。月度聚合:`UserMonthlyUsage`(当月 SUM,走索引)/ `UserMonthlyUsageBatch`(管理页批量附用量);配额判定 `EffectiveQuota`(admin 豁免 → 个人覆盖 → 全局默认),网关转发前检查,超限 429 `QUOTA_EXCEEDED`。
+- 0022 新增 `cost REAL DEFAULT 0`:记录时按模型定价折算的金额(元),后续改价/删模型不重写历史;金额配额与统计统一读 `SUM(cost)`。月度费用聚合:`UserMonthlyCost`/`UserMonthlyCostBatch`;金额配额判定 `EffectiveMoneyQuota`(admin 豁免 → 个人覆盖 → 全局默认 `usage.monthly_quota_money`),网关转发前检查,超限 429。
 
 ### skills(0005)
 `id, name 唯一, version, description, author, git_url, git_ref(默认 main), checksum, enabled(0/1,下架置 0 不删行), created_at, updated_at`。bootstrap 建议清单只返回 enabled=1。

@@ -179,3 +179,20 @@
 - C 服务端:`afa8597` `5f839ad` `5ea1139` `74bfea5` `2b5cecf` — SetTrustedProxies+RemoteAddr 限流键(XFF 伪造)、限流表满淘汰最旧键、kb 队列 CAS+claim 文件校验、搜索 SQL 下沉 LIMIT+COUNT、技能缓存失效、LDAP 5s 超时、serveJSON 32MB、pending usage 失败即清+周期清理、下架技能 404、凭证限流单锁+过期清理、webadmin 401 跳登录、并发首登不 500、OIDC 10s、admin_sessions 清理、bootstrap 密码 10 位、最后管理员事务守卫、token last_used 节流、502 固定文案、kb 临时文件清扫、folder_id 校验、审计日志 90 天清理、maxPackageSize 生效、凭证解密失败报错、删用户清 kb 授权、搜索分页
 
 **验证**:make check EXIT 0;客户端 579 passed | 2 skipped(净增 71 健壮性测试);服务端 8 包全绿;desktop/webadmin/server 三端 build 成功;已 push(2b5cecf)
+
+## Round 11(2026-08-19):用量页企业端重构 + 金额配额
+
+**背景**:用户要求 1) 审计已提交的 usage 相关版本是否符合预期;2) 调研 GitHub 更好的企业级用量统计页;3) 每个员工可单独设置使用的金额(费用)。
+
+**审计结论**(7 个版本 221060f→ca27a93):token 配额闭环(个人/全局默认/admin 豁免/网关 429)与聚合正确性符合预期;核心缺口 = 无金额(费用)维度 + 页面信息密度低。详见 `docs/superpowers/plans/2026-08-usage-page-audit-and-money-quota.md`。
+
+**调研**(子代理,全部源码核验,报告 `docs/research-usage-page/README.md`):OpenWebUI/LibreChat 无费用维度;One API/new-api(额度进度条+调整弹窗)、LiteLLM(费用仪表盘+三层预算)、Dify(UsageInfo 卡)为最佳范本。落地组合:KPI 费用卡 + 金额/tokens 口径切换 + 双维度配额进度条 + 未定价提示。
+
+**实施**(TDD 红-绿-commit):
+1. `35e7327` serverstore:0022 迁移(users.quota_money / models 价格列 / usage.cost);RecordUsage 按模型定价折算费用落库,UpdateUsageTokens 回填重算;UserMonthlyCost/Batch、EffectiveMoneyQuota;聚合行携带 cost
+2. `056e00d` 网关:moneyQuotaBlocked 与 token 配额并行检查,超限 429
+3. `ad04bcf` admin API:用户 quota_money/quota_money_clear + monthly_cost;网关 monthly_quota_money;模型价格增改校验;usage 行 cost;修复 adminLoginLimiter 惰性创建(测试用例增多触发包级限流 flaky)
+4. `51f529d` webadmin Usage 页:总费用为第一统计卡、金额/tokens 口径切换、配额面板 token+金额双进度条、明细表金额列+CSV cost 列、未定价模型提示条
+5. `bf113e9` webadmin Users/Gateway:用户金额配额对话框;网关全局金额配额;模型价格列+编辑弹窗
+
+**验证**:go test ./internal/... 8 包全绿;webadmin 35 passed + typecheck 0 + build 成功;已 commit。
