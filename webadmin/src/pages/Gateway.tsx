@@ -9,6 +9,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Badge } from '../components/ui/badge'
+import { Skeleton } from '../components/ui/skeleton'
+import { isModelPriced } from '../lib/format'
 
 interface Provider {
   id: number
@@ -33,6 +35,30 @@ interface Model {
   input_price_per_1m?: number | null // 0022:元/百万 token,nil = 未定价
   output_price_per_1m?: number | null
   offpeak_discount?: number | null // 0023:0<d<1 低谷折扣;nil/1 = 无峰谷价
+  provider_name?: string // 审计修复 M3:上游名(管理端展示全部模型)
+  provider_channel?: string
+  provider_enabled?: boolean
+}
+
+// 手动型渠道占位值:Radix Select 不允许空串 value
+const MANUAL_CHANNEL = '__manual__'
+
+// 高峰时段结构化编辑(审计修复 M4):时间段行列表替代手填 JSON
+interface PeakWindowRow {
+  start: string
+  end: string
+}
+
+function parsePeakWindows(s: string): PeakWindowRow[] {
+  try {
+    const arr = JSON.parse(s)
+    if (!Array.isArray(arr)) return []
+    return arr
+      .filter((w: any) => w && typeof w.start === 'string' && typeof w.end === 'string')
+      .map((w: any) => ({ start: w.start, end: w.end }))
+  } catch {
+    return []
+  }
 }
 
 function formatCaps(defaultParams: string): string {
@@ -53,19 +79,34 @@ function formatCaps(defaultParams: string): string {
   }
 }
 
+// http(s) URL 校验(审计修复 L3):base_url/search_endpoint/server_base_url 前置拦截
+function isHttpUrl(v: string): boolean {
+  try {
+    const u = new URL(v)
+    return u.protocol === 'http:' || u.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 export default function Gateway() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [models, setModels] = useState<Model[]>([])
   const [channels, setChannels] = useState<Channel[]>([])
   const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', allow_private: false, search_endpoint: '', server_base_url: '' })
+  const [peakList, setPeakList] = useState<PeakWindowRow[]>([])
   const [error, setError] = useState('')
   const [okMsg, setOkMsg] = useState('')
   const [syncMsg, setSyncMsg] = useState('')
+  const [loading, setLoading] = useState(true) // 审计修复 L2
 
   const [provDialog, setProvDialog] = useState(false)
   const [provForm, setProvForm] = useState({ name: '', channel: '', base_url: '', api_key: '', models: '' })
   const [modelDialog, setModelDialog] = useState(false)
   const [modelForm, setModelForm] = useState({ name: '', provider_id: '', display_name: '', input_price_per_1m: '', output_price_per_1m: '', offpeak_discount: '' })
+  // 上游编辑(审计修复 M3):复用创建字段 + enabled 开关
+  const [editProv, setEditProv] = useState<Provider | null>(null)
+  const [editProvForm, setEditProvForm] = useState({ name: '', channel: '', base_url: '', api_key: '', models: '', enabled: true })
 
   const load = useCallback(async () => {
     try {
@@ -78,30 +119,65 @@ export default function Gateway() {
       setProviders(p.providers ?? [])
       setModels(m.models ?? [])
       setCfg(g)
+      setPeakList(parsePeakWindows(g.peak_windows ?? ''))
       setChannels(ch.channels ?? [])
+      setError('')
     } catch (err: any) {
       setError(err.message)
+    } finally {
+      setLoading(false)
     }
   }, [])
 
   useEffect(() => { load() }, [load])
 
+  function flash(msg: string) {
+    setOkMsg(msg)
+    setTimeout(() => setOkMsg(''), 2000)
+  }
+
   async function saveGateway() {
+    // 前端校验(审计修复 L3):限流/配额数值、URL 格式
+    const rl = Number(cfg.rate_limit)
+    if (!Number.isInteger(rl) || rl <= 0 || rl > 100000) {
+      setError('每用户限流必须是正整数(1-100000)')
+      return
+    }
+    if (cfg.monthly_quota !== '') {
+      const mq = Number(cfg.monthly_quota)
+      if (!Number.isInteger(mq) || mq < 0) { setError('月 token 配额必须是非负整数'); return }
+    }
+    if (cfg.monthly_quota_money !== '') {
+      const mm = Number(cfg.monthly_quota_money)
+      if (Number.isNaN(mm) || mm < 0) { setError('月金额配额必须是非负数字'); return }
+    }
+    if (cfg.search_endpoint && !isHttpUrl(cfg.search_endpoint)) { setError('web_search 端点必须是 http(s) URL'); return }
+    if (cfg.server_base_url && !isHttpUrl(cfg.server_base_url)) { setError('对外访问地址必须是 http(s) URL'); return }
+    if (peakList.some((w) => !w.start || !w.end || w.start >= w.end)) {
+      setError('高峰时段每行的开始时间必须早于结束时间')
+      return
+    }
     try {
-      await request('/api/admin/gateway', { method: 'PUT', body: JSON.stringify(cfg) })
-      setOkMsg('已保存')
-      setTimeout(() => setOkMsg(''), 2000)
+      // 高峰时段由结构化列表序列化;空列表 = 清空(无峰谷价,审计修复 H1/M4)
+      const body = { ...cfg, peak_windows: peakList.length ? JSON.stringify(peakList) : '' }
+      await request('/api/admin/gateway', { method: 'PUT', body: JSON.stringify(body) })
+      setError('')
+      flash('已保存')
     } catch (err: any) {
       setError(err.message)
     }
   }
 
   async function createProvider() {
+    // 前端校验(审计修复 L3/L4):名称/URL 必填、渠道型 key 必填
+    if (!provForm.name.trim()) { setError('请填写上游名称'); return }
+    if (!isHttpUrl(provForm.base_url)) { setError('Base URL 必须是 http(s) URL'); return }
+    if (provForm.channel && !provForm.api_key) { setError('渠道型上游必须填写 API Key'); return }
     try {
       const r = await request('/api/admin/providers', {
         method: 'POST',
         body: JSON.stringify({
-          name: provForm.name,
+          name: provForm.name.trim(),
           channel: provForm.channel,
           base_url: provForm.base_url,
           api_key: provForm.api_key,
@@ -109,17 +185,50 @@ export default function Gateway() {
         }),
       })
       const sync = r.sync
+      setError('')
       if (sync?.error) {
-        setError(`已保存,但模型同步失败:${sync.error}(可稍后点"立即同步"重试)`)
+        setSyncMsg(`已保存,但模型同步失败:${sync.error}(可稍后点"立即同步"重试)`)
+        setTimeout(() => setSyncMsg(''), 4000)
       } else if (sync && sync.added > 0) {
-        setSyncMsg(`已上架 ${sync.added} 个模型(移除 ${sync.removed ?? 0})`)
+        flash(`已上架 ${sync.added} 个模型(移除 ${sync.removed ?? 0})`)
       } else if (sync) {
-        setSyncMsg('已保存,上游未返回新模型')
+        flash('已保存,上游未返回新模型')
       } else {
-        setOkMsg('已保存')
+        flash('已保存')
       }
       setProvDialog(false)
       setProvForm({ name: '', channel: '', base_url: '', api_key: '', models: '' })
+      load()
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
+  async function saveProviderEdit() {
+    if (!editProv) return
+    if (!editProvForm.name.trim()) { setError('请填写上游名称'); return }
+    if (!isHttpUrl(editProvForm.base_url)) { setError('Base URL 必须是 http(s) URL'); return }
+    // 编辑时 API Key 留空 = 不更换;仅当上游原本无 key 且选了渠道时才强制
+    if (editProvForm.channel && editProvForm.api_key.trim() === '' && (!editProv.api_key || editProv.api_key === '')) {
+      setError('渠道型上游必须填写 API Key')
+      return
+    }
+    try {
+      const body: Record<string, any> = {
+        name: editProvForm.name.trim(),
+        channel: editProvForm.channel,
+        base_url: editProvForm.base_url,
+        enabled: editProvForm.enabled,
+      }
+      // 密钥留空 = 不更换;模型清单渠道型不提交(服务端切渠道时自动清空手动清单)
+      if (editProvForm.api_key.trim() !== '') body.api_key = editProvForm.api_key
+      if (!editProvForm.channel && editProvForm.models.trim() !== '') {
+        body.models = editProvForm.models.split(',').map((s) => s.trim()).filter(Boolean)
+      }
+      await request(`/api/admin/providers/${editProv.id}`, { method: 'PUT', body: JSON.stringify(body) })
+      setEditProv(null)
+      setError('')
+      flash('已保存')
       load()
     } catch (err: any) {
       setError(err.message)
@@ -149,6 +258,7 @@ export default function Gateway() {
       })
       setModelDialog(false)
       setModelForm({ name: '', provider_id: '', display_name: '', input_price_per_1m: '', output_price_per_1m: '', offpeak_discount: '' })
+      setError('')
       load()
     } catch (err: any) {
       setError(err.message)
@@ -159,16 +269,22 @@ export default function Gateway() {
     if (!window.confirm('删除该上游?其模型将一并删除')) return
     try {
       await request(`/api/admin/providers/${id}`, { method: 'DELETE' })
+      setError('')
       load()
     } catch (err: any) {
       setError(err.message)
     }
   }
 
-  async function deleteModel(id: number) {
-    if (!window.confirm('删除该模型?客户端建议清单将移除。')) return
+  async function deleteModel(m: Model) {
+    // 审计修复 H2:渠道同步模型删除后不会随同步复活(服务端记入排除名单)
+    const hint = m.provider_channel
+      ? '该模型由上游同步;删除后同步不会自动恢复,如需恢复请重新添加。'
+      : '客户端建议清单将移除。'
+    if (!window.confirm(`删除该模型?${hint}`)) return
     try {
-      await request(`/api/admin/models/${id}`, { method: 'DELETE' })
+      await request(`/api/admin/models/${m.id}`, { method: 'DELETE' })
+      setError('')
       load()
     } catch (err: any) {
       setError(err.message)
@@ -196,6 +312,7 @@ export default function Gateway() {
       if (editPriceForm.offpeak.trim() !== '') body.offpeak_discount = Number(editPriceForm.offpeak)
       await request(`/api/admin/models/${editModel.id}`, { method: 'PUT', body: JSON.stringify(body) })
       setEditModel(null)
+      setError('')
       load()
     } catch (err: any) {
       setError(err.message)
@@ -205,17 +322,55 @@ export default function Gateway() {
   async function syncAll() {
     try {
       const r = await request('/api/admin/providers/sync-all', { method: 'POST' })
-      const results: { provider: string; added: number; removed: number; error?: string }[] = r.results ?? []
-      const summary = results
+      const results: { provider: string; added: number; removed: number; skipped?: boolean; error?: string }[] = r.results ?? []
+      // 审计修复 L5/L8:手动型上游折叠为一行汇总,不再逐条当错误展示
+      const skipped = results.filter((x) => x.skipped).length
+      const active = results.filter((x) => !x.skipped)
+      const parts: string[] = []
+      const summary = active
         .map((x) => (x.error ? `${x.provider}: ${x.error}` : `${x.provider}: +${x.added}/-${x.removed}`))
-        .join('; ')
-      setSyncMsg(summary || '没有可同步的上游')
+        .filter(Boolean)
+      if (summary.length) parts.push(summary.join('; '))
+      if (skipped > 0) parts.push(`${skipped} 个手动型上游跳过`)
+      setSyncMsg(parts.join('; ') || '同步完成,无变化')
       setTimeout(() => setSyncMsg(''), 4000)
+      setError('')
       load()
     } catch (err: any) {
       setError(err.message)
     }
   }
+
+  function openProviderEdit(p: Provider) {
+    setEditProv(p)
+    setEditProvForm({
+      name: p.name,
+      channel: p.channel,
+      base_url: p.base_url,
+      api_key: '',
+      models: p.models.join(', '),
+      enabled: p.enabled,
+    })
+  }
+
+  async function toggleProviderEnabled(p: Provider, enabled: boolean) {
+    try {
+      await request(`/api/admin/providers/${p.id}`, { method: 'PUT', body: JSON.stringify({ enabled }) })
+      setError('')
+      load()
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
+  const addPeak = () => setPeakList((l) => [...l, { start: '09:00', end: '12:00' }])
+  const removePeak = (i: number) => setPeakList((l) => l.filter((_, idx) => idx !== i))
+  const presetPeak = () => setPeakList([
+    { start: '09:00', end: '12:00' },
+    { start: '14:00', end: '18:00' },
+  ])
+  const updatePeak = (i: number, field: 'start' | 'end', v: string) =>
+    setPeakList((l) => l.map((w, idx) => (idx === i ? { ...w, [field]: v } : w)))
 
   return (
     <div className="space-y-6">
@@ -243,49 +398,59 @@ export default function Gateway() {
               </Select>
             </div>
             <div className="space-y-1">
-              <Label>每用户网关限流(次/分钟)</Label>
-              <Input value={cfg.rate_limit} onChange={(e) => setCfg({ ...cfg, rate_limit: e.target.value })} />
+              <Label htmlFor="rate-limit">每用户网关限流(次/分钟)</Label>
+              <Input id="rate-limit" type="number" min={1} max={100000} value={cfg.rate_limit}
+                onChange={(e) => setCfg({ ...cfg, rate_limit: e.target.value })} />
             </div>
             <div className="space-y-1">
-              <Label>每用户默认月配额(token)</Label>
-              <Input value={cfg.monthly_quota} onChange={(e) => setCfg({ ...cfg, monthly_quota: e.target.value })} />
+              <Label htmlFor="monthly-quota">每用户默认月配额(token)</Label>
+              <Input id="monthly-quota" type="number" min={0} value={cfg.monthly_quota}
+                onChange={(e) => setCfg({ ...cfg, monthly_quota: e.target.value })} />
               <p className="text-xs text-muted-foreground">0 = 不限;员工默认按月统计,可在用户页单独覆盖</p>
             </div>
             <div className="space-y-1">
-              <Label>每用户默认月金额配额(元)</Label>
-              <Input value={cfg.monthly_quota_money} onChange={(e) => setCfg({ ...cfg, monthly_quota_money: e.target.value })} />
+              <Label htmlFor="monthly-quota-money">每用户默认月金额配额(元)</Label>
+              <Input id="monthly-quota-money" type="number" min={0} step="0.01" value={cfg.monthly_quota_money}
+                onChange={(e) => setCfg({ ...cfg, monthly_quota_money: e.target.value })} />
               <p className="text-xs text-muted-foreground">
                 0 = 不限;按模型定价折算费用统计,可在用户页单独覆盖
               </p>
             </div>
           </div>
+          {/* 高峰时段结构化编辑(审计修复 M4):时间段行列表,替代手填 JSON */}
           <div className="space-y-1">
-            <Label htmlFor="peak-windows">高峰时段(JSON,北京时间)</Label>
-            <div className="flex gap-2">
-              <Input
-                id="peak-windows"
-                className="font-mono"
-                placeholder='留空 = 无峰谷价,如 [{"start":"09:00","end":"12:00"},{"start":"14:00","end":"18:00"}]'
-                value={cfg.peak_windows}
-                onChange={(e) => setCfg({ ...cfg, peak_windows: e.target.value })}
-              />
-              <Button
-                size="sm"
-                variant="outline"
-                className="shrink-0"
-                type="button"
-                onClick={() => setCfg({
-                  ...cfg,
-                  peak_windows: '[{"start":"09:00","end":"12:00"},{"start":"14:00","end":"18:00"}]',
-                })}
-              >
-                DeepSeek 当前政策
-              </Button>
+            <Label>高峰时段(北京时间)</Label>
+            <div className="space-y-2">
+              {peakList.map((w, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <Input
+                    type="time"
+                    aria-label={`高峰开始 ${i + 1}`}
+                    value={w.start}
+                    onChange={(e) => updatePeak(i, 'start', e.target.value)}
+                  />
+                  <span className="text-xs text-muted-foreground">至</span>
+                  <Input
+                    type="time"
+                    aria-label={`高峰结束 ${i + 1}`}
+                    value={w.end}
+                    onChange={(e) => updatePeak(i, 'end', e.target.value)}
+                  />
+                  <Button size="sm" variant="outline" type="button" onClick={() => removePeak(i)}>移除</Button>
+                </div>
+              ))}
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="outline" type="button" onClick={addPeak}>添加时段</Button>
+                <Button size="sm" variant="outline" type="button" onClick={presetPeak}>DeepSeek 当前政策</Button>
+                {peakList.length > 0 && (
+                  <Button size="sm" variant="ghost" type="button" onClick={() => setPeakList([])}>清空(无峰谷价)</Button>
+                )}
+              </div>
             </div>
             <p className="text-xs text-muted-foreground">
               高峰时段按北京时间判定,半开区间 [start,end)。高峰窗口外(空闲时段)且模型配置了低谷折扣率时,
-              费用按折扣率打折。DeepSeek 官方当前政策(2026-08-16 生效):高峰 = 09:00-12:00、14:00-18:00,
-              空闲价 = 高峰价 × 50%(含缓存命中价);历史 16:30-00:30 错峰政策已废弃。
+              费用按折扣率打折。清空 = 无峰谷价(全天标准价)。DeepSeek 官方当前政策(2026-08-16 生效):
+              高峰 = 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%;历史 16:30-00:30 错峰政策已废弃。
             </p>
           </div>
           <div className="grid grid-cols-2 gap-4">
@@ -294,17 +459,17 @@ export default function Gateway() {
               <Label>允许 web_fetch 访问私有网段</Label>
             </div>
             <div className="space-y-1">
-              <Label>web_search 端点</Label>
-              <Input placeholder="https://search.example.com/q" value={cfg.search_endpoint}
+              <Label htmlFor="search-endpoint">web_search 端点</Label>
+              <Input id="search-endpoint" type="url" placeholder="https://search.example.com/q" value={cfg.search_endpoint}
                 onChange={(e) => setCfg({ ...cfg, search_endpoint: e.target.value })} />
             </div>
           </div>
           <div className="space-y-1">
-            <Label>对外访问地址 (Server Base URL)</Label>
-            <Input placeholder="https://picoaide.example.com" value={cfg.server_base_url}
+            <Label htmlFor="server-base-url">对外访问地址 (Server Base URL)</Label>
+            <Input id="server-base-url" type="url" placeholder="https://picoaide.example.com" value={cfg.server_base_url}
               onChange={(e) => setCfg({ ...cfg, server_base_url: e.target.value })} />
             <p className="text-xs text-muted-foreground">
-              客户端登录与员工访问入口(经 Caddy HTTPS 反代后的地址);填写后管理页顶部展示
+              客户端登录与员工访问入口(经 Caddy HTTPS 反代后的地址);填写后管理页顶部展示;清空保存可移除
             </p>
           </div>
           <Button onClick={saveGateway}>保存</Button>
@@ -328,11 +493,16 @@ export default function Gateway() {
                 <TableHead>Base URL</TableHead>
                 <TableHead>API Key</TableHead>
                 <TableHead>模型</TableHead>
+                <TableHead>启用</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {providers.map((p) => (
+              {loading ? (
+                <TableRow><TableCell colSpan={7}><Skeleton className="h-8 w-full" /></TableCell></TableRow>
+              ) : providers.length === 0 ? (
+                <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">暂无上游,点击「添加上游」开始接入</TableCell></TableRow>
+              ) : providers.map((p) => (
                 <TableRow key={p.id}>
                   <TableCell>{p.name}</TableCell>
                   <TableCell>{p.channel ? <Badge variant="secondary">{p.channel}</Badge> : '—'}</TableCell>
@@ -341,7 +511,11 @@ export default function Gateway() {
                   <TableCell>
                     {p.channel ? <span className="text-xs text-muted-foreground">自动同步</span> : p.models.join(', ')}
                   </TableCell>
-                  <TableCell className="text-right">
+                  <TableCell>
+                    <Switch checked={p.enabled} onCheckedChange={(v) => toggleProviderEnabled(p, v)} aria-label={`启用 ${p.name}`} />
+                  </TableCell>
+                  <TableCell className="text-right space-x-2">
+                    <Button size="sm" variant="outline" onClick={() => openProviderEdit(p)}>编辑</Button>
                     <Button size="sm" variant="destructive" onClick={() => deleteProvider(p.id)}>删除</Button>
                   </TableCell>
                 </TableRow>
@@ -354,7 +528,7 @@ export default function Gateway() {
       <Card>
         <CardHeader>
           <CardTitle>模型管理</CardTitle>
-          <CardDescription>对客户端可见的模型列表</CardDescription>
+          <CardDescription>对客户端可见的模型列表(含已停用上游的模型,停用后客户端不可见)</CardDescription>
           <div className="flex justify-end gap-2">
             <Button size="sm" variant="outline" onClick={syncAll}>立即同步</Button>
             <Button size="sm" onClick={() => setModelDialog(true)}>新增模型</Button>
@@ -366,19 +540,30 @@ export default function Gateway() {
               <TableRow>
                 <TableHead>模型名</TableHead>
                 <TableHead>显示名</TableHead>
+                <TableHead>上游</TableHead>
                 <TableHead>能力</TableHead>
                 <TableHead>价格(元/百万 token)</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {models.map((m) => {
-                const priced = (m.input_price_per_1m ?? 0) > 0 || (m.output_price_per_1m ?? 0) > 0
+              {loading ? (
+                <TableRow><TableCell colSpan={6}><Skeleton className="h-8 w-full" /></TableCell></TableRow>
+              ) : models.length === 0 ? (
+                <TableRow><TableCell colSpan={6} className="text-center text-muted-foreground">暂无模型,添加手动型上游或点击「立即同步」</TableCell></TableRow>
+              ) : models.map((m) => {
+                const priced = isModelPriced(m) // 审计修复 M6:输入价>0 或 输出价>0 即已定价
                 const offpeak = m.offpeak_discount !== null && m.offpeak_discount !== undefined && m.offpeak_discount > 0 && m.offpeak_discount < 1
                 return (
                   <TableRow key={m.id}>
                     <TableCell className="font-mono">{m.name}</TableCell>
                     <TableCell>{m.display_name}</TableCell>
+                    <TableCell>
+                      <span className="text-xs">{m.provider_name || '—'}</span>
+                      {m.provider_enabled === false && (
+                        <Badge variant="outline" className="ml-1 text-[10px] text-muted-foreground">停用</Badge>
+                      )}
+                    </TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground">{formatCaps(m.default_params)}</TableCell>
                     <TableCell>
                       {priced ? (
@@ -392,7 +577,7 @@ export default function Gateway() {
                     </TableCell>
                     <TableCell className="text-right space-x-2">
                       <Button size="sm" variant="outline" onClick={() => openModelPricing(m)}>价格</Button>
-                      <Button size="sm" variant="destructive" onClick={() => deleteModel(m.id)}>删除</Button>
+                      <Button size="sm" variant="destructive" onClick={() => deleteModel(m)}>删除</Button>
                     </TableCell>
                   </TableRow>
                 )
@@ -409,19 +594,20 @@ export default function Gateway() {
             <div className="space-y-1">
               <Label>渠道</Label>
               <Select
-                value={provForm.channel}
+                value={provForm.channel || MANUAL_CHANNEL}
                 onValueChange={(v) => {
-                  const ch = channels.find((c) => c.name === v)
+                  const ch = v === MANUAL_CHANNEL ? undefined : channels.find((c) => c.name === v)
                   setProvForm((prev) => ({
                     ...prev,
-                    channel: v,
+                    channel: ch ? ch.name : '',
                     // 渠道默认地址自动回填(未手填时)
                     base_url: prev.base_url === '' && ch ? ch.base_url : prev.base_url,
                   }))
                 }}
               >
-                <SelectTrigger><SelectValue placeholder="留空 = 手动型上游" /></SelectTrigger>
+                <SelectTrigger><SelectValue placeholder="选择渠道" /></SelectTrigger>
                 <SelectContent>
+                  <SelectItem value={MANUAL_CHANNEL}>手动型(无渠道)</SelectItem>
                   {channels.map((c) => (
                     <SelectItem key={c.name} value={c.name}>{c.name}</SelectItem>
                   ))}
@@ -438,13 +624,14 @@ export default function Gateway() {
             <div className="space-y-1">
               <Label>Base URL(渠道型留空自动使用渠道默认地址)</Label>
               <Input
+                type="url"
                 value={provForm.base_url}
                 placeholder={provForm.channel ? channels.find((c) => c.name === provForm.channel)?.base_url ?? '' : 'https://api.example.com'}
                 onChange={(e) => setProvForm({ ...provForm, base_url: e.target.value })}
               />
             </div>
             <div className="space-y-1">
-              <Label>API Key</Label>
+              <Label>API Key{provForm.channel ? '(必填)' : ''}</Label>
               <Input type="password" placeholder="sk-..." value={provForm.api_key} onChange={(e) => setProvForm({ ...provForm, api_key: e.target.value })} />
             </div>
             <div className="space-y-1">
@@ -457,6 +644,68 @@ export default function Gateway() {
               />
             </div>
             <Button className="w-full" onClick={createProvider}>添加</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 上游编辑(审计修复 M3) */}
+      <Dialog open={!!editProv} onOpenChange={(open) => { if (!open) setEditProv(null) }}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>编辑上游 · {editProv?.name}</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label>渠道</Label>
+              <Select
+                value={editProvForm.channel || MANUAL_CHANNEL}
+                onValueChange={(v) => {
+                  const ch = v === MANUAL_CHANNEL ? undefined : channels.find((c) => c.name === v)
+                  setEditProvForm((prev) => ({
+                    ...prev,
+                    channel: ch ? ch.name : '',
+                    base_url: ch && prev.base_url === '' ? ch.base_url : prev.base_url,
+                  }))
+                }}
+              >
+                <SelectTrigger><SelectValue placeholder="选择渠道" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={MANUAL_CHANNEL}>手动型(无渠道)</SelectItem>
+                  {channels.map((c) => (
+                    <SelectItem key={c.name} value={c.name}>{c.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                渠道型自动同步上游模型,手动模型清单将被清空;手动型可维护模型列表
+              </p>
+            </div>
+            <div className="space-y-1">
+              <Label>名称</Label>
+              <Input value={editProvForm.name} onChange={(e) => setEditProvForm({ ...editProvForm, name: e.target.value })} />
+            </div>
+            <div className="space-y-1">
+              <Label>Base URL</Label>
+              <Input type="url" value={editProvForm.base_url}
+                placeholder={editProvForm.channel ? channels.find((c) => c.name === editProvForm.channel)?.base_url ?? '' : 'https://api.example.com'}
+                onChange={(e) => setEditProvForm({ ...editProvForm, base_url: e.target.value })} />
+            </div>
+            <div className="space-y-1">
+              <Label>API Key(留空 = 不更换)</Label>
+              <Input type="password" placeholder="sk-..." value={editProvForm.api_key} onChange={(e) => setEditProvForm({ ...editProvForm, api_key: e.target.value })} />
+            </div>
+            <div className="space-y-1">
+              <Label>模型(逗号分隔,渠道型自动同步无需填写)</Label>
+              <Input
+                value={editProvForm.models}
+                disabled={!!editProvForm.channel}
+                placeholder={editProvForm.channel ? '保存后自动同步' : 'deepseek-chat, deepseek-reasoner'}
+                onChange={(e) => setEditProvForm({ ...editProvForm, models: e.target.value })}
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <Switch checked={editProvForm.enabled} onCheckedChange={(v) => setEditProvForm({ ...editProvForm, enabled: v })} />
+              <Label>启用该上游(停用后不参与模型路由,但模型仍可在本页管理)</Label>
+            </div>
+            <Button className="w-full" onClick={saveProviderEdit}>保存</Button>
           </div>
         </DialogContent>
       </Dialog>

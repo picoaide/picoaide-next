@@ -100,3 +100,12 @@ export function moneyPercent(used: number, quota: number | null | undefined): nu
 export function moneyOver(used: number, quota: number | null | undefined): boolean {
   return !!quota && quota > 0 && used > quota
 }
+
+// 模型是否已定价(审计修复 M6):输入价>0 或 输出价>0 即已定价。
+// 纯 embedding 模型只配输入价也算已定价。Gateway 与 Usage 共用,避免
+// 两页对同一模型给出矛盾的「未定价」判定(此前 Usage 把仅输入定价的
+// embedding 模型误报为未定价,弹"金额配额可能被低估"横幅)。
+export function isModelPriced(m: { input_price_per_1m?: number | null; output_price_per_1m?: number | null } | null | undefined): boolean {
+  if (!m) return false
+  return (m.input_price_per_1m ?? 0) > 0 || (m.output_price_per_1m ?? 0) > 0
+}
