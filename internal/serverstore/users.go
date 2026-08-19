@@ -263,6 +263,11 @@ func nilIfNilFloat64(v *float64) any {
 // constraint. Deleting the last remaining admin rolls back with ErrLastAdmin
 // (C-17: the guard runs inside the transaction, closing the count-then-delete
 // TOCTOU; 审计 S1: kb_folder_users rows keyed by username are cleaned too).
+//
+// 权衡(审计 L4):usage 为计费原始记录,删除用户会物理删除其全部用量/费用,
+// 历史统计与部门预算成本随之减少、不可追溯。当前采用硬删以保证 FK 完整与
+// 「删即消失」的管理语义;如后续需要计费审计留存,应改为软删(users.status
+// 墓碑态 + usage 保留),本函数签名与调用方需同步调整。
 func DeleteUser(db *sql.DB, id int64) error {
 	tx, err := db.Begin()
 	if err != nil {
