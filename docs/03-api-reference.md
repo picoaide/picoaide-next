@@ -30,6 +30,7 @@
 | POST | `/api/auth/login` | 无 | 密码登录(local/LDAP);body `{server_url?, username, password}` → `{token}` |
 | POST | `/api/auth/logout` | Bearer | 吊销当前 token |
 | GET | `/api/auth/me` | Bearer | 当前用户 `{id, username, display_name, email, is_admin, source}` |
+| GET | `/api/auth/usage` | Bearer | 员工用量概览(自查询):`{is_admin, quota_tokens, quota_money, monthly_usage/cost, remaining_tokens/money(不限=null), today_usage/cost, yesterday_usage/cost, total_usage/cost, dept_budgets[]}`;有效配额 = 个人覆盖→全局默认,admin 豁免 |
 | GET | `/api/auth/oidc/login` | 无 | 跳转 OIDC 授权页(配置后启用) |
 | GET | `/api/auth/oidc/callback` | 无 | OIDC 回调,换取服务端 token |
 
