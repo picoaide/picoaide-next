@@ -465,3 +465,231 @@ func TestUsageAggregateUserFilter(t *testing.T) {
 		t.Fatalf("user+filter rows = %+v, want [alice]", rows)
 	}
 }
+
+// ---- 金额(费用)维度(0022) ----
+
+// mustPricedModel 创建带价格的模型并返回模型名。
+func mustPricedModel(t *testing.T, db *sql.DB, name string, in, out float64) {
+	t.Helper()
+	pid, err := AddGatewayProvider(db, &GatewayProvider{Name: "prov-" + name, BaseURL: "http://x", APIKeyEnc: "k", Enabled: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inPtr, outPtr := in, out
+	if _, err := AddModel(db, &Model{Name: name, ProviderID: pid, InputPricePer1M: &inPtr, OutputPricePer1M: &outPtr}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRecordUsageComputesCost: 有定价模型 → usage.cost = pt/1e6*in + ct/1e6*out。
+func TestRecordUsageComputesCost(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	mustPricedModel(t, db, "priced-model", 2.0, 8.0) // 2元/1M in, 8元/1M out
+
+	id, err := RecordUsage(db, uid, "priced-model", 1_000_000, 500_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cost float64
+	if err := db.QueryRow("SELECT cost FROM usage WHERE id = ?", id).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	want := 2.0 + 4.0 // 1M*2/1M + 0.5M*8/1M
+	if cost != want {
+		t.Fatalf("cost = %v, want %v", cost, want)
+	}
+}
+
+// TestRecordUsageUnpricedModelCostZero: 未定价/无模型行 → cost=0(页面标注未定价)。
+func TestRecordUsageUnpricedModelCostZero(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	id, err := RecordUsage(db, uid, "no-such-model", 1_000_000, 1_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cost float64
+	if err := db.QueryRow("SELECT cost FROM usage WHERE id = ?", id).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	if cost != 0 {
+		t.Fatalf("cost = %v, want 0 (unpriced)", cost)
+	}
+}
+
+// TestUpdateUsageTokensRecomputesCost: 流式 pending 行回填 token 后 cost 必须重算。
+func TestUpdateUsageTokensRecomputesCost(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	mustPricedModel(t, db, "priced-model", 2.0, 8.0)
+
+	id, err := RecordUsage(db, uid, "priced-model", 0, 0) // pending
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cost float64
+	if err := db.QueryRow("SELECT cost FROM usage WHERE id = ?", id).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	if cost != 0 {
+		t.Fatalf("pending cost = %v, want 0", cost)
+	}
+	if err := UpdateUsageTokens(db, id, 1_000_000, 500_000); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT cost FROM usage WHERE id = ?", id).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	if cost != 6.0 {
+		t.Fatalf("backfilled cost = %v, want 6.0", cost)
+	}
+}
+
+// TestUserMonthlyCost: 当月费用 SUM(cost),上月不计入。
+func TestUserMonthlyCost(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	mustPricedModel(t, db, "priced-model", 2.0, 8.0)
+
+	id, err := RecordUsage(db, uid, "priced-model", 1_000_000, 500_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setCreatedAt(t, db, id, "2000-01-01 10:00:00") // 上月
+	id2, err := RecordUsage(db, uid, "priced-model", 500_000, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setCreatedAt(t, db, id2, time.Now().Format("2006-01-02")+" 09:00:00") // 本月
+
+	cost, err := UserMonthlyCost(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cost != 1.0 { // 0.5M*2/1M
+		t.Fatalf("monthly cost = %v, want 1.0", cost)
+	}
+}
+
+// TestUserMonthlyCostBatch: 批量费用查询(管理页 N+1 防护)。
+func TestUserMonthlyCostBatch(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	uid2 := mustUserID(t, db)
+	mustPricedModel(t, db, "priced-model", 2.0, 8.0)
+	if _, err := RecordUsage(db, uid, "priced-model", 1_000_000, 0); err != nil {
+		t.Fatal(err)
+	}
+	costs, err := UserMonthlyCostBatch(db, []int64{uid, uid2, 9999})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if costs[uid] != 2.0 {
+		t.Fatalf("uid cost = %v, want 2.0", costs[uid])
+	}
+	if costs[uid2] != 0 {
+		t.Fatalf("uid2 cost = %v, want 0", costs[uid2])
+	}
+}
+
+// TestEffectiveMoneyQuota: admin 豁免 → 个人覆盖 → 全局默认;0=不限。
+func TestEffectiveMoneyQuota(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	mustUserID(t, db) // uid1 = 普通用户
+
+	// 无个人值且无全局默认 → 不限
+	u, err := GetUserByID(db, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, err := EffectiveMoneyQuota(db, u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q != 0 {
+		t.Fatalf("no setting quota = %v, want 0 (unlimited)", q)
+	}
+
+	// 全局默认 100
+	if err := SetSetting(db, MonthlyMoneyQuotaSetting, "100"); err != nil {
+		t.Fatal(err)
+	}
+	q, err = EffectiveMoneyQuota(db, u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q != 100 {
+		t.Fatalf("global default quota = %v, want 100", q)
+	}
+
+	// 个人覆盖 50
+	m := 50.0
+	u.QuotaMoney = &m
+	if err := UpdateUser(db, u); err != nil {
+		t.Fatal(err)
+	}
+	q, err = EffectiveMoneyQuota(db, u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q != 50 {
+		t.Fatalf("override quota = %v, want 50", q)
+	}
+
+	// 个人 0 = 不限,覆盖全局默认
+	z := 0.0
+	u.QuotaMoney = &z
+	if err := UpdateUser(db, u); err != nil {
+		t.Fatal(err)
+	}
+	q, err = EffectiveMoneyQuota(db, u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q != 0 {
+		t.Fatalf("override zero quota = %v, want 0", q)
+	}
+
+	// admin 恒豁免
+	u.IsAdmin = true
+	u.QuotaMoney = nil
+	if err := UpdateUser(db, u); err != nil {
+		t.Fatal(err)
+	}
+	q, err = EffectiveMoneyQuota(db, u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q != 0 {
+		t.Fatalf("admin quota = %v, want 0", q)
+	}
+}
+
+// TestUsageAggregateCost: 聚合行携带 cost(该桶费用合计),补零桶 cost=0。
+func TestUsageAggregateCost(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	mustPricedModel(t, db, "priced-model", 2.0, 8.0)
+
+	id, err := RecordUsage(db, uid, "priced-model", 1_000_000, 500_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setCreatedAt(t, db, id, "2026-08-10 10:00:00")
+
+	rows, err := UsageAggregate(db, time.Time{}, time.Time{}, "day")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Cost != 6.0 {
+		t.Fatalf("rows = %+v, want one row cost 6.0", rows)
+	}
+}

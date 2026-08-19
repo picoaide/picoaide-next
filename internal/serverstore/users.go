@@ -22,12 +22,16 @@ type User struct {
 	// nil = follow the global default, 0 = unlimited, >0 = capped.
 	// Admins are always unlimited regardless of this value.
 	QuotaTokens *int64
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// QuotaMoney is the per-user monthly traffic quota in yuan (0022):
+	// nil = follow the global default (usage.monthly_quota_money), 0 = unlimited,
+	// >0 = capped. Admins are always unlimited regardless of this value.
+	QuotaMoney *float64
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // userCols is the canonical user column list (kept in sync with scanUser).
-const userCols = "id, username, display_name, email, password_hash, source, is_admin, status, created_at, updated_at, quota_tokens"
+const userCols = "id, username, display_name, email, password_hash, source, is_admin, status, created_at, updated_at, quota_tokens, quota_money"
 
 // CreateUserWithPassword creates a local user, hashing the plaintext password.
 func CreateUserWithPassword(db *sql.DB, username, password string) (int64, error) {
@@ -71,8 +75,9 @@ func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	var isAdmin, status int
 	var displayName, email, passwordHash sql.NullString
 	var quota sql.NullInt64
+	var quotaMoney sql.NullFloat64
 	var createdAt, updatedAt string
-	if err := row.Scan(&u.ID, &u.Username, &displayName, &email, &passwordHash, &u.Source, &isAdmin, &status, &createdAt, &updatedAt, &quota); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &displayName, &email, &passwordHash, &u.Source, &isAdmin, &status, &createdAt, &updatedAt, &quota, &quotaMoney); err != nil {
 		return nil, err
 	}
 	u.CreatedAt = parseSQLTime(createdAt)
@@ -85,15 +90,18 @@ func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	if quota.Valid {
 		u.QuotaTokens = &quota.Int64
 	}
+	if quotaMoney.Valid {
+		u.QuotaMoney = &quotaMoney.Float64
+	}
 	return &u, nil
 }
 
 // CreateUser inserts a user row and returns its id.
 func CreateUser(db *sql.DB, u *User) (int64, error) {
-	res, err := db.Exec(`INSERT INTO users (username, display_name, email, password_hash, source, is_admin, status, quota_tokens)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+	res, err := db.Exec(`INSERT INTO users (username, display_name, email, password_hash, source, is_admin, status, quota_tokens, quota_money)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		u.Username, nullIfEmpty(u.DisplayName), nullIfEmpty(u.Email), nullIfEmpty(u.PasswordHash),
-		u.Source, boolInt(u.IsAdmin), u.Status, nilIfNilInt64(u.QuotaTokens))
+		u.Source, boolInt(u.IsAdmin), u.Status, nilIfNilInt64(u.QuotaTokens), nilIfNilFloat64(u.QuotaMoney))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return 0, ErrDuplicate
@@ -126,10 +134,10 @@ func GetUserByID(db *sql.DB, id int64) (*User, error) {
 
 // UpdateUser updates display_name/email/password_hash/is_admin/status.
 func UpdateUser(db *sql.DB, u *User) error {
-	res, err := db.Exec(`UPDATE users SET display_name=?, email=?, password_hash=?, is_admin=?, status=?, quota_tokens=?, updated_at=datetime('now','localtime')
+	res, err := db.Exec(`UPDATE users SET display_name=?, email=?, password_hash=?, is_admin=?, status=?, quota_tokens=?, quota_money=?, updated_at=datetime('now','localtime')
 		WHERE id=?`,
 		nullIfEmpty(u.DisplayName), nullIfEmpty(u.Email), nullIfEmpty(u.PasswordHash),
-		boolInt(u.IsAdmin), u.Status, nilIfNilInt64(u.QuotaTokens), u.ID)
+		boolInt(u.IsAdmin), u.Status, nilIfNilInt64(u.QuotaTokens), nilIfNilFloat64(u.QuotaMoney), u.ID)
 	if err != nil {
 		return err
 	}
@@ -148,10 +156,10 @@ func UpdateUserRevokingTokens(db *sql.DB, u *User) error {
 		return err
 	}
 	defer tx.Rollback()
-	res, err := tx.Exec(`UPDATE users SET display_name=?, email=?, password_hash=?, is_admin=?, status=?, quota_tokens=?, updated_at=datetime('now','localtime')
+	res, err := tx.Exec(`UPDATE users SET display_name=?, email=?, password_hash=?, is_admin=?, status=?, quota_tokens=?, quota_money=?, updated_at=datetime('now','localtime')
 		WHERE id=?`,
 		nullIfEmpty(u.DisplayName), nullIfEmpty(u.Email), nullIfEmpty(u.PasswordHash),
-		boolInt(u.IsAdmin), u.Status, nilIfNilInt64(u.QuotaTokens), u.ID)
+		boolInt(u.IsAdmin), u.Status, nilIfNilInt64(u.QuotaTokens), nilIfNilFloat64(u.QuotaMoney), u.ID)
 	if err != nil {
 		return err
 	}
@@ -231,6 +239,14 @@ func nullIfEmpty(s string) any {
 
 // nilIfNilInt64 maps a nil *int64 to SQL NULL (tri-state quota_tokens).
 func nilIfNilInt64(v *int64) any {
+	if v == nil {
+		return nil
+	}
+	return *v
+}
+
+// nilIfNilFloat64 maps a nil *float64 to SQL NULL (tri-state quota_money).
+func nilIfNilFloat64(v *float64) any {
 	if v == nil {
 		return nil
 	}

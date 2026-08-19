@@ -23,6 +23,10 @@ type Model struct {
 	ProviderID    int64  `json:"provider_id"`
 	DisplayName   string `json:"display_name"`
 	DefaultParams string `json:"default_params"`
+	// InputPricePer1M / OutputPricePer1M 元/百万 token(0022);nil/0 = 未定价,
+	// 费用按 0 计,页面标注「未定价」。embedding 复用 input 价。
+	InputPricePer1M  *float64 `json:"input_price_per_1m"`
+	OutputPricePer1M *float64 `json:"output_price_per_1m"`
 }
 
 func scanProvider(scan interface{ Scan(...any) error }) (*GatewayProvider, error) {
@@ -233,15 +237,22 @@ func RemoveMissingProviderModels(db *sql.DB, providerID int64, keep []string) (i
 
 func scanModel(scan interface{ Scan(...any) error }) (*Model, error) {
 	var m Model
-	if err := scan.Scan(&m.ID, &m.Name, &m.ProviderID, &m.DisplayName, &m.DefaultParams); err != nil {
+	var in, out sql.NullFloat64
+	if err := scan.Scan(&m.ID, &m.Name, &m.ProviderID, &m.DisplayName, &m.DefaultParams, &in, &out); err != nil {
 		return nil, err
+	}
+	if in.Valid {
+		m.InputPricePer1M = &in.Float64
+	}
+	if out.Valid {
+		m.OutputPricePer1M = &out.Float64
 	}
 	return &m, nil
 }
 
 // GetModel loads a model by id.
 func GetModel(db *sql.DB, id int64) (*Model, error) {
-	row := db.QueryRow(`SELECT id, name, provider_id, display_name, default_params
+	row := db.QueryRow(`SELECT id, name, provider_id, display_name, default_params, input_price_per_1m, output_price_per_1m
 		FROM models WHERE id = ?`, id)
 	m, err := scanModel(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -260,13 +271,32 @@ func ModelDefaultParams(db *sql.DB, name string) (string, error) {
 	return params, err
 }
 
+// ModelPrices returns the yuan-per-1M-token input/output prices for a model
+// name (0, 0 when the model is missing or unpriced). Used to compute usage
+// cost at record time (0022).
+func ModelPrices(db *sql.DB, name string) (inputPer1M, outputPer1M float64) {
+	var in, out sql.NullFloat64
+	err := db.QueryRow(`SELECT input_price_per_1m, output_price_per_1m FROM models WHERE name = ?`, name).Scan(&in, &out)
+	if err != nil {
+		return 0, 0
+	}
+	if in.Valid {
+		inputPer1M = in.Float64
+	}
+	if out.Valid {
+		outputPer1M = out.Float64
+	}
+	return inputPer1M, outputPer1M
+}
+
 // AddModel inserts a model row.
 func AddModel(db *sql.DB, m *Model) (int64, error) {
 	if m.DefaultParams == "" {
 		m.DefaultParams = "{}"
 	}
-	res, err := db.Exec(`INSERT INTO models (name, provider_id, display_name, default_params)
-		VALUES (?, ?, ?, ?)`, m.Name, m.ProviderID, m.DisplayName, m.DefaultParams)
+	res, err := db.Exec(`INSERT INTO models (name, provider_id, display_name, default_params, input_price_per_1m, output_price_per_1m)
+		VALUES (?, ?, ?, ?, ?, ?)`, m.Name, m.ProviderID, m.DisplayName, m.DefaultParams,
+		nilIfNilFloat64(m.InputPricePer1M), nilIfNilFloat64(m.OutputPricePer1M))
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			return 0, ErrDuplicate
@@ -279,8 +309,9 @@ func AddModel(db *sql.DB, m *Model) (int64, error) {
 
 // UpdateModel updates a model row.
 func UpdateModel(db *sql.DB, m *Model) error {
-	res, err := db.Exec(`UPDATE models SET name=?, provider_id=?, display_name=?, default_params=?
-		WHERE id=?`, m.Name, m.ProviderID, m.DisplayName, m.DefaultParams, m.ID)
+	res, err := db.Exec(`UPDATE models SET name=?, provider_id=?, display_name=?, default_params=?, input_price_per_1m=?, output_price_per_1m=?
+		WHERE id=?`, m.Name, m.ProviderID, m.DisplayName, m.DefaultParams,
+		nilIfNilFloat64(m.InputPricePer1M), nilIfNilFloat64(m.OutputPricePer1M), m.ID)
 	if err != nil {
 		return err
 	}
