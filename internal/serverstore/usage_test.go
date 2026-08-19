@@ -696,6 +696,11 @@ func TestUsageAggregateCost(t *testing.T) {
 
 // ---- 峰谷价格(0023) ----
 
+// deepseekPeakWindows 为 DeepSeek 当前官方政策(2026-08-16 生效):
+// 高峰 = 北京时间 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%。
+// 测试固定此配置(设置键 usage.peak_windows)。
+var deepseekPeakWindows = `[{"start":"09:00","end":"12:00"},{"start":"14:00","end":"18:00"}]`
+
 // mustOffpeakModel 创建带价格与低谷折扣的模型。
 func mustOffpeakModel(t *testing.T, db *sql.DB, name string, in, out, offpeak float64) {
 	t.Helper()
@@ -713,41 +718,74 @@ func utc(h, m int) time.Time {
 	return time.Date(2026, 8, 19, h, m, 0, 0, time.UTC)
 }
 
-// TestOffpeakFactor:UTC 08:30-16:30(北京 16:30-00:30)为低谷,窗口内乘折扣。
+// TestParsePeakWindows:合法 JSON 解析;非法/空 → nil(无峰谷)。
+func TestParsePeakWindows(t *testing.T) {
+	w := ParsePeakWindows(deepseekPeakWindows)
+	if len(w) != 2 || w[0].StartMin != 9*60 || w[0].EndMin != 12*60 || w[1].StartMin != 14*60 || w[1].EndMin != 18*60 {
+		t.Fatalf("parsed windows = %+v", w)
+	}
+	if ParsePeakWindows("") != nil {
+		t.Fatal("empty should be nil")
+	}
+	if ParsePeakWindows("not-json") != nil {
+		t.Fatal("bad json should be nil")
+	}
+	if ParsePeakWindows(`[{"start":"12:00","end":"09:00"}]`) != nil {
+		t.Fatal("start>=end should be nil")
+	}
+	if ParsePeakWindows(`[{"start":"25:00","end":"26:00"}]`) != nil {
+		t.Fatal("bad hh:mm should be nil")
+	}
+}
+
+// TestOffpeakFactor:高峰窗口(北京 09:00-12:00、14:00-18:00)外乘折扣。
+// UTC 转北京 = +8h:UTC 01:00 = 北京 09:00(高峰起),UTC 04:00 = 北京 12:00(高峰止),
+// UTC 06:00 = 北京 14:00(高峰起),UTC 10:00 = 北京 18:00(高峰止)。
 func TestOffpeakFactor(t *testing.T) {
+	windows := ParsePeakWindows(deepseekPeakWindows)
 	cases := []struct {
 		name     string
 		now      time.Time
 		discount float64
 		want     float64
 	}{
-		{"窗口内 10:00 UTC", utc(10, 0), 0.5, 0.5},
-		{"窗口外 08:00 UTC", utc(8, 0), 0.5, 1},
-		{"窗口外 17:00 UTC", utc(17, 0), 0.5, 1},
-		{"起点 08:30:00 含", utc(8, 30), 0.5, 0.5},
-		{"起点前 08:29:59", utc(8, 29), 0.5, 1},
-		{"终点前 16:29:59", utc(16, 29), 0.5, 0.5},
-		{"终点 16:30:00 不含", utc(16, 30), 0.5, 1},
+		{"空闲 00:00 UTC(北京 08:00)", utc(0, 0), 0.5, 0.5},
+		{"高峰起 01:00 UTC(北京 09:00)含", utc(1, 0), 0.5, 1},
+		{"高峰止 04:00 UTC(北京 12:00)不含", utc(4, 0), 0.5, 0.5},
+		{"空闲 05:00 UTC(北京 13:00)", utc(5, 0), 0.5, 0.5},
+		{"高峰起 06:00 UTC(北京 14:00)含", utc(6, 0), 0.5, 1},
+		{"高峰止 10:00 UTC(北京 18:00)不含", utc(10, 0), 0.5, 0.5},
+		{"空闲 15:00 UTC(北京 23:00)", utc(15, 0), 0.5, 0.5},
 		{"无折扣 0", utc(10, 0), 0, 1},
 		{"无折扣 -1", utc(10, 0), -1, 1},
 		{"无折扣 1(显式无峰谷)", utc(10, 0), 1, 1},
 		{"无折扣 >1", utc(10, 0), 1.5, 1},
+		{"未配置窗口 → 全标准价", utc(10, 0), 0.5, 1}, // windows = nil
 	}
 	for _, c := range cases {
-		if got := offpeakFactor(c.now, c.discount); got != c.want {
+		var ws []PeakWindow
+		if c.name == "未配置窗口 → 全标准价" {
+			ws = nil
+		} else {
+			ws = windows
+		}
+		if got := offpeakFactor(c.now, c.discount, ws); got != c.want {
 			t.Errorf("%s: offpeakFactor(%v, %v) = %v, want %v", c.name, c.now, c.discount, got, c.want)
 		}
 	}
 }
 
-// TestRecordUsageOffpeakDiscount:窗口内记录按折扣价折算,窗口外按标准价。
+// TestRecordUsageOffpeakDiscount:空闲时段记录按折扣价折算,高峰时段按标准价。
 func TestRecordUsageOffpeakDiscount(t *testing.T) {
 	db, cleanup := newUsageDB(t)
 	defer cleanup()
 	uid := mustUserID(t, db)
 	mustOffpeakModel(t, db, "offpeak-model", 2.0, 8.0, 0.5) // 标准 1M in=2 + 0.5M out=4
+	if err := SetSetting(db, PeakWindowsSetting, deepseekPeakWindows); err != nil {
+		t.Fatal(err)
+	}
 
-	// 窗口内(UTC 10:00):cost = (2+4)*0.5 = 3
+	// 空闲(UTC 10:00 = 北京 18:00):cost = (2+4)*0.5 = 3
 	id, err := recordUsageKindAt(db, uid, "offpeak-model", 1_000_000, 500_000, "chat", utc(10, 0))
 	if err != nil {
 		t.Fatal(err)
@@ -760,7 +798,7 @@ func TestRecordUsageOffpeakDiscount(t *testing.T) {
 		t.Fatalf("off-peak cost = %v, want 3.0", cost)
 	}
 
-	// 窗口外(UTC 08:00):cost = 6(标准价)
+	// 高峰(UTC 08:00 = 北京 16:00):cost = 6(标准价)
 	id2, err := recordUsageKindAt(db, uid, "offpeak-model", 1_000_000, 500_000, "chat", utc(8, 0))
 	if err != nil {
 		t.Fatal(err)
@@ -773,12 +811,35 @@ func TestRecordUsageOffpeakDiscount(t *testing.T) {
 	}
 }
 
+// TestRecordUsageNoWindows:未配置高峰窗口时,即使有折扣也按标准价(防误打折)。
+func TestRecordUsageNoWindows(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	mustOffpeakModel(t, db, "offpeak-model", 2.0, 8.0, 0.5)
+
+	id, err := recordUsageKindAt(db, uid, "offpeak-model", 1_000_000, 500_000, "chat", utc(10, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cost float64
+	if err := db.QueryRow("SELECT cost FROM usage WHERE id = ?", id).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	if cost != 6.0 {
+		t.Fatalf("no-windows cost = %v, want 6.0 (standard)", cost)
+	}
+}
+
 // TestUpdateUsageTokensOffpeakRecompute:流式回填时按回填时刻折算。
 func TestUpdateUsageTokensOffpeakRecompute(t *testing.T) {
 	db, cleanup := newUsageDB(t)
 	defer cleanup()
 	uid := mustUserID(t, db)
 	mustOffpeakModel(t, db, "offpeak-model", 2.0, 8.0, 0.5)
+	if err := SetSetting(db, PeakWindowsSetting, deepseekPeakWindows); err != nil {
+		t.Fatal(err)
+	}
 
 	id, err := recordUsageKindAt(db, uid, "offpeak-model", 0, 0, "chat", utc(10, 0))
 	if err != nil {

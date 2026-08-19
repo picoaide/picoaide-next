@@ -2,6 +2,7 @@ package serverstore
 
 import (
 	"database/sql"
+	"encoding/json"
 	"strconv"
 	"strings"
 	"time"
@@ -17,37 +18,119 @@ const MonthlyQuotaSetting = "usage.monthly_quota"
 // monthly traffic quota in yuan (absent / "0" = unlimited).
 const MonthlyMoneyQuotaSetting = "usage.monthly_quota_money"
 
-// OffpeakWindowUTC 低谷窗口(UTC 08:30-16:30 = 北京 16:30-00:30)。
-// DeepSeek 官方错峰优惠:每日该时段按标准价折扣(默认 50%)。
-const (
-	offpeakStartMinuteUTC = 8*60 + 30
-	offpeakEndMinuteUTC   = 16*60 + 30
-)
+// PeakWindowsSetting 高峰时段配置(settings 键,JSON 字符串):
+//
+//	[{"start":"09:00","end":"12:00"},{"start":"14:00","end":"18:00"}]
+//
+// 语义:时段按北京时间(UTC+8,无 DST)判定,半开区间 [start, end);
+// 高峰窗口内费用按标准价,窗口外(空闲时段)按模型 offpeak_discount 打折。
+// 空串 / 缺省 / 非法 = 无峰谷价(全天标准价)。
+// DeepSeek 官方当前政策(2026-08-16 生效):高峰 = 北京时间 09:00-12:00、
+// 14:00-18:00,空闲价 = 高峰价 × 50%(含缓存命中价)。历史政策(2025,
+// deepseek-chat/reasoner,北京 16:30-00:30 错峰)已废弃,如需可自行配置。
+const PeakWindowsSetting = "usage.peak_windows"
 
-// offpeakFactor 返回时刻 now(UTC)的费用系数:低谷窗口内且 0<discount<1 → discount,
-// 否则 1(无峰谷价 / 窗口外)。
-func offpeakFactor(now time.Time, discount float64) float64 {
-	if !(discount > 0 && discount < 1) {
+// PeakWindow 一个高峰时段(北京时间 "HH:MM",半开 [start,end))。
+type PeakWindow struct {
+	Start string `json:"start"`
+	End   string `json:"end"`
+	// 内部解析后的分钟数(自午夜 0 点起)
+	StartMin int `json:"-"`
+	EndMin   int `json:"-"`
+}
+
+// parseHHMM 解析 "HH:MM" → 自午夜分钟数;非法返回 ok=false。
+func parseHHMM(s string) (int, bool) {
+	if len(s) != 5 || s[2] != ':' {
+		return 0, false
+	}
+	h, hok := s[0]-'0', s[1]-'0'
+	m, mok := s[3]-'0', s[4]-'0'
+	if h < 0 || h > 9 || m < 0 || m > 9 {
+		return 0, false
+	}
+	hh := int(h)*10 + int(hok)
+	mm := int(m)*10 + int(mok)
+	if hh > 23 || mm > 59 {
+		return 0, false
+	}
+	return hh*60 + mm, true
+}
+
+// ParsePeakWindows 解析 settings 值;非法或空 → nil(无峰谷价)。
+func ParsePeakWindows(v string) []PeakWindow {
+	if v == "" {
+		return nil
+	}
+	var raw []struct {
+		Start string `json:"start"`
+		End   string `json:"end"`
+	}
+	if err := json.Unmarshal([]byte(v), &raw); err != nil {
+		return nil
+	}
+	out := []PeakWindow{}
+	for _, r := range raw {
+		sm, sok := parseHHMM(r.Start)
+		em, eok := parseHHMM(r.End)
+		if !sok || !eok || sm >= em {
+			return nil // 整体非法即视为未配置,避免部分生效导致计费口径混乱
+		}
+		out = append(out, PeakWindow{Start: r.Start, End: r.End, StartMin: sm, EndMin: em})
+	}
+	return out
+}
+
+// loadPeakWindows 从 settings 读高峰窗口(每次记录时调用,单行查询开销可忽略)。
+func loadPeakWindows(db *sql.DB) []PeakWindow {
+	v, ok, err := GetSetting(db, PeakWindowsSetting)
+	if err != nil || !ok {
+		return nil
+	}
+	return ParsePeakWindows(v)
+}
+
+// beijingMinutes 返回 now 的北京时间分钟数(UTC+8,无 DST,不依赖 tzdata)。
+func beijingMinutes(now time.Time) int {
+	bj := now.UTC().Add(8 * time.Hour)
+	return bj.Hour()*60 + bj.Minute()
+}
+
+// inPeakWindow 判断 now(任意时区)是否处于任一高峰窗口(按北京时间)。
+func inPeakWindow(now time.Time, windows []PeakWindow) bool {
+	mins := beijingMinutes(now)
+	for _, w := range windows {
+		if mins >= w.StartMin && mins < w.EndMin {
+			return true
+		}
+	}
+	return false
+}
+
+// offpeakFactor 返回时刻 now 的费用系数:配置了高峰窗口且 now 不在窗口内
+// (空闲时段)且 0<discount<1 → discount;否则 1(无峰谷价 / 高峰时段)。
+func offpeakFactor(now time.Time, discount float64, windows []PeakWindow) float64 {
+	if !(discount > 0 && discount < 1) || len(windows) == 0 {
 		return 1
 	}
-	mins := now.UTC().Hour()*60 + now.UTC().Minute()
-	if mins >= offpeakStartMinuteUTC && mins < offpeakEndMinuteUTC {
-		return discount
+	if inPeakWindow(now, windows) {
+		return 1
 	}
-	return 1
+	return discount
 }
 
 // costOfAt computes the yuan cost for a usage row at time now from model
-// pricing (yuan per 1M tokens), applying the off-peak discount when now falls
-// inside the off-peak window (0023). Unpriced models (0,0) yield 0 cost.
-func costOfAt(now time.Time, promptTokens, completionTokens int64, inputPer1M, outputPer1M, offpeak float64) float64 {
+// pricing (yuan per 1M tokens), applying the off-peak discount in non-peak
+// windows (0023). Unpriced models (0,0) yield 0 cost.
+func costOfAt(now time.Time, promptTokens, completionTokens int64, inputPer1M, outputPer1M, offpeak float64, windows []PeakWindow) float64 {
 	base := float64(promptTokens)/1e6*inputPer1M + float64(completionTokens)/1e6*outputPer1M
-	return base * offpeakFactor(now, offpeak)
+	return base * offpeakFactor(now, offpeak, windows)
 }
 
-// costOf computes the cost for a usage row right now.
+// costOf computes the cost for a usage row right now (no peak windows —
+// used only by callers that resolve windows themselves).
 func costOf(promptTokens, completionTokens int64, inputPer1M, outputPer1M, offpeak float64) float64 {
-	return costOfAt(time.Now(), promptTokens, completionTokens, inputPer1M, outputPer1M, offpeak)
+	return costOfAt(time.Now(), promptTokens, completionTokens, inputPer1M, outputPer1M, offpeak, nil)
 }
 
 // RecordUsage inserts a chat usage row and returns its id.
@@ -67,7 +150,7 @@ func RecordUsageKind(db *sql.DB, userID int64, model string, promptTokens, compl
 // recordUsageKindAt 是 RecordUsageKind 的时间注入版本(测试固定时刻)。
 func recordUsageKindAt(db *sql.DB, userID int64, model string, promptTokens, completionTokens int64, kind string, now time.Time) (int64, error) {
 	in, out, off := ModelPrices(db, model)
-	cost := costOfAt(now, promptTokens, completionTokens, in, out, off)
+	cost := costOfAt(now, promptTokens, completionTokens, in, out, off, loadPeakWindows(db))
 	res, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, kind, cost) VALUES (?, ?, ?, ?, ?, ?)`,
 		userID, model, promptTokens, completionTokens, kind, cost)
 	if err != nil {
@@ -89,7 +172,7 @@ func updateUsageTokensAt(db *sql.DB, id, promptTokens, completionTokens int64, n
 		return err
 	}
 	in, out, off := ModelPrices(db, model)
-	cost := costOfAt(now, promptTokens, completionTokens, in, out, off)
+	cost := costOfAt(now, promptTokens, completionTokens, in, out, off, loadPeakWindows(db))
 	_, err := db.Exec("UPDATE usage SET prompt_tokens = ?, completion_tokens = ?, cost = ? WHERE id = ?",
 		promptTokens, completionTokens, cost, id)
 	return err
