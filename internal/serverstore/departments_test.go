@@ -438,6 +438,32 @@ func TestDepartmentGuards(t *testing.T) {
 	}
 }
 
+// 保留名守卫三缺一:创建/删除都被拦,但「把全员行改名」此前可绕过,
+// 改后隐式全员授权按名解析失效(effective.go findNodeByName)。补上改名守卫。
+func TestDepartmentEveryoneRowRenameGuard(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	var everyoneID int64
+	if err := db.QueryRow("SELECT id FROM groups WHERE name = '全员'").Scan(&everyoneID); err != nil {
+		t.Fatal("seeded 全员 group missing: ", err)
+	}
+	// 把全员行改名 → 必须拒绝(ErrValidation)
+	if err := UpdateDepartment(db, everyoneID, "全体员工", 0, 0, ""); err != ErrValidation {
+		t.Fatalf("rename everyone row err = %v, want ErrValidation", err)
+	}
+	// 拒绝后保留名原样,隐式授权不失效
+	if _, err := GroupByName(db, EveryoneGroupName); err != nil {
+		t.Fatalf("everyone group vanished after rejected rename: %v", err)
+	}
+	// 即使改名为另一个保留形变体(如小写/前后空格)也不得放行
+	if err := UpdateDepartment(db, everyoneID, "全员 ", 0, 0, ""); err != ErrValidation {
+		t.Fatalf("rename everyone to padded variant err = %v, want ErrValidation", err)
+	}
+}
+
 // RevokeFolderGroup 大小写不敏感(与授权解析一致)
 func TestRevokeFolderGroupCaseInsensitive(t *testing.T) {
 	db := openTestDB(t)

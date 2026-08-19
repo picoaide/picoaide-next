@@ -159,6 +159,11 @@ func UpdateDepartment(db *sql.DB, id int64, name string, parentID, leaderID int6
 		return err
 	}
 	defer tx.Rollback()
+	// 保留名:全员行不可改名(隐式全员授权按名解析,改名会静默失效;
+	// 迁移 0018 一次性 seed,无启动自愈)。
+	if g.Name == EveryoneGroupName {
+		return ErrValidation
+	}
 	if name == EveryoneGroupName {
 		return ErrValidation // 保留名
 	}
