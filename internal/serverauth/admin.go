@@ -349,7 +349,7 @@ func (a *AdminAPI) createUser(c *gin.Context) {
 		}
 	}
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_create", u.Username)
-	c.JSON(http.StatusOK, gin.H{"user": userJSON(u)})
+	c.JSON(http.StatusCreated, gin.H{"user": userJSON(u)}) // L6:创建返回 201
 }
 
 func (a *AdminAPI) updateUser(c *gin.Context) {
@@ -659,7 +659,7 @@ func (a *AdminAPI) createDepartment(c *gin.Context) {
 		}
 	}
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "dept_create", req.Name)
-	c.JSON(http.StatusOK, gin.H{"department": gin.H{"id": id, "name": req.Name}})
+	c.JSON(http.StatusCreated, gin.H{"department": gin.H{"id": id, "name": req.Name}}) // L6:创建返回 201
 }
 
 func (a *AdminAPI) updateDepartment(c *gin.Context) {
@@ -705,7 +705,8 @@ func (a *AdminAPI) updateDepartment(c *gin.Context) {
 		detail += fmt.Sprintf(" budget:%.2f", *req.BudgetMoney)
 	}
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "dept_update", detail)
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	// L6:返回资源对象,与 createDepartment 响应结构一致
+	c.JSON(http.StatusOK, gin.H{"department": gin.H{"id": id, "name": req.Name}})
 }
 
 // 错误码口径(审计 L2):URL 主资源不存在 → 404 NOT_FOUND;

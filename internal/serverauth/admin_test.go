@@ -106,7 +106,7 @@ func TestAdminAPIs(t *testing.T) {
 	}
 	// create user
 	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusCreated {
 		t.Fatalf("create user: %d %s", w.Code, w.Body.String())
 	}
 	id := int64(out["user"].(map[string]any)["id"].(float64))
@@ -166,7 +166,7 @@ func TestAdminPasswordPolicy(t *testing.T) {
 	}
 	// 10-char password -> ok
 	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"okuser","password":"tenchars12"}`, hdr)
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusCreated {
 		t.Fatalf("10-char password: %d %s", w.Code, w.Body.String())
 	}
 	id := int64(out["user"].(map[string]any)["id"].(float64))
@@ -474,7 +474,7 @@ func TestAdminUserGroupsAPI(t *testing.T) {
 	// 创建普通用户
 	var out map[string]any
 	w, out := doAdmin(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"pw12345678"}`, hdr)
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusCreated {
 		t.Fatalf("create user: %d %s", w.Code, w.Body.String())
 	}
 	aliceID := int64(out["user"].(map[string]any)["id"].(float64))
@@ -564,13 +564,13 @@ func TestAdminDepartmentsAPI(t *testing.T) {
 	// 建部门树
 	var out map[string]any
 	w, out := doAdmin(t, r, "POST", "/api/admin/departments", `{"name":"研发部"}`, hdr)
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusCreated {
 		t.Fatalf("create dept: %d %s", w.Code, w.Body.String())
 	}
 	devID := int64(out["department"].(map[string]any)["id"].(float64))
 	var frontID int64
 	w, out = doAdmin(t, r, "POST", "/api/admin/departments", `{"name":"前端组","parent_id":`+fmt.Sprint(devID)+`}`, hdr)
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusCreated {
 		t.Fatalf("create child: %d %s", w.Code, w.Body.String())
 	}
 	frontID = int64(out["department"].(map[string]any)["id"].(float64))
@@ -591,7 +591,7 @@ func TestAdminDepartmentsAPI(t *testing.T) {
 	// 用户单部门归属
 	var aliceID int64
 	w, out = doAdmin(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"pw12345678"}`, hdr)
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusCreated {
 		t.Fatalf("create user: %d", w.Code)
 	}
 	aliceID = int64(out["user"].(map[string]any)["id"].(float64))
@@ -697,7 +697,7 @@ func TestAdminUserQuota(t *testing.T) {
 
 	// create a regular user
 	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusCreated {
 		t.Fatalf("create user: %d %s", w.Code, w.Body.String())
 	}
 	id := int64(out["user"].(map[string]any)["id"].(float64))
@@ -782,7 +782,7 @@ func TestAdminUserMoneyQuota(t *testing.T) {
 	}
 
 	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusCreated {
 		t.Fatalf("create user: %d %s", w.Code, w.Body.String())
 	}
 	id := int64(out["user"].(map[string]any)["id"].(float64))
@@ -875,7 +875,7 @@ func TestAdminUsageCost(t *testing.T) {
 	}
 
 	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusCreated {
 		t.Fatalf("create user: %d %s", w.Code, w.Body.String())
 	}
 	id := int64(out["user"].(map[string]any)["id"].(float64))
@@ -933,7 +933,7 @@ func TestAdminListUsersEffectiveQuota(t *testing.T) {
 	}
 	// 员工(无个人配额)
 	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusCreated {
 		t.Fatalf("create user: %d", w.Code)
 	}
 	uid := int64(out["user"].(map[string]any)["id"].(float64))
@@ -986,6 +986,46 @@ func findUser(out map[string]any, name string) map[string]any {
 		}
 	}
 	return nil
+}
+
+// 创建端点 REST 语义(审计 L6):POST 返回 201;updateDepartment 返回资源对象。
+func TestAdminCreateReturnsCreated(t *testing.T) {
+	r, db := adminRouter(t)
+	defer db.Close()
+	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d", w.Code)
+	}
+	csrf := out["csrf_token"].(string)
+	var sess string
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == sessionCookieName {
+			sess = ck.Value
+		}
+	}
+	hdr := func() map[string]string {
+		return map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
+	}
+	// POST /users → 201
+	w, _ = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123"}`, hdr())
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create user status = %d, want 201", w.Code)
+	}
+	// POST /departments → 201
+	w, out = doJSON(t, r, "POST", "/api/admin/departments", `{"name":"研发部"}`, hdr())
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create dept status = %d, want 201", w.Code)
+	}
+	deptID := int64(out["department"].(map[string]any)["id"].(float64))
+	// PUT /departments/:id → 返回 department 资源(与 create 一致,不再 {ok:true})
+	w, out = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/departments/%d", deptID), `{"name":"技术中心"}`, hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("update dept: %d %s", w.Code, w.Body.String())
+	}
+	dep, ok := out["department"].(map[string]any)
+	if !ok || dep["name"] != "技术中心" || dep["id"].(float64) != float64(deptID) {
+		t.Fatalf("update dept response = %v, want department object", out)
+	}
 }
 
 // createDepartment 必须消费 budget_money(审计 H4:此前静默丢弃,
@@ -1117,14 +1157,14 @@ func TestAdminDeptBudget(t *testing.T) {
 
 	// 建部门
 	w, out = doJSON(t, r, "POST", "/api/admin/departments", `{"name":"研发部"}`, hdr())
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusCreated {
 		t.Fatalf("create dept: %d %s", w.Code, w.Body.String())
 	}
 	deptID := int64(out["department"].(map[string]any)["id"].(float64))
 
 	// 员工挂部门 + 产生费用
 	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusCreated {
 		t.Fatalf("create user: %d %s", w.Code, w.Body.String())
 	}
 	uid := int64(out["user"].(map[string]any)["id"].(float64))
