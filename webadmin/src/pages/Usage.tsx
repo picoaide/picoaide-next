@@ -99,6 +99,24 @@ export default function Usage() {
     }).catch(() => { /* 配额面板失败不阻塞主查询 */ })
   }, [])
 
+  // 环比:与上一等长区间的 total tokens 对比(统计卡 desc 展示)
+  const refreshCompare = useCallback(async () => {
+    if (!fromRef.current || !toRef.current) { setCompareTotal(null); return }
+    const from = new Date(`${fromRef.current}T00:00:00`)
+    const to = new Date(`${toRef.current}T00:00:00`)
+    const span = Math.round((to.getTime() - from.getTime()) / 86400000) + 1
+    const prevTo = new Date(from.getTime() - 86400000)
+    const prevFrom = new Date(from.getTime() - span * 86400000)
+    const pv = new URLSearchParams({ group })
+    pv.set('from', ymd(prevFrom))
+    pv.set('to', ymd(prevTo))
+    try {
+      const prev = await request(`/api/admin/usage?${pv}`)
+      const prevRows: UsageRow[] = prev.rows ?? []
+      setCompareTotal(prevRows.reduce((s, r) => s + r.prompt_tokens + r.completion_tokens, 0))
+    } catch { setCompareTotal(null) }
+  }, [group])
+
   const load = useCallback(async (opts?: { silent?: boolean }) => {
     if (!opts?.silent) setLoading(true)
     try {
@@ -107,53 +125,37 @@ export default function Usage() {
       if (toRef.current) params.set('to', toRef.current)
       const data = await request(`/api/admin/usage?${params}`)
       setRows(data.rows ?? [])
-      // 环比:与上一等长区间的 total tokens 对比(统计卡 desc 展示)
-      if (fromRef.current && toRef.current) {
-        const from = new Date(`${fromRef.current}T00:00:00`)
-        const to = new Date(`${toRef.current}T00:00:00`)
-        const span = Math.round((to.getTime() - from.getTime()) / 86400000) + 1
-        const prevTo = new Date(from.getTime() - 86400000)
-        const prevFrom = new Date(from.getTime() - span * 86400000)
-        const pv = new URLSearchParams({ group })
-        pv.set('from', ymd(prevFrom))
-        pv.set('to', ymd(prevTo))
-        try {
-          const prev = await request(`/api/admin/usage?${pv}`)
-          const prevRows: UsageRow[] = prev.rows ?? []
-          const prevTotal = prevRows.reduce((s, r) => s + r.prompt_tokens + r.completion_tokens, 0)
-          setCompareTotal(prevTotal)
-        } catch { setCompareTotal(null) }
-      } else {
-        setCompareTotal(null)
-      }
       setError('')
+      // 环比查询只在手动/首次加载时执行;60s 轮询(silent)跳过,避免
+      // 每轮多打一个上一区间请求(审计2026-E3 P2-2)
+      if (!opts?.silent) await refreshCompare()
     } catch (err: any) {
       setError(err.message)
     } finally {
       if (!opts?.silent) setLoading(false)
     }
-  }, [group])
+  }, [group, refreshCompare])
 
   // 只在分组变化或点击"查询"时加载,避免每次击键/改日期都发请求
   useEffect(() => { load() }, [load])
 
   // 实时轮询:仅短区间(≤7 天)且按日分组时每 60s 静默刷新,
   // 不闪加载态(审计2026-E2);长区间/其他分组手动查询即可。
+  // 区间跨度在回调内用 ref 判断,避免 from/to 每次击键重建 timer(P2-1)。
   useEffect(() => {
     if (group !== 'day') return
-    const span = (() => {
-      if (!from || !to) return 999
-      return (new Date(`${to}T00:00:00`).getTime() - new Date(`${from}T00:00:00`).getTime()) / 86400000 + 1
-    })()
-    if (span > 7) return
-    const timer = setInterval(() => load({ silent: true }), 60000)
-    const onVis = () => { if (!document.hidden) load({ silent: true }) }
+    const isShort = () => {
+      if (!fromRef.current || !toRef.current) return false
+      return (new Date(`${toRef.current}T00:00:00`).getTime() - new Date(`${fromRef.current}T00:00:00`).getTime()) / 86400000 + 1 <= 7
+    }
+    const timer = setInterval(() => { if (isShort()) load({ silent: true }) }, 60000)
+    const onVis = () => { if (!document.hidden && isShort()) load({ silent: true }) }
     document.addEventListener('visibilitychange', onVis)
     return () => {
       clearInterval(timer)
       document.removeEventListener('visibilitychange', onVis)
     }
-  }, [group, from, to, load])
+  }, [group, load])
 
   function applyRange(r: { from: string; to: string }) {
     setFrom(r.from)
