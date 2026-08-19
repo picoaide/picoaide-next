@@ -30,6 +30,12 @@ interface UsageRow {
   cost?: number // 0022:该桶费用合计(元),未定价模型贡献 0
 }
 
+// chatTokens 返回行的 chat tokens(不含 embedding):embedding 行 tokens 落在
+// prompt_tokens 列(0020),聚合口径分离见审计高2。
+function chatTokens(r: UsageRow): number {
+  return r.prompt_tokens + r.completion_tokens - (r.embed_tokens ?? 0)
+}
+
 interface QuotaUser {
   id: number
   username: string
@@ -66,10 +72,15 @@ export default function Usage() {
   const [loading, setLoading] = useState(true)
   const [chartTab, setChartTab] = useState<ChartTab>('trend')
   const [filterName, setFilterName] = useState('') // 饼图/排行点击过滤明细
-  const [compareTotal, setCompareTotal] = useState<number | null>(null)
+  const [compareTokens, setCompareTokens] = useState<number | null>(null) // 上一等长区间 tokens(chat 口径)
+  const [compareCost, setCompareCost] = useState<number | null>(null) // 上一等长区间费用(元)
   const [drillUser, setDrillUser] = useState('') // 用户钻取:当前用户名
   const [drillRows, setDrillRows] = useState<UsageRow[]>([])
   const [drillLoading, setDrillLoading] = useState(false)
+  const [drillError, setDrillError] = useState('') // 钻取弹窗独立错误态(审计低5)
+  const [userTotal, setUserTotal] = useState(0) // 非管理员员工总数(配额面板"仅展示前 200"提示,审计中3)
+  const [quotaSearch, setQuotaSearch] = useState('') // 配额面板用户搜索(审计低6)
+  const [deptBudgets, setDeptBudgets] = useState<{ name: string; budget: number; cost: number }[]>([]) // 部门预算(审计低7)
 
   // 日期经 ref 读取:load 不被 from/to 变化重创(保持"点击查询才发请求"),
   // 同时点击时读到的永远是最新输入(审计2026-W1 旧闭包修复)
@@ -94,15 +105,19 @@ export default function Usage() {
     if (g !== group) setGroup(g)
   }
 
-  // 用户列表 + 全局默认配额(含金额) + 模型定价状态只拉一次
-  useEffect(() => {
-    Promise.all([
-      request('/api/admin/users?size=200'),
-      request('/api/admin/gateway').catch(() => null),
-      request('/api/admin/models').catch(() => null),
-    ]).then(([users, gw, models]: [any, any, any]) => {
+  // 用户列表 + 全局默认配额(含金额) + 模型定价状态 + 部门预算只拉一次;
+  // 配额面板提供手动刷新按钮(审计低6),不随 60s 轮询自动打接口。
+  const loadQuota = useCallback(async () => {
+    try {
+      const [users, gw, models, depts] = await Promise.all([
+        request('/api/admin/users?size=200'),
+        request('/api/admin/gateway').catch(() => null),
+        request('/api/admin/models').catch(() => null),
+        request('/api/admin/departments').catch(() => null),
+      ])
       const all: QuotaUser[] = (users.users ?? []).filter((u: QuotaUser) => !u.is_admin)
       setQuotaUsers(all)
+      setUserTotal(users.total ?? 0)
       const q = gw?.monthly_quota
       setDefaultQuota(q === undefined || q === null || q === '' ? null : Number(q))
       const mq = gw?.monthly_quota_money
@@ -113,12 +128,19 @@ export default function Usage() {
           || m?.output_price_per_1m === null || m?.output_price_per_1m === undefined || Number(m.output_price_per_1m) <= 0
       )
       setHasUnpricedModels(unpriced)
-    }).catch(() => { /* 配额面板失败不阻塞主查询 */ })
+      // 部门预算:只展示配置了预算(budget_money > 0)的部门(审计低7)
+      const budgets = (depts?.departments ?? [])
+        .filter((d: any) => d?.budget_money !== null && d?.budget_money !== undefined && Number(d.budget_money) > 0)
+        .map((d: any) => ({ name: d.name, budget: Number(d.budget_money), cost: Number(d.monthly_cost ?? 0) }))
+      setDeptBudgets(budgets)
+    } catch { /* 配额面板失败不阻塞主查询 */ }
   }, [])
+  useEffect(() => { loadQuota() }, [loadQuota])
 
-  // 环比:与上一等长区间的 total tokens 对比(统计卡 desc 展示)
+  // 环比:与上一等长区间对比——tokens(chat 口径)与费用(cost)各自独立,
+  // 分别展示在「总 tokens」卡与「总费用」卡(审计高1)
   const refreshCompare = useCallback(async () => {
-    if (!fromRef.current || !toRef.current) { setCompareTotal(null); return }
+    if (!fromRef.current || !toRef.current) { setCompareTokens(null); setCompareCost(null); return }
     const from = new Date(`${fromRef.current}T00:00:00`)
     const to = new Date(`${toRef.current}T00:00:00`)
     const span = Math.round((to.getTime() - from.getTime()) / 86400000) + 1
@@ -130,8 +152,9 @@ export default function Usage() {
     try {
       const prev = await request(`/api/admin/usage?${pv}`)
       const prevRows: UsageRow[] = prev.rows ?? []
-      setCompareTotal(prevRows.reduce((s, r) => s + r.prompt_tokens + r.completion_tokens, 0))
-    } catch { setCompareTotal(null) }
+      setCompareTokens(prevRows.reduce((s, r) => s + chatTokens(r), 0))
+      setCompareCost(prevRows.reduce((s, r) => s + (r.cost ?? 0), 0))
+    } catch { setCompareTokens(null); setCompareCost(null) }
   }, [group])
 
   const load = useCallback(async (opts?: { silent?: boolean }) => {
@@ -203,17 +226,19 @@ export default function Usage() {
       embedReq += r.embed_requests ?? 0
       cost += r.cost ?? 0
     }
-    return { requests, prompt, completion, total: prompt + completion, embed, embedReq, chatReq: requests - embedReq, cost }
+    // chatTotal = 总 tokens 卡口径(不含 embedding);prompt 仍含 embedding(输入卡标注)
+    return { requests, prompt, completion, total: prompt + completion, chatTotal: prompt + completion - embed, embed, embedReq, chatReq: requests - embedReq, cost }
   }, [rows])
 
-  // ---- 配额统计(含"跟随全局默认"的员工,修复 F4)----
+  // ---- 配额统计(含"跟随全局默认"的员工,修复 F4;支持搜索,审计低6)----
   const quotaStats = useMemo(() => {
     const eff = (u: QuotaUser): number | null => u.quota_tokens ?? defaultQuota
     const effMoney = (u: QuotaUser): number | null => u.quota_money ?? defaultMoneyQuota
+    const qs = quotaSearch.trim().toLowerCase()
     const tracked = quotaUsers.filter((u) => {
       const q = eff(u)
       const mq = effMoney(u)
-      return (q !== null && q > 0) || (mq !== null && mq > 0)
+      return ((q !== null && q > 0) || (mq !== null && mq > 0)) && (!qs || u.username.toLowerCase().includes(qs))
     })
     const over = tracked.filter((u) => quotaOver(u.monthly_usage, eff(u)) || moneyOver(u.monthly_cost, effMoney(u)))
     const near = tracked.filter((u) => !over.includes(u) &&
@@ -225,25 +250,25 @@ export default function Usage() {
       return rb - ra
     })
     return { over, near, sorted, eff, effMoney }
-  }, [quotaUsers, defaultQuota, defaultMoneyQuota])
+  }, [quotaUsers, defaultQuota, defaultMoneyQuota, quotaSearch])
 
   // ---- 图表数据 ----
   // 趋势图:服务端已按日/周/月补零(缺桶填 0),前端直接渲染
-  // 口径切换:tokens(原值)或 money(费用,¥)
+  // 口径切换:tokens(chat 口径,不含 embedding,审计高2)或 money(费用,¥)
   const trendData = useMemo(
-    () => rows.map((r) => ({ label: r.label, value: metric === 'money' ? (r.cost ?? 0) : r.prompt_tokens + r.completion_tokens })),
+    () => rows.map((r) => ({ label: r.label, value: metric === 'money' ? (r.cost ?? 0) : chatTokens(r) })),
     [rows, metric]
   )
 
   const pieData = useMemo(
-    () => rows.map((r) => ({ name: r.label, value: metric === 'money' ? (r.cost ?? 0) : r.prompt_tokens + r.completion_tokens })),
+    () => rows.map((r) => ({ name: r.label, value: metric === 'money' ? (r.cost ?? 0) : chatTokens(r) })),
     [rows, metric]
   )
 
   // 排行:Top N + "其他"桶(修复 F3,避免 group=user 时 200+ 柱)
   const rankData = useMemo(() => {
     const sorted = [...rows]
-      .map((r) => ({ label: r.label, value: metric === 'money' ? (r.cost ?? 0) : r.prompt_tokens + r.completion_tokens }))
+      .map((r) => ({ label: r.label, value: metric === 'money' ? (r.cost ?? 0) : chatTokens(r) }))
       .sort((a, b) => b.value - a.value)
     if (sorted.length <= RANK_TOP) return sorted
     const top = sorted.slice(0, RANK_TOP)
@@ -257,8 +282,20 @@ export default function Usage() {
     [rows, filterName]
   )
 
-  const yLabel = metric === 'money' ? '费用(元)' : 'tokens'
+  const yLabel = metric === 'money' ? '费用(元)' : 'tokens(不含 embedding)'
   const axisFmt = (v: any) => (metric === 'money' ? fmtMoney(Number(v)) : fmtTokens(Number(v)))
+
+  // tooltip 格式化:维度名 + 按口径格式化数值(审计低2)。VChart tooltip 的
+  // content 回调挂在 mark(饼图)/dimension(折线/柱)活跃类型下。
+  const tooltipPattern = {
+    content: [
+      {
+        key: (datum: any) => datum?.label ?? datum?.name ?? '',
+        value: (datum: any) => (metric === 'money' ? fmtMoney(Number(datum?.value)) : fmtTokens(Number(datum?.value))),
+      },
+    ],
+  }
+  const tooltip = { visible: true, mark: tooltipPattern, dimension: tooltipPattern } as const
 
   const trendSpec: ISpec = {
     type: 'line',
@@ -270,7 +307,7 @@ export default function Usage() {
       { orient: 'left', title: { visible: true, text: yLabel }, label: { formatMethod: axisFmt } },
       { orient: 'bottom', label: { visible: true, style: { fontSize: 11 } } },
     ],
-    tooltip: { visible: true },
+    tooltip,
   }
 
   const pieSpec: ISpec = {
@@ -281,7 +318,7 @@ export default function Usage() {
     outerRadius: 0.8,
     // 修复 F1:饼图 label 是维度文本(模型名/用户名),不是数值;数值交给 tooltip
     label: { visible: true },
-    tooltip: { visible: true },
+    tooltip,
   }
 
   const rankSpec: ISpec = {
@@ -290,10 +327,10 @@ export default function Usage() {
     xField: 'label',
     yField: 'value',
     axes: [
-      { orient: 'left', label: { visible: true, style: { fontSize: 11 } } },
+      { orient: 'left', label: { visible: true, style: { fontSize: 11 }, formatMethod: axisFmt } },
       { orient: 'bottom', title: { visible: true, text: yLabel }, label: { formatMethod: axisFmt } },
     ],
-    tooltip: { visible: true },
+    tooltip,
   }
 
   // 用户钻取:按用户查其日趋势(open-webui 式详情弹窗)
@@ -301,6 +338,7 @@ export default function Usage() {
     setDrillUser(username)
     setDrillLoading(true)
     setDrillRows([])
+    setDrillError('')
     try {
       const params = new URLSearchParams({ group: 'day' })
       if (fromRef.current) params.set('from', fromRef.current)
@@ -309,7 +347,8 @@ export default function Usage() {
       const data = await request(`/api/admin/usage?${params}`)
       setDrillRows(data.rows ?? [])
     } catch (err: any) {
-      setError(err.message)
+      // 弹窗内独立错误态,不污染页面级 error(审计低5)
+      setDrillError(err.message || '查询失败')
     } finally {
       setDrillLoading(false)
     }
@@ -317,7 +356,7 @@ export default function Usage() {
 
   const drillSpec: ISpec = {
     type: 'line',
-    data: { values: drillRows.map((r) => ({ label: r.label, value: metric === 'money' ? (r.cost ?? 0) : r.prompt_tokens + r.completion_tokens })) },
+    data: { values: drillRows.map((r) => ({ label: r.label, value: metric === 'money' ? (r.cost ?? 0) : chatTokens(r) })) },
     xField: 'label',
     yField: 'value',
     point: { visible: true },
@@ -325,33 +364,53 @@ export default function Usage() {
       { orient: 'left', title: { visible: true, text: yLabel }, label: { formatMethod: axisFmt } },
       { orient: 'bottom', label: { visible: true, style: { fontSize: 11 } } },
     ],
-    tooltip: { visible: true },
+    tooltip,
   }
 
-  // 环比 delta(与上一等长区间对比),0 基期显示 —
-  const compareDelta = useMemo(() => {
-    if (compareTotal === null || compareTotal === 0) return null
-    return Math.round(((totals.total - compareTotal) / compareTotal) * 100)
-  }, [compareTotal, totals.total])
+  // 环比 delta:金额(cost)与 tokens(chat 口径)各自独立(审计高1),0 基期显示 —
+  const compareCostDelta = useMemo(() => {
+    if (compareCost === null || compareCost === 0) return null
+    return Math.round(((totals.cost - compareCost) / compareCost) * 100)
+  }, [compareCost, totals.cost])
+  const compareTokensDelta = useMemo(() => {
+    if (compareTokens === null || compareTokens === 0) return null
+    return Math.round(((totals.chatTotal - compareTokens) / compareTokens) * 100)
+  }, [compareTokens, totals.chatTotal])
 
   const statCards = [
     {
       title: '总费用', value: totals.cost, icon: CircleDollarSign,
-      desc: compareDelta === null ? '按模型定价折算(未定价模型计 0)'
-        : `按模型定价折算 · 环比 ${compareDelta >= 0 ? '+' : ''}${compareDelta}%`,
+      desc: compareCostDelta === null ? '按模型定价折算(未定价模型计 0)'
+        : `按模型定价折算 · 环比 ${compareCostDelta >= 0 ? '+' : ''}${compareCostDelta}%`,
       money: true,
     },
-    { title: '请求数', value: totals.requests, icon: Activity, desc: `chat ${totals.chatReq.toLocaleString()} · embedding ${totals.embedReq.toLocaleString()}` },
-    { title: '总 tokens', value: totals.total, icon: Coins, desc: '输入 + 输出(不含 embedding)' },
+    { title: '请求数', value: totals.requests, icon: Activity, desc: `chat ${totals.chatReq.toLocaleString()} · embedding ${totals.embedReq.toLocaleString()}`, int: true },
+    { title: '总 tokens', value: totals.chatTotal, icon: Coins, desc: (compareTokensDelta === null
+      ? 'chat 输入+输出(不含 embedding)'
+      : `chat 输入+输出(不含 embedding) · 环比 ${compareTokensDelta >= 0 ? '+' : ''}${compareTokensDelta}%`) },
     { title: '输入 tokens', value: totals.prompt, icon: ArrowDownToLine, desc: '含 embedding ' + fmtTokens(totals.embed) },
     { title: '输出 tokens', value: totals.completion, icon: ArrowUpFromLine, desc: 'completion 部分' },
   ]
 
-  // 导出 CSV(带 BOM 保证 Excel 中文不乱码;0022 增 cost 列)
+  // CSV 单元格转义:逗号/引号/换行包双引号;以 = + - @ 开头的单元格加单引号
+  // 前缀防公式注入(审计中1)
+  function csvCell(v: string | number): string {
+    let s = String(v)
+    if (/^[=+\-@]/.test(s)) s = "'" + s
+    if (/[",\n\r]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"'
+    return s
+  }
+
+  // 导出 CSV(带 BOM 保证 Excel 中文不乱码;0022 增 cost 列;total_tokens 为 chat
+  // 口径不含 embedding,审计高2;导出当前过滤后的明细,审计中1)
   function exportCsv() {
-    if (rows.length === 0) return
-    const head = ['label', 'requests', 'prompt_tokens', 'completion_tokens', 'total_tokens', 'cost']
-    const lines = rows.map((r) => [r.label, r.requests, r.prompt_tokens, r.completion_tokens, r.prompt_tokens + r.completion_tokens, (r.cost ?? 0).toFixed(4)].join(','))
+    const source = filteredRows
+    if (source.length === 0) return
+    const head = ['label', 'requests', 'prompt_tokens', 'completion_tokens', 'embed_tokens', 'total_tokens', 'cost']
+    const lines = source.map((r) => [
+      csvCell(r.label), r.requests, r.prompt_tokens, r.completion_tokens, r.embed_tokens ?? 0,
+      chatTokens(r), (r.cost ?? 0).toFixed(4),
+    ].join(','))
     const csv = '\uFEFF' + [head.join(','), ...lines].join('\n')
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
@@ -438,7 +497,7 @@ export default function Usage() {
                   className="mt-1 text-2xl font-bold tabular-nums tracking-tight"
                   title={c.money ? fmtMoneyFull(c.value) : fmtFull(c.value)}
                 >
-                  {c.money ? `¥${fmtMoney(c.value)}` : fmtTokens(c.value)}
+                  {c.money ? `¥${fmtMoney(c.value)}` : c.int ? c.value.toLocaleString() : fmtTokens(c.value)}
                 </div>
               )}
               <div className="mt-1 text-xs text-muted-foreground">{c.desc}</div>
@@ -457,7 +516,7 @@ export default function Usage() {
               <CardDescription>
                 {metric === 'money'
                   ? `Total: ¥${fmtMoney(totals.cost)}`
-                  : `Total: ${fmtTokens(totals.total)} tokens`}
+                  : `Total: ${fmtTokens(totals.chatTotal)} tokens(不含 embedding)`}
               </CardDescription>
             </div>
             <TabsList>
@@ -473,14 +532,21 @@ export default function Usage() {
               <div className="flex h-72 items-center justify-center text-muted-foreground">暂无数据</div>
             ) : (
               <>
-                <TabsContent value="trend" className="h-72"><VChart spec={trendSpec} /></TabsContent>
-                <TabsContent value="proportion" className="h-72">
-                  <VChart
-                    spec={pieSpec}
-                    onClick={(e: any) => setFilterName(e?.datum?.name ?? '')}
-                  />
+                {/* 懒挂载:仅激活 tab 渲染对应 VChart,避免 display:none 容器内初始化(审计低4) */}
+                <TabsContent value="trend" className="h-72">
+                  {chartTab === 'trend' && <VChart spec={trendSpec} />}
                 </TabsContent>
-                <TabsContent value="rank" className="h-72"><VChart spec={rankSpec} /></TabsContent>
+                <TabsContent value="proportion" className="h-72">
+                  {chartTab === 'proportion' && (
+                    <VChart
+                      spec={pieSpec}
+                      onClick={(e: any) => setFilterName(e?.datum?.name ?? '')}
+                    />
+                  )}
+                </TabsContent>
+                <TabsContent value="rank" className="h-72">
+                  {chartTab === 'rank' && <VChart spec={rankSpec} />}
+                </TabsContent>
               </>
             )}
           </CardContent>
@@ -498,16 +564,35 @@ export default function Usage() {
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <Badge variant="destructive">超额 {quotaStats.over.length}</Badge>
               <Badge variant="secondary">≥90% {quotaStats.near.length}</Badge>
+              <Button size="sm" variant="outline" onClick={() => loadQuota()}>刷新</Button>
             </div>
           </div>
           <CardDescription>
-            按自然月统计(每月 1 日重置),与上方查询区间无关;管理员豁免。
+            按自然月统计(每月 1 日重置),与上方查询区间无关。管理员豁免
+            (统计卡与明细含管理员用量,配额仅约束普通员工,两者口径不同)。
             {defaultQuota !== null && defaultQuota > 0 && ` 默认 token 配额 ${fmtTokens(defaultQuota)}/月`}
             {defaultMoneyQuota !== null && defaultMoneyQuota > 0 && ` · 默认金额配额 ¥${fmtMoney(defaultMoneyQuota)}/月`}
             (跟随默认的员工已计入)
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          {userTotal > quotaUsers.length && (
+            <div className="text-xs text-muted-foreground">
+              共 {userTotal} 名非管理员员工,列表仅展示前 {quotaUsers.length} 名(按 id 排序);搜索可缩小范围。
+            </div>
+          )}
+          <div className="flex items-center gap-2">
+            <Input
+              placeholder="搜索用户名"
+              value={quotaSearch}
+              onChange={(e) => setQuotaSearch(e.target.value)}
+              className="max-w-56 h-8"
+              aria-label="搜索配额用户"
+            />
+            {quotaSearch && (
+              <Button size="sm" variant="outline" onClick={() => setQuotaSearch('')}>清除</Button>
+            )}
+          </div>
           {quotaStats.sorted.length === 0 ? (
             <div className="text-sm text-muted-foreground">暂无配额数据</div>
           ) : (
@@ -583,6 +668,39 @@ export default function Usage() {
               })}
             </div>
           )}
+          {/* 部门预算(0024):预算链 = 归属部门 + 祖先链,任一超限网关 429(审计低7) */}
+          {deptBudgets.length > 0 && (
+            <div className="space-y-2 rounded-md border border-dashed p-3">
+              <div className="text-sm font-medium">部门月度预算(金额)</div>
+              {deptBudgets.map((d) => {
+                const dRate = moneyRate(d.cost, d.budget)
+                const dOver = moneyOver(d.cost, d.budget)
+                return (
+                  <div key={d.name} className="space-y-1">
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span>{d.name}</span>
+                      <span className="tabular-nums">
+                        ¥{fmtMoney(d.cost)} / ¥{fmtMoney(d.budget)}{dOver && ' · 超预算'}
+                      </span>
+                    </div>
+                    <div
+                      className="h-2 w-full overflow-hidden rounded-full bg-muted"
+                      role="progressbar"
+                      aria-valuenow={Math.min(100, dRate)}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-label={`${d.name} 部门预算占用 ${dRate}%`}
+                    >
+                      <div
+                        className={`h-full rounded-full ${dOver ? 'bg-destructive' : dRate >= 90 ? 'bg-amber-500' : 'bg-primary'}`}
+                        style={{ width: `${dOver ? 100 : dRate}%` }}
+                      />
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -610,8 +728,9 @@ export default function Usage() {
                   <TableHead className="text-right">请求数</TableHead>
                   <TableHead className="text-right">输入 tokens</TableHead>
                   <TableHead className="text-right">输出 tokens</TableHead>
-                  <TableHead className="text-right">合计 tokens</TableHead>
-                  <TableHead className="text-right">费用(¥)</TableHead>
+                  <TableHead className="text-right">embedding tokens</TableHead>
+                  <TableHead className={`text-right ${metric === 'tokens' ? 'font-bold' : ''}`}>合计 tokens(chat)</TableHead>
+                  <TableHead className={`text-right ${metric === 'money' ? 'font-bold' : ''}`}>费用(¥)</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -625,7 +744,8 @@ export default function Usage() {
                     <TableCell className="text-right tabular-nums">{r.requests}</TableCell>
                     <TableCell className="text-right tabular-nums">{fmtTokens(r.prompt_tokens)}</TableCell>
                     <TableCell className="text-right tabular-nums">{fmtTokens(r.completion_tokens)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{fmtTokens(r.prompt_tokens + r.completion_tokens)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{fmtTokens(r.embed_tokens ?? 0)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{fmtTokens(chatTokens(r))}</TableCell>
                     <TableCell className="text-right tabular-nums" title={fmtMoneyFull(r.cost ?? 0)}>¥{fmtMoney(r.cost ?? 0)}</TableCell>
                   </TableRow>
                 ))}
@@ -635,12 +755,13 @@ export default function Usage() {
                     <TableCell className="text-right tabular-nums">{filteredRows.reduce((s, r) => s + r.requests, 0)}</TableCell>
                     <TableCell className="text-right tabular-nums">{fmtTokens(filteredRows.reduce((s, r) => s + r.prompt_tokens, 0))}</TableCell>
                     <TableCell className="text-right tabular-nums">{fmtTokens(filteredRows.reduce((s, r) => s + r.completion_tokens, 0))}</TableCell>
-                    <TableCell className="text-right tabular-nums">{fmtTokens(filteredRows.reduce((s, r) => s + r.prompt_tokens + r.completion_tokens, 0))}</TableCell>
+                    <TableCell className="text-right tabular-nums">{fmtTokens(filteredRows.reduce((s, r) => s + (r.embed_tokens ?? 0), 0))}</TableCell>
+                    <TableCell className="text-right tabular-nums">{fmtTokens(filteredRows.reduce((s, r) => s + chatTokens(r), 0))}</TableCell>
                     <TableCell className="text-right tabular-nums">¥{fmtMoney(filteredRows.reduce((s, r) => s + (r.cost ?? 0), 0))}</TableCell>
                   </TableRow>
                 )}
                 {filteredRows.length === 0 && (
-                  <TableRow><TableCell colSpan={6} className="text-center text-muted-foreground">暂无数据</TableCell></TableRow>
+                  <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">暂无数据</TableCell></TableRow>
                 )}
               </TableBody>
             </Table>
@@ -659,6 +780,11 @@ export default function Usage() {
           </DialogHeader>
           {drillLoading ? (
             <Skeleton className="h-72 w-full" />
+          ) : drillError ? (
+            <div className="flex h-72 flex-col items-center justify-center gap-3 text-muted-foreground">
+              <span className="text-sm text-destructive">{drillError}</span>
+              <Button size="sm" variant="outline" onClick={() => openDrill(drillUser)}>重试</Button>
+            </div>
           ) : drillRows.length === 0 ? (
             <div className="flex h-72 items-center justify-center text-muted-foreground">该用户区间内暂无数据</div>
           ) : (

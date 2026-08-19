@@ -49,24 +49,6 @@ export function monthRange(): { from: string; to: string } {
   return { from: ymd(new Date(now.getFullYear(), now.getMonth(), 1)), to: ymd(now) }
 }
 
-// 按日补零:从 from..to 生成连续日期序列,缺失日填 0(折线不跨缺日直连)
-export function fillMissingDays(
-  rows: { label: string; total: number }[],
-  from: string,
-  to: string
-): { label: string; total: number }[] {
-  if (!from || !to) return rows
-  const map = new Map(rows.map((r) => [r.label, r.total]))
-  const out: { label: string; total: number }[] = []
-  const cur = new Date(`${from}T00:00:00`)
-  const end = new Date(`${to}T00:00:00`)
-  for (; cur <= end; cur.setDate(cur.getDate() + 1)) {
-    const key = ymd(cur)
-    out.push({ label: key, total: map.get(key) ?? 0 })
-  }
-  return out
-}
-
 // ---- 金额(费用)格式化与配额计算(0022) ----
 // 费用单位:元(¥)。展示两位小数(小额)或紧凑格式(大额),与 token 口径分开。
 

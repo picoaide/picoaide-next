@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor, within } from '@testing-library/rea
 import userEvent from '@testing-library/user-event'
 import Usage from './Usage'
 import { request } from '../api'
+import { ymd } from '../lib/format'
 
 const mockRequest = vi.mocked(request)
 
@@ -16,11 +17,25 @@ vi.mock('@visactor/react-vchart', () => ({
   ),
 }))
 
+// embed_tokens=500:chat tokens = 6000+2500-500 = 8000(总 tokens 卡口径);
+// 输入 6000(含 embedding)、费用 4.2、请求 60(chat 55 + embedding 5)。
 const usageRows = [
   { label: '2026-08-10', prompt_tokens: 1000, completion_tokens: 500, requests: 10, cost: 0.6 },
   { label: '2026-08-11', prompt_tokens: 2000, completion_tokens: 1000, requests: 20, cost: 1.2 },
   { label: '2026-08-12', prompt_tokens: 3000, completion_tokens: 1000, requests: 30, embed_requests: 5, embed_tokens: 500, cost: 2.4 },
 ]
+
+// 环比上一区间的返回:tokens 少(1500)但费用高(10.5),用于区分
+// 「金额环比」与「token 环比」两个维度(审计高1)。
+const prevRows = [
+  { label: '2026-07-11', prompt_tokens: 1000, completion_tokens: 500, requests: 10, cost: 10.5 },
+]
+
+// 当前区间 from = today-29,to = today;环比区间 to = today-30。
+function prevToStr(): string {
+  const now = new Date()
+  return ymd(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30))
+}
 
 // alice:显式 token 配额 10000 已用 12000(超额);金额配额 100 已用 120(超额);
 // bob:不限(quota=0);
@@ -40,6 +55,10 @@ beforeEach(() => {
   mockRequest.mockReset()
   mockRequest.mockImplementation(async (path: string) => {
     if (path.startsWith('/api/admin/usage')) {
+      // 环比查询(上一等长区间,to = 当前区间 from 的前一天)
+      if (path.includes('to=' + prevToStr())) {
+        return { rows: prevRows, group: 'day' }
+      }
       return { rows: usageRows, group: 'day' }
     }
     if (path.startsWith('/api/admin/users')) {
@@ -61,13 +80,44 @@ afterEach(() => {
 })
 
 describe('Usage 用量统计页', () => {
-  it('渲染汇总统计卡:总费用(第一指标)/ 请求数 / 总 tokens / 输入', async () => {
+  it('渲染汇总统计卡:总费用(第一指标)/ 请求数 / 总 tokens(chat,不含 embedding)/ 输入', async () => {
     render(<Usage />)
     const cards = await screen.findByTestId('stat-cards')
     await waitFor(() => expect(within(cards).getByText('¥4.20')).toBeInTheDocument()) // 总费用 0.6+1.2+2.4
     expect(within(cards).getByText('60')).toBeInTheDocument() // 请求数
-    expect(within(cards).getByText('8.5K')).toBeInTheDocument() // 总 tokens = 6000+2500
-    expect(within(cards).getByText('6K')).toBeInTheDocument() // 输入 1000+2000+3000
+    expect(within(cards).getByText('8K')).toBeInTheDocument() // chat tokens = 6000+2500-500(embedding)
+    expect(within(cards).getByText('6K')).toBeInTheDocument() // 输入 1000+2000+3000(含 embedding)
+  })
+
+  it('金额环比展示在总费用卡,token 环比展示在总 tokens 卡(口径分离)', async () => {
+    render(<Usage />)
+    const cards = await screen.findByTestId('stat-cards')
+    // prev 区间:cost 10.5 vs 当前 4.2 → 金额环比 (4.2-10.5)/10.5 ≈ -60%;
+    // tokens 8000 vs 1500 → +433%。两处分别显示各自的环比。
+    await waitFor(() => {
+      expect(within(cards).getByText(/环比 -60%/)).toBeInTheDocument()
+      expect(within(cards).getByText(/环比 \+433%/)).toBeInTheDocument()
+    })
+    // 金额环比出现在「总费用」卡描述里
+    const feeCard = within(cards).getByText('总费用').closest('div')!.parentElement!
+    expect(within(feeCard).getByText(/环比 -60%/)).toBeInTheDocument()
+    // token 环比出现在「总 tokens」卡描述里
+    const tokCard = within(cards).getByText('总 tokens').closest('div')!.parentElement!
+    expect(within(tokCard).getByText(/环比 \+433%/)).toBeInTheDocument()
+    // 总 tokens 卡口径标注:chat 不含 embedding
+    expect(within(tokCard).getByText(/不含 embedding/)).toBeInTheDocument()
+  })
+
+  it('明细表合计 tokens 为 chat 口径且含 embedding 列', async () => {
+    render(<Usage />)
+    await screen.findByTestId('stat-cards')
+    const table = await screen.findByRole('table')
+    // 表头含 embedding 列
+    expect(within(table).getByText('embedding tokens')).toBeInTheDocument()
+    // 第三行:3000+1000-500 = 3500(chat),embedding 500
+    const row = within(table).getByText('2026-08-12').closest('tr')!
+    expect(within(row).getByText('3.5K')).toBeInTheDocument()
+    expect(within(row).getByText('500')).toBeInTheDocument()
   })
 
   it('点击快捷区间"近7天"重新查询并携带 from/to 参数', async () => {
@@ -140,7 +190,36 @@ describe('Usage 用量统计页', () => {
     expect(bytes[1]).toBe(0xbb)
     expect(bytes[2]).toBe(0xbf)
     const text = new TextDecoder().decode(bytes)
-    expect(text).toContain('label,requests,prompt_tokens,completion_tokens,total_tokens,cost')
+    expect(text).toContain('label,requests,prompt_tokens,completion_tokens,embed_tokens,total_tokens,cost')
+    // total_tokens 为 chat 口径(不含 embedding):第三行 3000+1000-500=3500
+    expect(text).toContain('2026-08-12,30,3000,1000,500,3500,2.4000')
+  })
+
+  it('导出 CSV:label 含逗号/引号时转义,以 = 开头时防公式注入', async () => {
+    const createSpy = vi.fn((_blob: Blob) => 'blob:usage')
+    Object.defineProperty(URL, 'createObjectURL', { writable: true, value: createSpy })
+    Object.defineProperty(URL, 'revokeObjectURL', { writable: true, value: vi.fn() })
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/admin/usage')) {
+        if (path.includes('to=' + prevToStr())) return { rows: [], group: 'day' }
+        return {
+          rows: [
+            { label: '=1+1', prompt_tokens: 1, completion_tokens: 1, requests: 1, cost: 0.1 },
+            { label: 'a,b"c', prompt_tokens: 2, completion_tokens: 2, requests: 1, cost: 0.2 },
+          ],
+          group: 'day',
+        }
+      }
+      return { users: [], total: 0, page: 1, size: 200 }
+    })
+    render(<Usage />)
+    await screen.findByTestId('stat-cards')
+    fireEvent.click(screen.getByRole('button', { name: /导出 CSV/ }))
+    await waitFor(() => expect(createSpy).toHaveBeenCalled())
+    const blob = createSpy.mock.calls[0][0] as unknown as Blob
+    const text = new TextDecoder().decode(await blob.arrayBuffer())
+    expect(text).toContain("'=1+1")
+    expect(text).toContain('"a,b""c"')
   })
 
   it('用户分组行点击打开钻取弹窗并发起 username 过滤查询', async () => {
@@ -189,6 +268,7 @@ describe('Usage 用量统计页', () => {
   // 与 setInterval+async load 组合不稳定,故不做定时断言;由手工验收覆盖。
 })
 
+describe('Usage 用量统计页(口径/配额/钻取补充)', () => {
   it('统计口径切换:选择"金额"后图表与 Total 展示费用', async () => {
     const user = userEvent.setup()
     render(<Usage />)
@@ -198,7 +278,7 @@ describe('Usage 用量统计页', () => {
     // 切换到 tokens
     await user.click(screen.getByRole('combobox', { name: '统计口径' }))
     await user.click(await screen.findByRole('option', { name: 'tokens' }))
-    expect(await screen.findByText(/Total: 8\.5K tokens/)).toBeInTheDocument()
+    expect(await screen.findByText(/Total: 8K tokens/)).toBeInTheDocument()
   })
 
   it('存在未定价模型时展示提示条', async () => {
@@ -224,3 +304,98 @@ describe('Usage 用量统计页', () => {
     const carolRow = within(list).getByText('carol').closest('div')!.parentElement!
     expect(within(carolRow).getByText(/¥30\.00 \/ ¥50\.00/)).toBeInTheDocument()
   })
+
+  it('配额面板:员工总数 > 展示数时提示"仅展示前 N 名"', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/admin/usage')) return { rows: usageRows, group: 'day' }
+      if (path.startsWith('/api/admin/users')) return { users, total: 250, page: 1, size: 200 }
+      if (path.startsWith('/api/admin/gateway')) return { monthly_quota: '5000', monthly_quota_money: '50' }
+      return {}
+    })
+    render(<Usage />)
+    // 250 > 3(过滤 admin 后:alice/bob/carol)→ 展示提示
+    expect(await screen.findByText(/共 250 名非管理员员工,列表仅展示前 3 名/)).toBeInTheDocument()
+  })
+
+  it('配额面板:管理员豁免口径说明 + 用户搜索过滤', async () => {
+    const user = userEvent.setup()
+    render(<Usage />)
+    const list = await screen.findByTestId('quota-list')
+    expect(within(list).getByText('alice')).toBeInTheDocument()
+    // 搜索 "carol" → 只留 carol
+    await user.type(screen.getByLabelText('搜索配额用户'), 'carol')
+    await waitFor(() => {
+      expect(within(list).queryByText('alice')).not.toBeInTheDocument()
+      expect(within(list).getByText('carol')).toBeInTheDocument()
+    })
+    // 管理员豁免说明文案(审计中4)
+    expect(screen.getAllByText(/管理员豁免/).length).toBeGreaterThan(0)
+    expect(screen.getByText(/统计卡与明细含管理员用量,配额仅约束普通员工/)).toBeInTheDocument()
+  })
+
+  it('部门预算:仅展示配置了预算的部门及其占用', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/admin/usage')) return { rows: usageRows, group: 'day' }
+      if (path.startsWith('/api/admin/users')) return { users, total: 4, page: 1, size: 200 }
+      if (path.startsWith('/api/admin/gateway')) return { monthly_quota: '5000', monthly_quota_money: '50' }
+      if (path.startsWith('/api/admin/departments')) {
+        return {
+          departments: [
+            { id: 1, name: '研发部', budget_money: 1000, monthly_cost: 600 },
+            { id: 2, name: '无预算部', budget_money: null, monthly_cost: 5 },
+          ],
+        }
+      }
+      return {}
+    })
+    render(<Usage />)
+    expect(await screen.findByText('部门月度预算(金额)')).toBeInTheDocument()
+    expect(screen.getByText('研发部')).toBeInTheDocument()
+    // 无预算部门不展示
+    expect(screen.queryByText('无预算部')).not.toBeInTheDocument()
+    expect(screen.getByText(/¥600\.00 \/ ¥1,000/)).toBeInTheDocument()
+  })
+
+  it('钻取弹窗查询失败时展示弹窗内错误态', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/admin/usage')) {
+        if (path.includes('username=')) throw new Error('钻取查询失败')
+        return { rows: [{ label: 'alice', prompt_tokens: 100, completion_tokens: 50, requests: 2, cost: 0.2 }], group: 'user' }
+      }
+      if (path.startsWith('/api/admin/users')) return { users, total: 4, page: 1, size: 200 }
+      if (path.startsWith('/api/admin/gateway')) return { monthly_quota: '5000', monthly_quota_money: '50' }
+      return {}
+    })
+    const user = userEvent.setup()
+    render(<Usage />)
+    await screen.findByTestId('stat-cards')
+    await user.click(screen.getByRole('combobox', { name: '分组' }))
+    await user.click(await screen.findByRole('option', { name: '按用户' }))
+    await waitFor(() => {
+      expect(within(screen.getByRole('table')).getAllByText('alice')[0]).toBeInTheDocument()
+    })
+    fireEvent.click(within(screen.getByRole('table')).getAllByText('alice')[0])
+    // 错误显示在弹窗内,并提供重试按钮
+    expect(await screen.findByText('钻取查询失败')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument()
+  })
+
+  it('统计口径切换后明细表高亮对应列', async () => {
+    const user = userEvent.setup()
+    render(<Usage />)
+    await screen.findByTestId('stat-cards')
+    await screen.findByRole('table')
+    const feeTh = screen.getByText('费用(¥)').closest('th')!
+    const tokTh = screen.getByText('合计 tokens(chat)').closest('th')!
+    // 默认金额口径:费用列高亮
+    expect(feeTh.className).toContain('font-bold')
+    expect(tokTh.className).not.toContain('font-bold')
+    // 切到 tokens:合计列高亮
+    await user.click(screen.getByRole('combobox', { name: '统计口径' }))
+    await user.click(await screen.findByRole('option', { name: 'tokens' }))
+    await waitFor(() => {
+      expect(tokTh.className).toContain('font-bold')
+      expect(feeTh.className).not.toContain('font-bold')
+    })
+  })
+})
