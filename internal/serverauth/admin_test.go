@@ -419,6 +419,9 @@ func createUserDB(db *sql.DB, username, password string, admin bool) (int64, err
 
 func adminRouter(t *testing.T) (http.Handler, *sql.DB) {
 	t.Helper()
+	// 与 llmgateway 测试同因:adminLoginLimiter 包级共享且惰性创建,
+	// 测试登录 boss 多次,默认 10 次/5min 会限流 → 放宽。
+	t.Setenv("PICOAI_LOGIN_MAX_ATTEMPTS", "10000")
 	db := mustDB(t)
 	if _, err := createUserDB(db, "boss", "pw123456", true); err != nil {
 		t.Fatal(err)
@@ -754,5 +757,150 @@ func TestAdminUserQuota(t *testing.T) {
 				t.Fatalf("quota_tokens after clear = %v, want null", q)
 			}
 		}
+	}
+}
+
+// TestAdminUserMoneyQuota: 按员工设置金额配额(0022),列表附 monthly_cost。
+func TestAdminUserMoneyQuota(t *testing.T) {
+	r, db := adminRouter(t)
+	defer db.Close()
+
+	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", w.Code, w.Body.String())
+	}
+	csrf := out["csrf_token"].(string)
+	cookies := w.Result().Cookies()
+	var sess string
+	for _, ck := range cookies {
+		if ck.Name == sessionCookieName {
+			sess = ck.Value
+		}
+	}
+	hdr := func() map[string]string {
+		return map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
+	}
+
+	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("create user: %d %s", w.Code, w.Body.String())
+	}
+	id := int64(out["user"].(map[string]any)["id"].(float64))
+
+	// 有定价模型 + 本月费用 6 元(1M prompt*2 + 0.5M completion*8)
+	pid, err := serverstore.AddGatewayProvider(db, &serverstore.GatewayProvider{Name: "prov-p", BaseURL: "http://x", APIKeyEnc: "k", Enabled: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, out2 := 2.0, 8.0
+	if _, err := serverstore.AddModel(db, &serverstore.Model{Name: "priced-model", ProviderID: pid, InputPricePer1M: &in, OutputPricePer1M: &out2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.RecordUsage(db, id, "priced-model", 1_000_000, 500_000); err != nil {
+		t.Fatal(err)
+	}
+
+	// 设置金额配额 50 元
+	w, out = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", id), `{"quota_money":50}`, hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("set quota_money: %d %s", w.Code, w.Body.String())
+	}
+
+	// 列表返回 quota_money + monthly_cost
+	w, out = doJSON(t, r, "GET", "/api/admin/users", "", hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("list users: %d %s", w.Code, w.Body.String())
+	}
+	found := false
+	for _, u := range out["users"].([]any) {
+		um := u.(map[string]any)
+		if um["username"] == "alice" {
+			found = true
+			if q := um["quota_money"].(float64); q != 50 {
+				t.Fatalf("quota_money = %v, want 50", q)
+			}
+			if mc := um["monthly_cost"].(float64); mc != 6.0 {
+				t.Fatalf("monthly_cost = %v, want 6.0", mc)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("alice missing from user list")
+	}
+
+	// 负数金额配额拒绝
+	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", id), `{"quota_money":-1}`, hdr())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("negative quota_money = %d, want 400", w.Code)
+	}
+
+	// quota_money_clear 恢复 NULL(跟随全局默认)
+	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", id), `{"quota_money_clear":true}`, hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("clear quota_money: %d %s", w.Code, w.Body.String())
+	}
+	w, out = doJSON(t, r, "GET", "/api/admin/users", "", hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("list users: %d %s", w.Code, w.Body.String())
+	}
+	for _, u := range out["users"].([]any) {
+		um := u.(map[string]any)
+		if um["username"] == "alice" {
+			if q, present := um["quota_money"]; !present || q != nil {
+				t.Fatalf("quota_money after clear = %v, want null", q)
+			}
+		}
+	}
+}
+
+// TestAdminUsageCost: usage 汇总行携带 cost 字段。
+func TestAdminUsageCost(t *testing.T) {
+	r, db := adminRouter(t)
+	defer db.Close()
+
+	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", w.Code, w.Body.String())
+	}
+	csrf := out["csrf_token"].(string)
+	cookies := w.Result().Cookies()
+	var sess string
+	for _, ck := range cookies {
+		if ck.Name == sessionCookieName {
+			sess = ck.Value
+		}
+	}
+	hdr := func() map[string]string {
+		return map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
+	}
+
+	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("create user: %d %s", w.Code, w.Body.String())
+	}
+	id := int64(out["user"].(map[string]any)["id"].(float64))
+	pid, err := serverstore.AddGatewayProvider(db, &serverstore.GatewayProvider{Name: "prov-p", BaseURL: "http://x", APIKeyEnc: "k", Enabled: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, out2 := 2.0, 8.0
+	if _, err := serverstore.AddModel(db, &serverstore.Model{Name: "priced-model", ProviderID: pid, InputPricePer1M: &in, OutputPricePer1M: &out2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.RecordUsage(db, id, "priced-model", 1_000_000, 500_000); err != nil {
+		t.Fatal(err)
+	}
+
+	// group=model:单桶,避免按日补零把 rows[0] 变成 2000 年的空桶
+	w, out = doJSON(t, r, "GET", "/api/admin/usage?group=model&from=2000-01-01&to=2100-12-31", "", hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("usage: %d %s", w.Code, w.Body.String())
+	}
+	rows := out["rows"].([]any)
+	if len(rows) == 0 {
+		t.Fatal("no usage rows")
+	}
+	if c := rows[0].(map[string]any)["cost"].(float64); c != 6.0 {
+		t.Fatalf("usage row cost = %v, want 6.0", c)
 	}
 }

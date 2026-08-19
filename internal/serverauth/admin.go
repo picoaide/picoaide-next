@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -30,7 +31,18 @@ const minPasswordLength = 10
 
 // adminLoginLimiter bounds admin login attempts (ip+username) so the
 // password is not brute-forceable without rate limiting.
-var adminLoginLimiter = newLoginLimiter()
+// 延迟到首次登录调用时创建(惰性单例):newLoginLimiter 在包 init 时读
+// PICOAI_LOGIN_MAX_ATTEMPTS,若包级立即初始化,测试 t.Setenv 来不及生效,
+// 多用例登录同一用户会互相限流(审计2026-M10 后新增用例触发)。
+var adminLoginLimiterOnce sync.Once
+var adminLoginLimiterVal *loginLimiter
+
+func adminLoginLimiter() *loginLimiter {
+	adminLoginLimiterOnce.Do(func() {
+		adminLoginLimiterVal = newLoginLimiter()
+	})
+	return adminLoginLimiterVal
+}
 
 // AdminAPI holds the admin web handlers.
 type AdminAPI struct {
@@ -142,7 +154,7 @@ func (a *AdminAPI) handleLogin(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
 		return
 	}
-	if !adminLoginLimiter.allow(loginKey(c, req.Username)) {
+	if !adminLoginLimiter().allow(loginKey(c, req.Username)) {
 		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录尝试过于频繁,请稍后再试")
 		return
 	}
@@ -231,6 +243,11 @@ func (a *AdminAPI) listUsers(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
+	costByUser, err := serverstore.UserMonthlyCostBatch(a.DB, ids)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
 	out := make([]gin.H, 0, len(users))
 	for _, u := range users {
 		uj := userJSON(&u)
@@ -239,6 +256,7 @@ func (a *AdminAPI) listUsers(c *gin.Context) {
 			uj["groups"] = []string{}
 		}
 		uj["monthly_usage"] = usageByUser[u.ID] // tokens used this calendar month (0 when none)
+		uj["monthly_cost"] = costByUser[u.ID]   // yuan spent this calendar month (0 when none)
 		out = append(out, uj)
 	}
 	c.JSON(http.StatusOK, gin.H{"users": out, "total": total, "page": page, "size": size})
@@ -342,13 +360,15 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 		return
 	}
 	var req struct {
-		DisplayName *string `json:"display_name"`
-		Email       *string `json:"email"`
-		Password    *string `json:"password"`
-		IsAdmin     *bool   `json:"is_admin"`
-		Status      *int    `json:"status"`
-		QuotaTokens *int64  `json:"quota_tokens"`
-		QuotaClear  bool    `json:"quota_clear"` // reset quota_tokens to NULL (follow global default)
+		DisplayName     *string  `json:"display_name"`
+		Email           *string  `json:"email"`
+		Password        *string  `json:"password"`
+		IsAdmin         *bool    `json:"is_admin"`
+		Status          *int     `json:"status"`
+		QuotaTokens     *int64   `json:"quota_tokens"`
+		QuotaClear      bool     `json:"quota_clear"` // reset quota_tokens to NULL (follow global default)
+		QuotaMoney      *float64 `json:"quota_money"`
+		QuotaMoneyClear bool     `json:"quota_money_clear"` // reset quota_money to NULL (follow global default)
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
@@ -405,6 +425,16 @@ func (a *AdminAPI) updateUser(c *gin.Context) {
 		}
 		q := *req.QuotaTokens
 		u.QuotaTokens = &q
+	}
+	if req.QuotaMoneyClear {
+		u.QuotaMoney = nil
+	} else if req.QuotaMoney != nil {
+		if *req.QuotaMoney < 0 {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "quota_money 不能为负数")
+			return
+		}
+		q := *req.QuotaMoney
+		u.QuotaMoney = &q
 	}
 	// 权限敏感变更:改密 / 取消管理员 / 禁用 → 吊销全部 API token,
 	// 旧凭证立即失效(防已登录客户端继续以旧权限访问)。

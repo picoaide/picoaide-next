@@ -255,11 +255,16 @@ func userJSON(u *serverstore.User) gin.H {
 	if u.QuotaTokens != nil {
 		quota = *u.QuotaTokens
 	}
+	var quotaMoney any
+	if u.QuotaMoney != nil {
+		quotaMoney = *u.QuotaMoney
+	}
 	return gin.H{
 		"id":           u.ID,
 		"username":     u.Username,
 		"is_admin":     u.IsAdmin,
 		"status":       u.Status,
-		"quota_tokens": quota, // null = follow global default, 0 = unlimited, >0 = capped
+		"quota_tokens": quota,      // null = follow global default, 0 = unlimited, >0 = capped
+		"quota_money":  quotaMoney, // null = follow global default, 0 = unlimited, >0 = capped (yuan)
 	}
 }

@@ -20,6 +20,9 @@ import (
 func adminTestSetup(t *testing.T) (http.Handler, *sql.DB, map[string]string) {
 	t.Helper()
 	t.Setenv("PICOAI_MASTER_KEY", "0123456789abcdef0123456789abcdef")
+	// adminLoginLimiter 是包级共享(默认 10 次/5min):测试反复登录 boss,
+	// 用例增多后触发限流 → login 429 → csrf 为空(flaky)。按该 env 设计用途放宽。
+	t.Setenv("PICOAI_LOGIN_MAX_ATTEMPTS", "10000")
 	DecryptSecret = func(s string) (string, error) { return s, nil }
 	db, err := serverstore.EnsureMigrated(fmt.Sprintf("%s/admin.db", t.TempDir()))
 	if err != nil {
@@ -375,5 +378,74 @@ func TestProviderEnableToggle(t *testing.T) {
 	ups, err = MatchModels(db, "m1")
 	if err != nil || len(ups) != 1 {
 		t.Fatalf("re-enabled provider not routable: %+v %v", ups, err)
+	}
+}
+
+// TestAdminGatewayMoneyQuota: 全局默认金额配额读写 + 拒绝负数。
+func TestAdminGatewayMoneyQuota(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	// 未配置时 GET 返回 "0"(不限)
+	w, out := adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	if w.Code != http.StatusOK || out["monthly_quota_money"] != "0" {
+		t.Fatalf("default monthly_quota_money: %d %v", w.Code, out)
+	}
+	// 负数拒绝
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"monthly_quota_money":"-5"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("negative monthly_quota_money accepted: %d", w.Code)
+	}
+	// 写入并读回
+	w, _ = adminReq(t, r, "PUT", "/api/admin/gateway", `{"monthly_quota_money":"500"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("set monthly_quota_money: %d %s", w.Code, w.Body.String())
+	}
+	w, out = adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	if w.Code != http.StatusOK || out["monthly_quota_money"] != "500" {
+		t.Fatalf("monthly_quota_money not persisted: %d %v", w.Code, out)
+	}
+}
+
+// TestAdminModelPricing: 模型增改携带 input/output 价格(0022)。
+func TestAdminModelPricing(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	if w, _ := adminReq(t, r, "POST", "/api/admin/providers",
+		`{"name":"deepseek","base_url":"https://api.deepseek.com","api_key":"k","models":[]}`, hdr); w.Code != http.StatusOK {
+		t.Fatal("create provider failed")
+	}
+	// 新增模型带价格
+	w, _ := adminReq(t, r, "POST", "/api/admin/models",
+		`{"name":"deepseek-chat","provider_id":1,"display_name":"聊天","input_price_per_1m":2,"output_price_per_1m":8}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create model with price: %d %s", w.Code, w.Body.String())
+	}
+	m, err := serverstore.GetModel(db, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.InputPricePer1M == nil || *m.InputPricePer1M != 2 {
+		t.Fatalf("input price = %v, want 2", m.InputPricePer1M)
+	}
+	if m.OutputPricePer1M == nil || *m.OutputPricePer1M != 8 {
+		t.Fatalf("output price = %v, want 8", m.OutputPricePer1M)
+	}
+	// 更新价格
+	w, _ = adminReq(t, r, "PUT", "/api/admin/models/1",
+		`{"input_price_per_1m":3,"output_price_per_1m":10}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("update model price: %d %s", w.Code, w.Body.String())
+	}
+	m, err = serverstore.GetModel(db, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *m.InputPricePer1M != 3 || *m.OutputPricePer1M != 10 {
+		t.Fatalf("prices after update = %v/%v, want 3/10", *m.InputPricePer1M, *m.OutputPricePer1M)
+	}
+	// 负数拒绝
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/models/1", `{"input_price_per_1m":-1}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("negative price accepted: %d", w.Code)
 	}
 }

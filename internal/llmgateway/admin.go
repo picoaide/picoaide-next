@@ -304,10 +304,25 @@ func deleteProvider(c *gin.Context, db *sql.DB) {
 }
 
 type modelReq struct {
-	Name          string `json:"name"`
-	ProviderID    int64  `json:"provider_id"`
-	DisplayName   string `json:"display_name"`
-	DefaultParams string `json:"default_params"`
+	Name             string   `json:"name"`
+	ProviderID       int64    `json:"provider_id"`
+	DisplayName      string   `json:"display_name"`
+	DefaultParams    string   `json:"default_params"`
+	InputPricePer1M  *float64 `json:"input_price_per_1m"`
+	OutputPricePer1M *float64 `json:"output_price_per_1m"`
+}
+
+// validateModelPrices rejects negative prices (nil = 未定价,允许)。
+func validateModelPrices(c *gin.Context, in, out *float64) bool {
+	if in != nil && *in < 0 {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "input_price_per_1m 不能为负数")
+		return false
+	}
+	if out != nil && *out < 0 {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "output_price_per_1m 不能为负数")
+		return false
+	}
+	return true
 }
 
 func listModelsAdmin(c *gin.Context, db *sql.DB) {
@@ -325,7 +340,14 @@ func createModel(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "模型名和 provider 必填")
 		return
 	}
-	m := &serverstore.Model{Name: req.Name, ProviderID: req.ProviderID, DisplayName: req.DisplayName, DefaultParams: req.DefaultParams}
+	if !validateModelPrices(c, req.InputPricePer1M, req.OutputPricePer1M) {
+		return
+	}
+	m := &serverstore.Model{
+		Name: req.Name, ProviderID: req.ProviderID, DisplayName: req.DisplayName,
+		DefaultParams: req.DefaultParams, InputPricePer1M: req.InputPricePer1M,
+		OutputPricePer1M: req.OutputPricePer1M,
+	}
 	if _, err := serverstore.AddModel(db, m); err != nil {
 		if errors.Is(err, serverstore.ErrDuplicate) {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "模型名已存在")
@@ -357,6 +379,9 @@ func updateModel(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
 		return
 	}
+	if !validateModelPrices(c, req.InputPricePer1M, req.OutputPricePer1M) {
+		return
+	}
 	if req.Name != "" {
 		m.Name = req.Name
 	}
@@ -368,6 +393,12 @@ func updateModel(c *gin.Context, db *sql.DB) {
 	}
 	if req.DefaultParams != "" {
 		m.DefaultParams = req.DefaultParams
+	}
+	if req.InputPricePer1M != nil {
+		m.InputPricePer1M = req.InputPricePer1M
+	}
+	if req.OutputPricePer1M != nil {
+		m.OutputPricePer1M = req.OutputPricePer1M
 	}
 	if err := serverstore.UpdateModel(db, m); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
@@ -404,26 +435,32 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 	if monthlyQuota == "" {
 		monthlyQuota = "0"
 	}
+	monthlyQuotaMoney := settings[serverstore.MonthlyMoneyQuotaSetting]
+	if monthlyQuotaMoney == "" {
+		monthlyQuotaMoney = "0"
+	}
 	allowPrivate := settings["web.allow_private"] == "true"
 	c.JSON(http.StatusOK, gin.H{
-		"default_model":   settings["gateway.default_model"],
-		"rate_limit":      rateLimit,
-		"monthly_quota":   monthlyQuota, // default per-user monthly tokens (0 = unlimited)
-		"allow_private":   allowPrivate,
-		"search_endpoint": settings["web.search_endpoint"],
-		"server_base_url": settings["server.base_url"],
+		"default_model":       settings["gateway.default_model"],
+		"rate_limit":          rateLimit,
+		"monthly_quota":       monthlyQuota,      // default per-user monthly tokens (0 = unlimited)
+		"monthly_quota_money": monthlyQuotaMoney, // default per-user monthly yuan (0 = unlimited)
+		"allow_private":       allowPrivate,
+		"search_endpoint":     settings["web.search_endpoint"],
+		"server_base_url":     settings["server.base_url"],
 	})
 }
 
 // setGatewayConfig validates default_model against enabled models and saves.
 func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	var req struct {
-		DefaultModel   string `json:"default_model"`
-		RateLimit      string `json:"rate_limit"`
-		MonthlyQuota   string `json:"monthly_quota"`
-		AllowPrivate   bool   `json:"allow_private"`
-		SearchEndpoint string `json:"search_endpoint"`
-		ServerBaseURL  string `json:"server_base_url"`
+		DefaultModel      string `json:"default_model"`
+		RateLimit         string `json:"rate_limit"`
+		MonthlyQuota      string `json:"monthly_quota"`
+		MonthlyQuotaMoney string `json:"monthly_quota_money"`
+		AllowPrivate      bool   `json:"allow_private"`
+		SearchEndpoint    string `json:"search_endpoint"`
+		ServerBaseURL     string `json:"server_base_url"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
@@ -445,6 +482,12 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 			return
 		}
 	}
+	if req.MonthlyQuotaMoney != "" {
+		if n, err := strconv.ParseFloat(req.MonthlyQuotaMoney, 64); err != nil || n < 0 {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "monthly_quota_money 必须是非负数字")
+			return
+		}
+	}
 	if req.DefaultModel != "" {
 		if err := serverstore.SetSetting(db, "gateway.default_model", req.DefaultModel); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
@@ -459,6 +502,12 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	}
 	if req.MonthlyQuota != "" {
 		if err := serverstore.SetSetting(db, serverstore.MonthlyQuotaSetting, req.MonthlyQuota); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+	}
+	if req.MonthlyQuotaMoney != "" {
+		if err := serverstore.SetSetting(db, serverstore.MonthlyMoneyQuotaSetting, req.MonthlyQuotaMoney); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
