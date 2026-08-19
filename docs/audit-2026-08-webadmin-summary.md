@@ -67,3 +67,22 @@
 6. **A1-H2 禁用用户无确认即吊销令牌**——误操作风险
 7. **A3-H3 usage 无 created_at 单列索引**——全表扫描性能
 8. **A4-H2 pending 文档死循环卡队列**——队列瘫痪
+
+## 修复状态(2026-08-19,全部完成)
+
+5 个域修复 agent 并行(独立 worktree)TDD 修复,已全部合并回 server-webadmin-only:
+
+| 域 | 发现 | 修复 | 提交 |
+|----|------|------|------|
+| A1 用户+部门 | 26 | 26/26(0 跳过) | 15 commits, merge 09da3ed |
+| A2 网关 | 17 | 16/17(跳过 N+1 可接受项) | 3 commits, merge db9f1e7 |
+| A3 用量 | 17 | 17/17 | 2 commits, merge 83d9a56 |
+| A4 知识库+审计 | 23 | 23/23 | 5 commits, merge ee0f12d |
+| A5 商城+公共层 | 22 | 22/22 | 4 commits, merge f1fedfe |
+| **合计** | **105** | **104/105**(1 项按审计建议跳过) | **29 commits** |
+
+新增迁移:0025(usage.created_at 索引,A3)、0026(mcp_servers.name 唯一,A5)、0027(user_groups.group_id 索引,A1)。
+
+关键修复(高危):MCP enabled 字段、凭证掩码回传契约、peak_windows 可清空、kb 队列死循环/编辑守卫/processing 状态、金额环比/chat 口径、创建子部门、全员改名守卫、禁用确认、budget_money 创建消费、401 回调、ErrorBoundary、CSV 转义、接口无界防护、唯一约束等。
+
+验证:go test ./... 8 包全绿;webadmin 82 tests(新增 42)+ typecheck 0 + build 成功。
