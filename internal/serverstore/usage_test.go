@@ -693,3 +693,105 @@ func TestUsageAggregateCost(t *testing.T) {
 		t.Fatalf("rows = %+v, want one row cost 6.0", rows)
 	}
 }
+
+// ---- 峰谷价格(0023) ----
+
+// mustOffpeakModel 创建带价格与低谷折扣的模型。
+func mustOffpeakModel(t *testing.T, db *sql.DB, name string, in, out, offpeak float64) {
+	t.Helper()
+	pid, err := AddGatewayProvider(db, &GatewayProvider{Name: "prov-" + name, BaseURL: "http://x", APIKeyEnc: "k", Enabled: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inPtr, outPtr, offPtr := in, out, offpeak
+	if _, err := AddModel(db, &Model{Name: name, ProviderID: pid, InputPricePer1M: &inPtr, OutputPricePer1M: &outPtr, OffpeakDiscount: &offPtr}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func utc(h, m int) time.Time {
+	return time.Date(2026, 8, 19, h, m, 0, 0, time.UTC)
+}
+
+// TestOffpeakFactor:UTC 08:30-16:30(北京 16:30-00:30)为低谷,窗口内乘折扣。
+func TestOffpeakFactor(t *testing.T) {
+	cases := []struct {
+		name     string
+		now      time.Time
+		discount float64
+		want     float64
+	}{
+		{"窗口内 10:00 UTC", utc(10, 0), 0.5, 0.5},
+		{"窗口外 08:00 UTC", utc(8, 0), 0.5, 1},
+		{"窗口外 17:00 UTC", utc(17, 0), 0.5, 1},
+		{"起点 08:30:00 含", utc(8, 30), 0.5, 0.5},
+		{"起点前 08:29:59", utc(8, 29), 0.5, 1},
+		{"终点前 16:29:59", utc(16, 29), 0.5, 0.5},
+		{"终点 16:30:00 不含", utc(16, 30), 0.5, 1},
+		{"无折扣 0", utc(10, 0), 0, 1},
+		{"无折扣 -1", utc(10, 0), -1, 1},
+		{"无折扣 1(显式无峰谷)", utc(10, 0), 1, 1},
+		{"无折扣 >1", utc(10, 0), 1.5, 1},
+	}
+	for _, c := range cases {
+		if got := offpeakFactor(c.now, c.discount); got != c.want {
+			t.Errorf("%s: offpeakFactor(%v, %v) = %v, want %v", c.name, c.now, c.discount, got, c.want)
+		}
+	}
+}
+
+// TestRecordUsageOffpeakDiscount:窗口内记录按折扣价折算,窗口外按标准价。
+func TestRecordUsageOffpeakDiscount(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	mustOffpeakModel(t, db, "offpeak-model", 2.0, 8.0, 0.5) // 标准 1M in=2 + 0.5M out=4
+
+	// 窗口内(UTC 10:00):cost = (2+4)*0.5 = 3
+	id, err := recordUsageKindAt(db, uid, "offpeak-model", 1_000_000, 500_000, "chat", utc(10, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cost float64
+	if err := db.QueryRow("SELECT cost FROM usage WHERE id = ?", id).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	if cost != 3.0 {
+		t.Fatalf("off-peak cost = %v, want 3.0", cost)
+	}
+
+	// 窗口外(UTC 08:00):cost = 6(标准价)
+	id2, err := recordUsageKindAt(db, uid, "offpeak-model", 1_000_000, 500_000, "chat", utc(8, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT cost FROM usage WHERE id = ?", id2).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	if cost != 6.0 {
+		t.Fatalf("peak cost = %v, want 6.0", cost)
+	}
+}
+
+// TestUpdateUsageTokensOffpeakRecompute:流式回填时按回填时刻折算。
+func TestUpdateUsageTokensOffpeakRecompute(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	mustOffpeakModel(t, db, "offpeak-model", 2.0, 8.0, 0.5)
+
+	id, err := recordUsageKindAt(db, uid, "offpeak-model", 0, 0, "chat", utc(10, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := updateUsageTokensAt(db, id, 1_000_000, 500_000, utc(10, 0)); err != nil {
+		t.Fatal(err)
+	}
+	var cost float64
+	if err := db.QueryRow("SELECT cost FROM usage WHERE id = ?", id).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	if cost != 3.0 {
+		t.Fatalf("backfilled off-peak cost = %v, want 3.0", cost)
+	}
+}

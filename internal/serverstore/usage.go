@@ -17,10 +17,37 @@ const MonthlyQuotaSetting = "usage.monthly_quota"
 // monthly traffic quota in yuan (absent / "0" = unlimited).
 const MonthlyMoneyQuotaSetting = "usage.monthly_quota_money"
 
-// costOf computes the yuan cost for a usage row from model pricing
-// (yuan per 1M tokens). Unpriced models (0,0) yield 0 cost.
-func costOf(promptTokens, completionTokens int64, inputPer1M, outputPer1M float64) float64 {
-	return float64(promptTokens)/1e6*inputPer1M + float64(completionTokens)/1e6*outputPer1M
+// OffpeakWindowUTC 低谷窗口(UTC 08:30-16:30 = 北京 16:30-00:30)。
+// DeepSeek 官方错峰优惠:每日该时段按标准价折扣(默认 50%)。
+const (
+	offpeakStartMinuteUTC = 8*60 + 30
+	offpeakEndMinuteUTC   = 16*60 + 30
+)
+
+// offpeakFactor 返回时刻 now(UTC)的费用系数:低谷窗口内且 0<discount<1 → discount,
+// 否则 1(无峰谷价 / 窗口外)。
+func offpeakFactor(now time.Time, discount float64) float64 {
+	if !(discount > 0 && discount < 1) {
+		return 1
+	}
+	mins := now.UTC().Hour()*60 + now.UTC().Minute()
+	if mins >= offpeakStartMinuteUTC && mins < offpeakEndMinuteUTC {
+		return discount
+	}
+	return 1
+}
+
+// costOfAt computes the yuan cost for a usage row at time now from model
+// pricing (yuan per 1M tokens), applying the off-peak discount when now falls
+// inside the off-peak window (0023). Unpriced models (0,0) yield 0 cost.
+func costOfAt(now time.Time, promptTokens, completionTokens int64, inputPer1M, outputPer1M, offpeak float64) float64 {
+	base := float64(promptTokens)/1e6*inputPer1M + float64(completionTokens)/1e6*outputPer1M
+	return base * offpeakFactor(now, offpeak)
+}
+
+// costOf computes the cost for a usage row right now.
+func costOf(promptTokens, completionTokens int64, inputPer1M, outputPer1M, offpeak float64) float64 {
+	return costOfAt(time.Now(), promptTokens, completionTokens, inputPer1M, outputPer1M, offpeak)
 }
 
 // RecordUsage inserts a chat usage row and returns its id.
@@ -31,11 +58,16 @@ func RecordUsage(db *sql.DB, userID int64, model string, promptTokens, completio
 // RecordUsageKind inserts a usage row with an explicit kind (chat | embedding).
 // embedding 行的 0-token(上游省略 usage)是真实请求计数,不得被
 // CleanupPendingUsage 当作流中断残留清除(审计2026-M16)。
-// cost 在记录时按模型定价折算并落库(0022):后续改价/删模型不重写历史,
-// 金额配额与统计均读 SUM(cost),口径一致。
+// cost 在记录时按模型定价折算并落库(0022/0023):后续改价/删模型不重写历史,
+// 金额配额与统计均读 SUM(cost),口径一致。低谷窗口按记录时刻判定。
 func RecordUsageKind(db *sql.DB, userID int64, model string, promptTokens, completionTokens int64, kind string) (int64, error) {
-	in, out := ModelPrices(db, model)
-	cost := costOf(promptTokens, completionTokens, in, out)
+	return recordUsageKindAt(db, userID, model, promptTokens, completionTokens, kind, time.Now())
+}
+
+// recordUsageKindAt 是 RecordUsageKind 的时间注入版本(测试固定时刻)。
+func recordUsageKindAt(db *sql.DB, userID int64, model string, promptTokens, completionTokens int64, kind string, now time.Time) (int64, error) {
+	in, out, off := ModelPrices(db, model)
+	cost := costOfAt(now, promptTokens, completionTokens, in, out, off)
 	res, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, kind, cost) VALUES (?, ?, ?, ?, ?, ?)`,
 		userID, model, promptTokens, completionTokens, kind, cost)
 	if err != nil {
@@ -45,14 +77,19 @@ func RecordUsageKind(db *sql.DB, userID int64, model string, promptTokens, compl
 }
 
 // UpdateUsageTokens backfills token counts on an existing usage row (pending
-// row) and recomputes cost from the row's model pricing (0022).
+// row) and recomputes cost from the row's model pricing (0022/0023).
 func UpdateUsageTokens(db *sql.DB, id, promptTokens, completionTokens int64) error {
+	return updateUsageTokensAt(db, id, promptTokens, completionTokens, time.Now())
+}
+
+// updateUsageTokensAt 是 UpdateUsageTokens 的时间注入版本(测试固定时刻)。
+func updateUsageTokensAt(db *sql.DB, id, promptTokens, completionTokens int64, now time.Time) error {
 	var model string
 	if err := db.QueryRow("SELECT model FROM usage WHERE id = ?", id).Scan(&model); err != nil {
 		return err
 	}
-	in, out := ModelPrices(db, model)
-	cost := costOf(promptTokens, completionTokens, in, out)
+	in, out, off := ModelPrices(db, model)
+	cost := costOfAt(now, promptTokens, completionTokens, in, out, off)
 	_, err := db.Exec("UPDATE usage SET prompt_tokens = ?, completion_tokens = ?, cost = ? WHERE id = ?",
 		promptTokens, completionTokens, cost, id)
 	return err

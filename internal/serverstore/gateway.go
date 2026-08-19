@@ -27,6 +27,9 @@ type Model struct {
 	// 费用按 0 计,页面标注「未定价」。embedding 复用 input 价。
 	InputPricePer1M  *float64 `json:"input_price_per_1m"`
 	OutputPricePer1M *float64 `json:"output_price_per_1m"`
+	// OffpeakDiscount 低谷折扣率(0023):nil/0/1 = 无峰谷价;0<d<1 = 低谷窗口
+	// (每日 UTC 08:30-16:30,即北京 16:30-00:30)内费用 × d(DeepSeek 官方 0.5)。
+	OffpeakDiscount *float64 `json:"offpeak_discount"`
 }
 
 func scanProvider(scan interface{ Scan(...any) error }) (*GatewayProvider, error) {
@@ -237,8 +240,8 @@ func RemoveMissingProviderModels(db *sql.DB, providerID int64, keep []string) (i
 
 func scanModel(scan interface{ Scan(...any) error }) (*Model, error) {
 	var m Model
-	var in, out sql.NullFloat64
-	if err := scan.Scan(&m.ID, &m.Name, &m.ProviderID, &m.DisplayName, &m.DefaultParams, &in, &out); err != nil {
+	var in, out, off sql.NullFloat64
+	if err := scan.Scan(&m.ID, &m.Name, &m.ProviderID, &m.DisplayName, &m.DefaultParams, &in, &out, &off); err != nil {
 		return nil, err
 	}
 	if in.Valid {
@@ -247,12 +250,15 @@ func scanModel(scan interface{ Scan(...any) error }) (*Model, error) {
 	if out.Valid {
 		m.OutputPricePer1M = &out.Float64
 	}
+	if off.Valid {
+		m.OffpeakDiscount = &off.Float64
+	}
 	return &m, nil
 }
 
 // GetModel loads a model by id.
 func GetModel(db *sql.DB, id int64) (*Model, error) {
-	row := db.QueryRow(`SELECT id, name, provider_id, display_name, default_params, input_price_per_1m, output_price_per_1m
+	row := db.QueryRow(`SELECT id, name, provider_id, display_name, default_params, input_price_per_1m, output_price_per_1m, offpeak_discount
 		FROM models WHERE id = ?`, id)
 	m, err := scanModel(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -271,14 +277,14 @@ func ModelDefaultParams(db *sql.DB, name string) (string, error) {
 	return params, err
 }
 
-// ModelPrices returns the yuan-per-1M-token input/output prices for a model
-// name (0, 0 when the model is missing or unpriced). Used to compute usage
-// cost at record time (0022).
-func ModelPrices(db *sql.DB, name string) (inputPer1M, outputPer1M float64) {
-	var in, out sql.NullFloat64
-	err := db.QueryRow(`SELECT input_price_per_1m, output_price_per_1m FROM models WHERE name = ?`, name).Scan(&in, &out)
+// ModelPrices returns the yuan-per-1M-token input/output prices and the
+// off-peak discount for a model name (0, 0, 0 when the model is missing or
+// unpriced). Used to compute usage cost at record time (0022/0023).
+func ModelPrices(db *sql.DB, name string) (inputPer1M, outputPer1M, offpeak float64) {
+	var in, out, off sql.NullFloat64
+	err := db.QueryRow(`SELECT input_price_per_1m, output_price_per_1m, offpeak_discount FROM models WHERE name = ?`, name).Scan(&in, &out, &off)
 	if err != nil {
-		return 0, 0
+		return 0, 0, 0
 	}
 	if in.Valid {
 		inputPer1M = in.Float64
@@ -286,7 +292,10 @@ func ModelPrices(db *sql.DB, name string) (inputPer1M, outputPer1M float64) {
 	if out.Valid {
 		outputPer1M = out.Float64
 	}
-	return inputPer1M, outputPer1M
+	if off.Valid {
+		offpeak = off.Float64
+	}
+	return inputPer1M, outputPer1M, offpeak
 }
 
 // AddModel inserts a model row.
@@ -294,9 +303,9 @@ func AddModel(db *sql.DB, m *Model) (int64, error) {
 	if m.DefaultParams == "" {
 		m.DefaultParams = "{}"
 	}
-	res, err := db.Exec(`INSERT INTO models (name, provider_id, display_name, default_params, input_price_per_1m, output_price_per_1m)
-		VALUES (?, ?, ?, ?, ?, ?)`, m.Name, m.ProviderID, m.DisplayName, m.DefaultParams,
-		nilIfNilFloat64(m.InputPricePer1M), nilIfNilFloat64(m.OutputPricePer1M))
+	res, err := db.Exec(`INSERT INTO models (name, provider_id, display_name, default_params, input_price_per_1m, output_price_per_1m, offpeak_discount)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, m.Name, m.ProviderID, m.DisplayName, m.DefaultParams,
+		nilIfNilFloat64(m.InputPricePer1M), nilIfNilFloat64(m.OutputPricePer1M), nilIfNilFloat64(m.OffpeakDiscount))
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			return 0, ErrDuplicate
@@ -309,9 +318,9 @@ func AddModel(db *sql.DB, m *Model) (int64, error) {
 
 // UpdateModel updates a model row.
 func UpdateModel(db *sql.DB, m *Model) error {
-	res, err := db.Exec(`UPDATE models SET name=?, provider_id=?, display_name=?, default_params=?, input_price_per_1m=?, output_price_per_1m=?
+	res, err := db.Exec(`UPDATE models SET name=?, provider_id=?, display_name=?, default_params=?, input_price_per_1m=?, output_price_per_1m=?, offpeak_discount=?
 		WHERE id=?`, m.Name, m.ProviderID, m.DisplayName, m.DefaultParams,
-		nilIfNilFloat64(m.InputPricePer1M), nilIfNilFloat64(m.OutputPricePer1M), m.ID)
+		nilIfNilFloat64(m.InputPricePer1M), nilIfNilFloat64(m.OutputPricePer1M), nilIfNilFloat64(m.OffpeakDiscount), m.ID)
 	if err != nil {
 		return err
 	}
