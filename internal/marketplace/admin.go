@@ -2,8 +2,10 @@ package marketplace
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -26,10 +28,13 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	g.POST("/skills", func(c *gin.Context) { createSkillAdmin(c, db) })
 	g.PUT("/skills/:name", func(c *gin.Context) { updateSkillAdmin(c, db, cacheDir) })
 	g.DELETE("/skills/:name", func(c *gin.Context) { deleteSkillAdmin(c, db) })
+	// 重新上架(审计 A5-M1: 下架不可逆曾导致误下架无法恢复)
+	g.POST("/skills/:name/enable", func(c *gin.Context) { enableSkillAdmin(c, db) })
 	g.GET("/mcp", func(c *gin.Context) { listMCPAdmin(c, db) })
 	g.POST("/mcp", func(c *gin.Context) { createMCPAdmin(c, db) })
 	g.PUT("/mcp/:id", func(c *gin.Context) { updateMCPAdmin(c, db) })
 	g.DELETE("/mcp/:id", func(c *gin.Context) { deleteMCPAdmin(c, db) })
+	g.POST("/mcp/:id/enable", func(c *gin.Context) { enableMCPAdmin(c, db) })
 	g.GET("/mcp-downloads", func(c *gin.Context) { listDownloads(c, db) })
 	// 授权管理(严格默认:未授权不可见/不可下载)
 	g.GET("/skills/:name/grants", func(c *gin.Context) { listSkillGrants(c, db) })
@@ -66,6 +71,15 @@ func parseGrantSubject(req grantReq) (string, serverstore.GranteeType, bool) {
 	return "", "", false
 }
 
+// strictBindJSON decodes the request body rejecting unknown fields, so a
+// caller cannot silently send a body that this endpoint does not understand
+// (审计 A5-M7: PUT grants 只接受 {groups:[...]})。
+func strictBindJSON(c *gin.Context, v any) error {
+	dec := json.NewDecoder(c.Request.Body)
+	dec.DisallowUnknownFields()
+	return dec.Decode(v)
+}
+
 func grantsJSON(grants []serverstore.Grant) gin.H {
 	if grants == nil {
 		grants = []serverstore.Grant{}
@@ -93,42 +107,14 @@ func setSkillGrant(c *gin.Context, db *sql.DB, grant bool) {
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
 		return
 	}
-	var req grantReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
-		return
-	}
-	subject, t, ok := parseGrantSubject(req)
-	if !ok {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "username 或 group 必填且只能二选一")
-		return
-	}
-	// 主体存在性校验:拼错的用户名/部门名不应静默落库永不生效
-	if t == serverstore.GranteeUser {
-		if _, err := serverstore.GetUserByUsername(db, subject); err != nil {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "用户不存在: "+subject)
-			return
-		}
-	} else if t == serverstore.GranteeGroup {
-		if _, err := serverstore.GroupByName(db, subject); err != nil {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "部门不存在: "+subject)
-			return
-		}
-	}
-	if grant {
-		if err := serverstore.GrantSkill(db, name, subject, t); err != nil {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "授权对象不合法")
-			return
-		}
-		_ = serverstore.AuditLog(db, adminUsername(c), "skill_grant", name+" "+string(t)+":"+subject)
-	} else {
-		if err := serverstore.RevokeSkill(db, name, subject, t); err != nil {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "授权对象不合法")
-			return
-		}
-		_ = serverstore.AuditLog(db, adminUsername(c), "skill_revoke", name+" "+string(t)+":"+subject)
-	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	applyGrant(c, db, grant, name,
+		func(subject string, t serverstore.GranteeType) error {
+			return serverstore.GrantSkill(db, name, subject, t)
+		},
+		func(subject string, t serverstore.GranteeType) error {
+			return serverstore.RevokeSkill(db, name, subject, t)
+		},
+		"skill_grant", "skill_revoke")
 }
 
 func listMCPGrants(c *gin.Context, db *sql.DB) {
@@ -159,6 +145,20 @@ func setMCPGrant(c *gin.Context, db *sql.DB, grant bool) {
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "插件不存在")
 		return
 	}
+	label := "mcp#" + strconv.FormatInt(id, 10)
+	applyGrant(c, db, grant, label,
+		func(subject string, t serverstore.GranteeType) error { return serverstore.GrantMCP(db, id, subject, t) },
+		func(subject string, t serverstore.GranteeType) error {
+			return serverstore.RevokeMCP(db, id, subject, t)
+		},
+		"mcp_grant", "mcp_revoke")
+}
+
+// applyGrant 是 skill/mcp 单条授权与撤销的公共实现(审计 A5-L1):解析请求体
+// → 主体存在性校验(拼错的用户名/部门名不应静默落库)→ grant/revoke → 审计。
+func applyGrant(c *gin.Context, db *sql.DB, grant bool, subjectLabel string,
+	grantFn, revokeFn func(subject string, t serverstore.GranteeType) error,
+	grantAudit, revokeAudit string) {
 	var req grantReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
@@ -181,17 +181,17 @@ func setMCPGrant(c *gin.Context, db *sql.DB, grant bool) {
 		}
 	}
 	if grant {
-		if err := serverstore.GrantMCP(db, id, subject, t); err != nil {
+		if err := grantFn(subject, t); err != nil {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "授权对象不合法")
 			return
 		}
-		_ = serverstore.AuditLog(db, adminUsername(c), "mcp_grant", "mcp#"+strconv.FormatInt(id, 10)+" "+string(t)+":"+subject)
+		_ = serverstore.AuditLog(db, adminUsername(c), grantAudit, subjectLabel+" "+string(t)+":"+subject)
 	} else {
-		if err := serverstore.RevokeMCP(db, id, subject, t); err != nil {
+		if err := revokeFn(subject, t); err != nil {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "授权对象不合法")
 			return
 		}
-		_ = serverstore.AuditLog(db, adminUsername(c), "mcp_revoke", "mcp#"+strconv.FormatInt(id, 10)+" "+string(t)+":"+subject)
+		_ = serverstore.AuditLog(db, adminUsername(c), revokeAudit, subjectLabel+" "+string(t)+":"+subject)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -231,6 +231,17 @@ type skillReq struct {
 	GitRef      string `json:"git_ref"`
 }
 
+// validGitURL restricts skill git sources to http/https (审计 A5-L10):
+// file://、ftp 与内网协议会让服务端按管理员输入主动出网克隆,扩大攻击面;
+// 只放行可被 git 安全拉取的远程仓库地址。
+func validGitURL(u string) bool {
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return false
+	}
+	return (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
+}
+
 func createSkillAdmin(c *gin.Context, db *sql.DB) {
 	var req skillReq
 	if err := c.ShouldBindJSON(&req); err != nil || req.Name == "" || req.GitURL == "" {
@@ -239,6 +250,10 @@ func createSkillAdmin(c *gin.Context, db *sql.DB) {
 	}
 	if !util.SafePathSegment(req.Name) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能名不合法")
+		return
+	}
+	if !validGitURL(req.GitURL) {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "Git 地址必须是 http/https 远程仓库")
 		return
 	}
 	if req.GitRef == "" {
@@ -286,6 +301,10 @@ func updateSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 		s.Author = req.Author
 	}
 	if req.GitURL != "" && req.GitURL != s.GitURL {
+		if !validGitURL(req.GitURL) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "Git 地址必须是 http/https 远程仓库")
+			return
+		}
 		s.GitURL = req.GitURL
 		sourceChanged = true
 	}
@@ -316,6 +335,23 @@ func deleteSkillAdmin(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "下架失败")
 		return
 	}
+	// 审计 A5-M8: 技能下架与 mcp_disable 一致,必须留痕(可见性变更必审计)
+	_ = serverstore.AuditLog(db, adminUsername(c), "skill_disable", name)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// enableSkillAdmin 重新上架技能(审计 A5-M1):enabled=1,恢复员工建议清单可见性。
+func enableSkillAdmin(c *gin.Context, db *sql.DB) {
+	name := c.Param("name")
+	if _, err := serverstore.SetSkillEnabled(db, name, true); err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+			return
+		}
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "上架失败")
+		return
+	}
+	_ = serverstore.AuditLog(db, adminUsername(c), "skill_enable", name)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -327,7 +363,8 @@ func listMCPAdmin(c *gin.Context, db *sql.DB) {
 	}
 	out := make([]gin.H, 0, len(list))
 	for _, m := range list {
-		out = append(out, mcpJSON(m, maskValues(m.Env), maskValues(m.Headers)))
+		// 管理端视图:仅敏感 key 掩码,非敏感值(如 TIMEOUT)明文可见便于编辑回填
+		out = append(out, mcpJSON(m, maskSensitiveValues(m.Env), maskSensitiveValues(m.Headers)))
 	}
 	c.JSON(http.StatusOK, gin.H{"mcp": out})
 }
@@ -374,11 +411,16 @@ func createMCPAdmin(c *gin.Context, db *sql.DB) {
 	m := &serverstore.MCPServer{Name: req.Name, Description: req.Description, Transport: req.Transport,
 		Command: req.Command, Args: req.Args, URL: req.URL, Env: req.Env, Headers: req.Headers, Enabled: 1}
 	if _, err := serverstore.AddMCPServer(db, m); err != nil {
+		// 审计 A5-M9: 0026 迁移后 name 唯一,重名与技能一致返回 VALIDATION
+		if errors.Is(err, serverstore.ErrDuplicate) {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "插件名称已存在")
+			return
+		}
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 		return
 	}
 	_ = serverstore.AuditLog(db, adminUsername(c), "mcp_create", "mcp#"+strconv.FormatInt(m.ID, 10)+" "+m.Name)
-	c.JSON(http.StatusOK, gin.H{"mcp": mcpJSON(*m, maskValues(m.Env), maskValues(m.Headers))})
+	c.JSON(http.StatusOK, gin.H{"mcp": mcpJSON(*m, maskSensitiveValues(m.Env), maskSensitiveValues(m.Headers))})
 }
 
 func updateMCPAdmin(c *gin.Context, db *sql.DB) {
@@ -419,26 +461,28 @@ func updateMCPAdmin(c *gin.Context, db *sql.DB) {
 	if req.URL != "" {
 		m.URL = req.URL
 	}
-	if req.Env != nil {
-		if err := encryptMCPValues(&req); err != nil {
+	// 凭证更新契约(审计 A5-H2):env/headers 为 nil 表示整体不变;传入的 map
+	// 是期望的完整 key 集合 —— 掩码值 "***"/enc:v1: 前缀保持现有存储值,
+	// 真实值覆盖(敏感 key 自动加密),未出现的 key 从存储中删除。
+	if req.Env != nil || req.Headers != nil {
+		key, err := util.GetMasterKey()
+		if err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "凭证加密失败")
 			return
 		}
-		m.Env = req.Env
-	}
-	if req.Headers != nil {
-		if err := encryptMCPValues(&req); err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "凭证加密失败")
-			return
+		if req.Env != nil {
+			m.Env = EncryptEnv(key, mergeEnvValues(m.Env, req.Env))
 		}
-		m.Headers = req.Headers
+		if req.Headers != nil {
+			m.Headers = EncryptEnv(key, mergeEnvValues(m.Headers, req.Headers))
+		}
 	}
 	if err := serverstore.UpdateMCPServer(db, m); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 		return
 	}
 	_ = serverstore.AuditLog(db, adminUsername(c), "mcp_update", "mcp#"+strconv.FormatInt(m.ID, 10)+" "+m.Name)
-	c.JSON(http.StatusOK, gin.H{"mcp": mcpJSON(*m, maskValues(m.Env), maskValues(m.Headers))})
+	c.JSON(http.StatusOK, gin.H{"mcp": mcpJSON(*m, maskSensitiveValues(m.Env), maskSensitiveValues(m.Headers))})
 }
 
 func deleteMCPAdmin(c *gin.Context, db *sql.DB) {
@@ -457,6 +501,25 @@ func deleteMCPAdmin(c *gin.Context, db *sql.DB) {
 		return
 	}
 	_ = serverstore.AuditLog(db, adminUsername(c), "mcp_disable", "mcp#"+strconv.FormatInt(id, 10))
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// enableMCPAdmin 重新上架 MCP 插件(审计 A5-M1):enabled=1,恢复可拉取凭证。
+func enableMCPAdmin(c *gin.Context, db *sql.DB) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
+		return
+	}
+	if err := serverstore.SetMCPEnabled(db, id, true); err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "插件不存在")
+			return
+		}
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "上架失败")
+		return
+	}
+	_ = serverstore.AuditLog(db, adminUsername(c), "mcp_enable", "mcp#"+strconv.FormatInt(id, 10))
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -497,8 +560,10 @@ func replaceSkillGrants(c *gin.Context, db *sql.DB) {
 	var req struct {
 		Groups []string `json:"groups"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
+	// 审计 A5-M7: 未知字段(如 {username})必须报错而非静默忽略 ——
+	// 此前误传 username 的请求会把部门授权清空成空组。
+	if err := strictBindJSON(c, &req); err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误(仅接受 groups 字段)")
 		return
 	}
 	if err := serverstore.ReplaceSkillGroupGrants(db, name, req.Groups); err != nil {
@@ -527,8 +592,8 @@ func replaceMCPGrants(c *gin.Context, db *sql.DB) {
 	var req struct {
 		Groups []string `json:"groups"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
+	if err := strictBindJSON(c, &req); err != nil {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误(仅接受 groups 字段)")
 		return
 	}
 	if err := serverstore.ReplaceMCPGroupGrants(db, id, req.Groups); err != nil {

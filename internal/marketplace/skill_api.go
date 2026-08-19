@@ -469,13 +469,33 @@ func mcpJSON(m serverstore.MCPServer, env, headers map[string]string) gin.H {
 		"url":         m.URL,
 		"env":         env,
 		"headers":     headers,
+		// 审计 A5-H1: 前端用 enabled 渲染上架/已下架徽标与下架/重新上架按钮,
+		// 缺失该字段曾导致管理页所有插件恒显「已下架」且无法下架。
+		"enabled": m.Enabled == 1,
 	}
 }
 
+// maskValues masks every env/headers value ("***"). Used by the client-facing
+// suggestion list: clients must not see any configured value.
 func maskValues(m map[string]string) map[string]string {
 	out := make(map[string]string, len(m))
 	for k := range m {
 		out[k] = "***"
+	}
+	return out
+}
+
+// maskSensitiveValues masks only values under sensitive keys (credentials);
+// non-sensitive values (TIMEOUT, URL, …) stay readable for admins, so the
+// webadmin edit form can prefill them without re-typing secrets.
+func maskSensitiveValues(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		if sensitiveEnvKey(k) {
+			out[k] = "***"
+		} else {
+			out[k] = v
+		}
 	}
 	return out
 }
