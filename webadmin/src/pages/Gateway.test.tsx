@@ -11,7 +11,7 @@ const baseImpl = async (path: string, init?: RequestInit) => {
   }
   if (path === '/api/admin/providers') return { providers: [{ id: 1, name: 'deepseek', base_url: 'https://api.deepseek.com', api_key: '***', models: ['deepseek-chat'], enabled: true, channel: 'deepseek' }] }
   if (path === '/api/admin/models') return { models: [{ id: 1, name: 'deepseek-chat', display_name: 'DeepSeek Chat', default_params: '{}' }] }
-  if (path === '/api/admin/gateway') return { default_model: 'deepseek-chat', rate_limit: '60', allow_private: false, search_endpoint: '', server_base_url: '' }
+  if (path === '/api/admin/gateway') return { default_model: 'deepseek-chat', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', allow_private: false, search_endpoint: '', server_base_url: '' }
   if (path === '/api/admin/channels') return { channels: [{ name: 'deepseek', base_url: 'https://api.deepseek.com' }] }
   return {}
 }
@@ -161,4 +161,22 @@ describe('Gateway 网关配置页', () => {
     // 无峰谷的模型不显示谷折扣
     const cells = screen.getAllByRole('cell')
     expect(cells.some((c) => c.textContent?.includes('谷'))).toBe(true)
+  })
+
+  it('高峰时段配置:DeepSeek 当前政策预设按钮 + 保存', async () => {
+    render(<Gateway />)
+    await screen.findByText('全局设置')
+    const presetBtn = screen.getByRole('button', { name: 'DeepSeek 当前政策' })
+    fireEvent.click(presetBtn)
+    const input = screen.getByLabelText('高峰时段(JSON,北京时间)') as HTMLInputElement
+    expect(input.value).toContain('"start":"09:00"')
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText('已保存')
+    expect(mockRequest).toHaveBeenCalledWith(
+      '/api/admin/gateway',
+      expect.objectContaining({
+        method: 'PUT',
+        body: expect.stringContaining('"peak_windows":"[{'),
+      }),
+    )
   })

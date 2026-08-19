@@ -57,7 +57,7 @@ export default function Gateway() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [models, setModels] = useState<Model[]>([])
   const [channels, setChannels] = useState<Channel[]>([])
-  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', allow_private: false, search_endpoint: '', server_base_url: '' })
+  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', peak_windows: '', allow_private: false, search_endpoint: '', server_base_url: '' })
   const [error, setError] = useState('')
   const [okMsg, setOkMsg] = useState('')
   const [syncMsg, setSyncMsg] = useState('')
@@ -258,6 +258,35 @@ export default function Gateway() {
                 0 = 不限;按模型定价折算费用统计,可在用户页单独覆盖
               </p>
             </div>
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="peak-windows">高峰时段(JSON,北京时间)</Label>
+            <div className="flex gap-2">
+              <Input
+                id="peak-windows"
+                className="font-mono"
+                placeholder='留空 = 无峰谷价,如 [{"start":"09:00","end":"12:00"},{"start":"14:00","end":"18:00"}]'
+                value={cfg.peak_windows}
+                onChange={(e) => setCfg({ ...cfg, peak_windows: e.target.value })}
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                className="shrink-0"
+                type="button"
+                onClick={() => setCfg({
+                  ...cfg,
+                  peak_windows: '[{"start":"09:00","end":"12:00"},{"start":"14:00","end":"18:00"}]',
+                })}
+              >
+                DeepSeek 当前政策
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              高峰时段按北京时间判定,半开区间 [start,end)。高峰窗口外(空闲时段)且模型配置了低谷折扣率时,
+              费用按折扣率打折。DeepSeek 官方当前政策(2026-08-16 生效):高峰 = 09:00-12:00、14:00-18:00,
+              空闲价 = 高峰价 × 50%(含缓存命中价);历史 16:30-00:30 错峰政策已废弃。
+            </p>
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="flex items-center gap-2">
@@ -504,7 +533,8 @@ export default function Gateway() {
             </div>
             <p className="text-xs text-muted-foreground">
               配置价格后,用量页按 输入token×输入价 + 输出token×输出价 折算费用;未定价模型费用按 0 计。
-              低谷折扣(DeepSeek 错峰):每日 16:30-00:30(北京时间,UTC 08:30-16:30)内费用 × 折扣率,其余时段按标准价。
+              低谷折扣:配置「全局设置 → 高峰时段」后,高峰窗口外(空闲时段)费用 × 折扣率,高峰时段按标准价。
+              DeepSeek 官方错峰五折(2026-08 起):高峰 = 北京 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%。
             </p>
             <Button className="w-full" onClick={createModel}>新增</Button>
           </div>
@@ -557,7 +587,8 @@ export default function Gateway() {
             </div>
             <p className="text-xs text-muted-foreground">
               修改价格/折扣只影响之后产生的用量费用(历史费用按记录时定价留存)。
-              低谷时段 = 每日 16:30-00:30(北京时间,UTC 08:30-16:30),DeepSeek 官方优惠五折。
+              低谷折扣 = 高峰窗口外(空闲时段)费用 × 折扣率;需先在「全局设置」配置高峰时段。
+              DeepSeek 官方:高峰 = 北京 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%。
             </p>
             <Button className="w-full" onClick={saveModelPricing}>保存</Button>
           </div>
