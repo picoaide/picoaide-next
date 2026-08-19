@@ -229,3 +229,15 @@
 4. `7946680` renderer:stores/usage.ts(登录/设置页打开时加载,登出重置);Settings「用量与配额」卡(余额 ¥+token、双进度条、今日/昨日/本月/累计、部门预算、刷新);Main 侧栏余额徽标(点击进设置)
 
 **验证**:客户端 644 passed | 2 skipped + typecheck 0;服务端 8 包全绿;已 commit。
+
+## Round 14(2026-08-19):客户端下线,仅保留服务端 + 管理端
+
+**决策**:自研 Electron 客户端(desktop/,2.2G)与浏览器插件(browser-extension/)不再使用,从仓库删除;只保留 Go 服务端接口与 webadmin 管理端。新分支 `server-webadmin-only`(基于 deploy/quota-admin)。
+
+**执行**:
+- `git rm` desktop/browser-extension/scripts(e2e、dev-env、pkg-*),787 文件变更
+- Makefile 收敛(test/test-server/build-server/webadmin/docker-image/check);CI 删 desktop/package-windows/package-macos job
+- AGENTS.md 重写为服务端+管理端架构;docs/01 架构、02 部署、03 接口注记;历史 plans/specs 头部加「客户端已下线」注记
+- 服务端接口**全部保留**(/api/auth/*、/v1/*、/api/config/bootstrap、/api/admin/*),供第三方/自研客户端接入
+
+**验证**:go test ./internal/... 8 包全绿;make webadmin 构建成功;已 commit 至 server-webadmin-only。

@@ -1,5 +1,7 @@
 # Channel Pack + Auto Model Sync 实施计划
 
+> **2026-08-19 注记**:自研 Electron 客户端(desktop/)与浏览器插件已下线删除,仓库仅保留服务端接口与 webadmin 管理端。本文档为历史设计与计划,服务端相关部分仍有效,客户端相关部分不再适用。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 服务端引入内置预置渠道包(每渠道一个文件,先 deepseek),自动从上游 `/models` 拉取模型并上架/下架,为 DeepSeek 强制注入思考模式参数,客户端经 OpenAI 兼容接口直用。

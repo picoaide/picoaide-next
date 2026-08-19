@@ -1,6 +1,8 @@
 # API 参考(服务端 HTTP)
 
 > 所有端点以代码为准(`internal/**/routes.go`、`cmd/server/main.go`)。错误统一信封 `{"error":{"code":"ERR_CODE","message":"..."}}`。
+>
+> **2026-08-19**:自研 Electron 客户端已下线,服务端接口全部保留,供第三方/自研客户端接入。
 
 ## 1. 错误码
 

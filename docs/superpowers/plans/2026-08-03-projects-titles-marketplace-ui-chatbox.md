@@ -1,5 +1,7 @@
 # 项目体系 + 自动标题 + 技能/MCP 入口 + ChatBox 增强 + Portable 模式 实施计划
 
+> **2026-08-19 注记**:自研 Electron 客户端(desktop/)与浏览器插件已下线删除,仓库仅保留服务端接口与 webadmin 管理端。本文档为历史设计与计划,服务端相关部分仍有效,客户端相关部分不再适用。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 客户端新增项目体系(项目=工作目录+会话分组,引擎工具操作项目目录)、LLM 自动标题、Settings 页入口、ChatBox 增强(/命令、@提及、自动增高、历史找回),并将客户端改为 Portable 模式(data 目录随程序目录)。

@@ -1,5 +1,7 @@
 # PicoAide-Next 全量实施计划
 
+> **2026-08-19 注记**:自研 Electron 客户端(desktop/)与浏览器插件已下线删除,仓库仅保留服务端接口与 webadmin 管理端。本文档为历史设计与计划,服务端相关部分仍有效,客户端相关部分不再适用。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 全新重写企业内网桌面 AI 办公智能体:Electron+React+TS 桌面客户端(本地跑完整 Agent)+ Go 服务端纯网关(认证/AI 网关/双商城/知识库)。
