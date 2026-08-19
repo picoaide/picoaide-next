@@ -2,17 +2,22 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { VChart } from '@visactor/react-vchart'
 import type { ISpec } from '@visactor/vchart'
 import {
-  Activity, Coins, ArrowDownToLine, ArrowUpFromLine, WalletCards,
+  Activity, Coins, ArrowDownToLine, ArrowUpFromLine, WalletCards, Download,
 } from 'lucide-react'
 import { request } from '../api'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
+import { Label } from '../components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { Badge } from '../components/ui/badge'
 import { Skeleton } from '../components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
+import {
+  fmtTokens, fmtFull, usageRate, quotaPercent, quotaOver,
+  rangePreset, monthRange, fillMissingDays,
+} from '../lib/format'
 
 interface UsageRow {
   label: string
@@ -32,57 +37,20 @@ interface QuotaUser {
 type Group = 'day' | 'model' | 'user'
 type ChartTab = 'trend' | 'proportion' | 'rank'
 
-// 紧凑数字格式:>=1e6 → 1.2M,>=1e3 → 3K(对齐 Users.tsx fmtTokens 语义)
-function fmtTokens(n: number): string {
-  if (n >= 1000000) return `${Number((n / 1000000).toFixed(1))}M`
-  if (n >= 1000) return `${Number((n / 1000).toFixed(1))}K`
-  return String(n)
-}
-
-function fmtFull(n: number): string {
-  return n.toLocaleString()
-}
-
-// 快捷区间:相对 today 的起止日期(YYYY-MM-DD)
-function rangePreset(days: number): { from: string; to: string } {
-  const now = new Date()
-  const to = now.toISOString().slice(0, 10)
-  const from = new Date(now.getTime() - (days - 1) * 86400000).toISOString().slice(0, 10)
-  return { from, to }
-}
-
-function monthRange(): { from: string; to: string } {
-  const now = new Date()
-  const to = now.toISOString().slice(0, 10)
-  const from = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10)
-  return { from, to }
-}
-
-// 配额使用率(对齐 Users.tsx usageRate 语义;quota=0 表示不限)
-function usageRate(used: number, quota: number | null | undefined): number {
-  if (!quota || quota <= 0) return 0
-  return Math.min(100, Math.round((used / quota) * 100))
-}
-
-// 实际占用百分比(可 >100% 用于超额展示;quota=0 返回 null)
-function quotaPercent(used: number, quota: number | null | undefined): number | null {
-  if (!quota || quota <= 0) return null
-  return Math.round((used / quota) * 100)
-}
-
-function quotaOver(used: number, quota: number | null | undefined): boolean {
-  return !!quota && quota > 0 && used > quota
-}
+const RANK_TOP = 10
 
 export default function Usage() {
   const [group, setGroup] = useState<Group>('day')
-  const [from, setFrom] = useState('')
-  const [to, setTo] = useState('')
+  // 默认近 30 天:避免无界全表聚合(修复 F5)
+  const [from, setFrom] = useState(() => rangePreset(30).from)
+  const [to, setTo] = useState(() => rangePreset(30).to)
   const [rows, setRows] = useState<UsageRow[]>([])
   const [quotaUsers, setQuotaUsers] = useState<QuotaUser[]>([])
+  const [defaultQuota, setDefaultQuota] = useState<number | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [chartTab, setChartTab] = useState<ChartTab>('trend')
+  const [filterName, setFilterName] = useState('') // 饼图/排行点击过滤明细
 
   // 日期经 ref 读取:load 不被 from/to 变化重创(保持"点击查询才发请求"),
   // 同时点击时读到的永远是最新输入(审计2026-W1 旧闭包修复)
@@ -107,20 +75,27 @@ export default function Usage() {
     if (g !== group) setGroup(g)
   }
 
+  // 用户列表 + 全局默认配额只拉一次(配额面板与查询区间无关,恒为当月)
+  useEffect(() => {
+    Promise.all([
+      request('/api/admin/users?size=200'),
+      request('/api/admin/gateway').catch(() => null),
+    ]).then(([users, gw]: [any, any]) => {
+      const all: QuotaUser[] = (users.users ?? []).filter((u: QuotaUser) => !u.is_admin)
+      setQuotaUsers(all)
+      const q = gw?.monthly_quota
+      setDefaultQuota(q === undefined || q === null || q === '' ? null : Number(q))
+    }).catch(() => { /* 配额面板失败不阻塞主查询 */ })
+  }, [])
+
   const load = useCallback(async () => {
     setLoading(true)
     try {
       const params = new URLSearchParams({ group })
       if (fromRef.current) params.set('from', fromRef.current)
       if (toRef.current) params.set('to', toRef.current)
-      const [data, users] = await Promise.all([
-        request(`/api/admin/usage?${params}`),
-        request('/api/admin/users?size=200'),
-      ])
+      const data = await request(`/api/admin/usage?${params}`)
       setRows(data.rows ?? [])
-      // 配额面板仅统计非管理员员工(admin 由服务端豁免)
-      const all: QuotaUser[] = (users.users ?? []).filter((u: QuotaUser) => !u.is_admin)
-      setQuotaUsers(all)
       setError('')
     } catch (err: any) {
       setError(err.message)
@@ -140,6 +115,16 @@ export default function Usage() {
     load()
   }
 
+  // from > to 校验
+  function doQuery() {
+    if (from && to && from > to) {
+      setError('起始日期不能晚于结束日期')
+      return
+    }
+    setError('')
+    load()
+  }
+
   // ---- 汇总统计 ----
   const totals = useMemo(() => {
     let requests = 0, prompt = 0, completion = 0
@@ -151,25 +136,51 @@ export default function Usage() {
     return { requests, prompt, completion, total: prompt + completion }
   }, [rows])
 
-  // ---- 配额统计 ----
+  // ---- 配额统计(含"跟随全局默认"的员工,修复 F4)----
   const quotaStats = useMemo(() => {
-    const tracked = quotaUsers.filter((u) => u.quota_tokens && u.quota_tokens > 0)
-    const over = tracked.filter((u) => quotaOver(u.monthly_usage, u.quota_tokens))
-    const near = tracked.filter((u) => !quotaOver(u.monthly_usage, u.quota_tokens) && usageRate(u.monthly_usage, u.quota_tokens) >= 90)
-    const sorted = [...tracked].sort((a, b) => (b.monthly_usage / b.quota_tokens!) - (a.monthly_usage / a.quota_tokens!))
-    return { tracked, over, near, sorted }
-  }, [quotaUsers])
+    const eff = (u: QuotaUser): number | null => u.quota_tokens ?? defaultQuota
+    const tracked = quotaUsers.filter((u) => {
+      const q = eff(u)
+      return q !== null && q > 0
+    })
+    const over = tracked.filter((u) => quotaOver(u.monthly_usage, eff(u)))
+    const near = tracked.filter((u) => !quotaOver(u.monthly_usage, eff(u)) && usageRate(u.monthly_usage, eff(u)) >= 90)
+    const sorted = [...tracked].sort((a, b) => (b.monthly_usage / eff(b)!) - (a.monthly_usage / eff(a)!))
+    return { over, near, sorted, eff }
+  }, [quotaUsers, defaultQuota])
 
   // ---- 图表数据 ----
-  const chartData = rows.map((r) => ({ label: r.label, total: r.prompt_tokens + r.completion_tokens }))
-  const pieData = rows.map((r) => ({ name: r.label, value: r.prompt_tokens + r.completion_tokens }))
-  const rankData = [...rows]
-    .map((r) => ({ label: r.label, total: r.prompt_tokens + r.completion_tokens }))
-    .sort((a, b) => b.total - a.total)
+  // 趋势图:仅 group=day 时按日补零(缺日填 0,避免折线跨缺日直连)
+  const trendData = useMemo(() => {
+    const base = rows.map((r) => ({ label: r.label, total: r.prompt_tokens + r.completion_tokens }))
+    return group === 'day' ? fillMissingDays(base, from, to) : base
+  }, [rows, group, from, to])
+
+  const pieData = useMemo(
+    () => rows.map((r) => ({ name: r.label, value: r.prompt_tokens + r.completion_tokens })),
+    [rows]
+  )
+
+  // 排行:Top N + "其他"桶(修复 F3,避免 group=user 时 200+ 柱)
+  const rankData = useMemo(() => {
+    const sorted = [...rows]
+      .map((r) => ({ label: r.label, total: r.prompt_tokens + r.completion_tokens }))
+      .sort((a, b) => b.total - a.total)
+    if (sorted.length <= RANK_TOP) return sorted
+    const top = sorted.slice(0, RANK_TOP)
+    const rest = sorted.slice(RANK_TOP).reduce((s, r) => s + r.total, 0)
+    return [...top, { label: '其他', total: rest }]
+  }, [rows])
+
+  // 明细过滤:饼图/排行点击联动
+  const filteredRows = useMemo(
+    () => (filterName ? rows.filter((r) => r.label === filterName) : rows),
+    [rows, filterName]
+  )
 
   const trendSpec: ISpec = {
     type: 'line',
-    data: { values: chartData },
+    data: { values: trendData },
     xField: 'label',
     yField: 'total',
     point: { visible: true },
@@ -186,7 +197,8 @@ export default function Usage() {
     categoryField: 'name',
     valueField: 'value',
     outerRadius: 0.8,
-    label: { visible: true, formatMethod: (v: any) => fmtTokens(Number(v)) },
+    // 修复 F1:饼图 label 是维度文本(模型名/用户名),不是数值;数值交给 tooltip
+    label: { visible: true },
     tooltip: { visible: true },
   }
 
@@ -209,6 +221,21 @@ export default function Usage() {
     { title: '输出 tokens', value: totals.completion, icon: ArrowUpFromLine, desc: 'completion 部分' },
   ]
 
+  // 导出 CSV(带 BOM 保证 Excel 中文不乱码)
+  function exportCsv() {
+    if (rows.length === 0) return
+    const head = ['label', 'requests', 'prompt_tokens', 'completion_tokens', 'total_tokens']
+    const lines = rows.map((r) => [r.label, r.requests, r.prompt_tokens, r.completion_tokens, r.prompt_tokens + r.completion_tokens].join(','))
+    const csv = '\uFEFF' + [head.join(','), ...lines].join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `usage_${from || 'all'}_${to || 'all'}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -221,9 +248,9 @@ export default function Usage() {
       <Card>
         <CardContent className="flex flex-wrap items-end gap-3 pt-6">
           <div>
-            <div className="mb-1 text-sm text-muted-foreground">分组</div>
+            <Label className="mb-1 block text-sm text-muted-foreground">分组</Label>
             <Select value={group} onValueChange={(v) => setGroup(v as Group)}>
-              <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="w-32" aria-label="分组"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="day">按日</SelectItem>
                 <SelectItem value="model">按模型</SelectItem>
@@ -232,7 +259,7 @@ export default function Usage() {
             </Select>
           </div>
           <div>
-            <div className="mb-1 text-sm text-muted-foreground">快捷区间</div>
+            <Label className="mb-1 block text-sm text-muted-foreground">快捷区间</Label>
             <div className="flex gap-1">
               <Button size="sm" variant="outline" onClick={() => applyRange(rangePreset(7))}>近7天</Button>
               <Button size="sm" variant="outline" onClick={() => applyRange(rangePreset(30))}>近30天</Button>
@@ -240,14 +267,14 @@ export default function Usage() {
             </div>
           </div>
           <div>
-            <div className="mb-1 text-sm text-muted-foreground">起始日期</div>
-            <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
+            <Label className="mb-1 block text-sm text-muted-foreground" htmlFor="usage-from">起始日期</Label>
+            <Input id="usage-from" type="date" value={from} max={to || undefined} onChange={(e) => setFrom(e.target.value)} />
           </div>
           <div>
-            <div className="mb-1 text-sm text-muted-foreground">结束日期</div>
-            <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+            <Label className="mb-1 block text-sm text-muted-foreground" htmlFor="usage-to">结束日期</Label>
+            <Input id="usage-to" type="date" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} />
           </div>
-          <Button onClick={load}>查询</Button>
+          <Button onClick={doQuery}>查询</Button>
         </CardContent>
       </Card>
 
@@ -292,27 +319,22 @@ export default function Usage() {
             </TabsList>
           </CardHeader>
           <CardContent>
-            <TabsContent value="trend" className="h-72">
-              {rows.length === 0 ? (
-                <div className="flex h-full items-center justify-center text-muted-foreground">暂无数据</div>
-              ) : (
-                <VChart spec={trendSpec} />
-              )}
-            </TabsContent>
-            <TabsContent value="proportion" className="h-72">
-              {rows.length === 0 ? (
-                <div className="flex h-full items-center justify-center text-muted-foreground">暂无数据</div>
-              ) : (
-                <VChart spec={pieSpec} />
-              )}
-            </TabsContent>
-            <TabsContent value="rank" className="h-72">
-              {rows.length === 0 ? (
-                <div className="flex h-full items-center justify-center text-muted-foreground">暂无数据</div>
-              ) : (
-                <VChart spec={rankSpec} />
-              )}
-            </TabsContent>
+            {loading ? (
+              <Skeleton className="h-72 w-full" />
+            ) : rows.length === 0 ? (
+              <div className="flex h-72 items-center justify-center text-muted-foreground">暂无数据</div>
+            ) : (
+              <>
+                <TabsContent value="trend" className="h-72"><VChart spec={trendSpec} /></TabsContent>
+                <TabsContent value="proportion" className="h-72">
+                  <VChart
+                    spec={pieSpec}
+                    onClick={(e: any) => setFilterName(e?.datum?.name ?? '')}
+                  />
+                </TabsContent>
+                <TabsContent value="rank" className="h-72"><VChart spec={rankSpec} /></TabsContent>
+              </>
+            )}
           </CardContent>
         </Tabs>
       </Card>
@@ -330,7 +352,10 @@ export default function Usage() {
               <Badge variant="secondary">≥90% {quotaStats.near.length}</Badge>
             </div>
           </div>
-          <CardDescription>配额按月统计,每月 1 日重置;管理员豁免不参与统计</CardDescription>
+          <CardDescription>
+            按自然月统计(每月 1 日重置),与上方查询区间无关;管理员豁免。
+            {defaultQuota !== null && defaultQuota > 0 && ` 全局默认配额 ${fmtTokens(defaultQuota)}/月(跟随默认的员工已计入)`}
+          </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           {quotaStats.sorted.length === 0 ? (
@@ -338,9 +363,10 @@ export default function Usage() {
           ) : (
             <div data-testid="quota-list">
               {quotaStats.sorted.map((u) => {
-                const rate = usageRate(u.monthly_usage, u.quota_tokens)
-                const pct = quotaPercent(u.monthly_usage, u.quota_tokens)
-                const over = quotaOver(u.monthly_usage, u.quota_tokens)
+                const q = quotaStats.eff(u)
+                const rate = usageRate(u.monthly_usage, q)
+                const pct = quotaPercent(u.monthly_usage, q)
+                const over = quotaOver(u.monthly_usage, q)
                 return (
                   <div key={u.id} className="space-y-1">
                     <div className="flex items-center justify-between text-sm">
@@ -352,10 +378,17 @@ export default function Usage() {
                       <span className="text-muted-foreground tabular-nums">
                         {pct === null ? '不限' : `${pct}%`}
                         {' · '}
-                        {fmtTokens(u.monthly_usage)} / {u.quota_tokens ? fmtTokens(u.quota_tokens) : '—'}
+                        {fmtTokens(u.monthly_usage)} / {q ? fmtTokens(q) : '—'}
                       </span>
                     </div>
-                    <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-2 w-full overflow-hidden rounded-full bg-muted"
+                      role="progressbar"
+                      aria-valuenow={pct ?? 0}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-label={`${u.username} 配额占用 ${pct === null ? '不限' : pct + '%'}`}
+                    >
                       <div
                         className={`h-full rounded-full ${over ? 'bg-destructive' : rate >= 90 ? 'bg-amber-500' : 'bg-primary'}`}
                         style={{ width: `${over ? 100 : rate}%` }}
@@ -371,44 +404,56 @@ export default function Usage() {
 
       {/* 明细表格 */}
       <Card>
-        <CardHeader>
+        <CardHeader className="flex-row items-center justify-between space-y-0">
           <CardTitle className="text-base">明细</CardTitle>
+          <div className="flex items-center gap-2">
+            {filterName && (
+              <Button size="sm" variant="outline" onClick={() => setFilterName('')}>
+                清除过滤: {filterName}
+              </Button>
+            )}
+            <Button size="sm" variant="outline" onClick={exportCsv} disabled={rows.length === 0}>
+              <Download className="h-3.5 w-3.5" /> 导出 CSV
+            </Button>
+          </div>
         </CardHeader>
         <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>{group === 'day' ? '日期' : group === 'model' ? '模型' : '用户'}</TableHead>
-                <TableHead className="text-right">请求数</TableHead>
-                <TableHead className="text-right">输入 tokens</TableHead>
-                <TableHead className="text-right">输出 tokens</TableHead>
-                <TableHead className="text-right">合计 tokens</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.map((r) => (
-                <TableRow key={r.label}>
-                  <TableCell>{r.label}</TableCell>
-                  <TableCell className="text-right tabular-nums">{r.requests}</TableCell>
-                  <TableCell className="text-right tabular-nums">{fmtTokens(r.prompt_tokens)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{fmtTokens(r.completion_tokens)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{fmtTokens(r.prompt_tokens + r.completion_tokens)}</TableCell>
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>{group === 'day' ? '日期' : group === 'model' ? '模型' : '用户'}</TableHead>
+                  <TableHead className="text-right">请求数</TableHead>
+                  <TableHead className="text-right">输入 tokens</TableHead>
+                  <TableHead className="text-right">输出 tokens</TableHead>
+                  <TableHead className="text-right">合计 tokens</TableHead>
                 </TableRow>
-              ))}
-              {rows.length > 0 && (
-                <TableRow className="font-semibold">
-                  <TableCell>合计</TableCell>
-                  <TableCell className="text-right tabular-nums">{totals.requests}</TableCell>
-                  <TableCell className="text-right tabular-nums">{fmtTokens(totals.prompt)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{fmtTokens(totals.completion)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{fmtTokens(totals.total)}</TableCell>
-                </TableRow>
-              )}
-              {rows.length === 0 && (
-                <TableRow><TableCell colSpan={5} className="text-center text-muted-foreground">暂无数据</TableCell></TableRow>
-              )}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {filteredRows.map((r) => (
+                  <TableRow key={r.label}>
+                    <TableCell>{r.label}</TableCell>
+                    <TableCell className="text-right tabular-nums">{r.requests}</TableCell>
+                    <TableCell className="text-right tabular-nums">{fmtTokens(r.prompt_tokens)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{fmtTokens(r.completion_tokens)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{fmtTokens(r.prompt_tokens + r.completion_tokens)}</TableCell>
+                  </TableRow>
+                ))}
+                {filteredRows.length > 0 && (
+                  <TableRow className="font-semibold">
+                    <TableCell>{filterName ? `小计(${filterName})` : '合计'}</TableCell>
+                    <TableCell className="text-right tabular-nums">{filteredRows.reduce((s, r) => s + r.requests, 0)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{fmtTokens(filteredRows.reduce((s, r) => s + r.prompt_tokens, 0))}</TableCell>
+                    <TableCell className="text-right tabular-nums">{fmtTokens(filteredRows.reduce((s, r) => s + r.completion_tokens, 0))}</TableCell>
+                    <TableCell className="text-right tabular-nums">{fmtTokens(filteredRows.reduce((s, r) => s + r.prompt_tokens + r.completion_tokens, 0))}</TableCell>
+                  </TableRow>
+                )}
+                {filteredRows.length === 0 && (
+                  <TableRow><TableCell colSpan={5} className="text-center text-muted-foreground">暂无数据</TableCell></TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </div>
         </CardContent>
       </Card>
     </div>

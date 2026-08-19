@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { request } from '../api'
+import { fmtTokens, usageRate } from '../lib/format'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
@@ -44,22 +45,11 @@ function fmtTime(s: string): string {
   return s ? s.slice(0, 16).replace('T', ' ') : '—'
 }
 
-function fmtTokens(n: number): string {
-  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`
-  return String(n)
-}
-
 // quotaLabel renders the effective monthly quota for a user row.
 function quotaLabel(q: number | null | undefined): string {
   if (q === null || q === undefined) return '跟随默认'
   if (q === 0) return '不限'
   return `${fmtTokens(q)} / 月`
-}
-
-function usageRate(used: number, quota: number | null | undefined): number {
-  if (!quota || quota <= 0) return 0
-  return Math.min(100, Math.round((used / quota) * 100))
 }
 
 // 部门树选项(缩进层级显示):平铺 → "研发部"、"研发部 / 前端组"
