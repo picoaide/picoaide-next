@@ -821,3 +821,42 @@ func TestAdminDeleteChannelModelNotResurrected(t *testing.T) {
 		t.Fatalf("unexpected model: %v", ms[0])
 	}
 }
+
+// 审计修复 M3 附带:渠道型上游可切回手动型(此前 channel 空串被跳过,
+// 一旦选了渠道永远无法取消);创建渠道型上游时不落手动模型清单。
+func TestAdminProviderChannelClearToManual(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	// 创建渠道型上游并携带 models:清单必须被丢弃(模型由同步维护)
+	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+		`{"name":"ch","api_key":"sk","channel":"deepseek","models":["stale-model"]}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create channel provider: %d %s", w.Code, w.Body.String())
+	}
+	id := int64(out["provider"].(map[string]any)["id"].(float64))
+	p, err := serverstore.GetGatewayProvider(db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Models) != 0 {
+		t.Fatalf("channel provider stored manual models: %+v", p.Models)
+	}
+
+	// 切回手动型:channel 显式空串
+	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/providers/%d", id), `{"channel":""}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("clear channel: %d %s", w.Code, w.Body.String())
+	}
+	p, err = serverstore.GetGatewayProvider(db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Channel != "" {
+		t.Fatalf("channel not cleared: %q", p.Channel)
+	}
+	// 渠道型 provider 更新的 models 表行由同步删除(切手动型后手动清单为空)
+	models, _ := ListModels(db)
+	if len(models) != 0 {
+		t.Fatalf("models after clear-to-manual = %+v, want empty", models)
+	}
+}

@@ -137,7 +137,9 @@ type providerReq struct {
 	BaseURL string   `json:"base_url"`
 	APIKey  string   `json:"api_key"`
 	Models  []string `json:"models"`
-	Channel string   `json:"channel"`
+	// Channel 指针语义(审计修复 M3 附带):nil/缺省 = 不修改;"" = 清空为
+	// 手动型;非空 = 指定渠道。此前空串被跳过,渠道型上游无法切回手动型。
+	Channel *string `json:"channel"`
 	// 显式禁用开关:enabled=false 的 provider 不再参与模型路由(审计2026-M14)
 	Enabled *bool `json:"enabled"`
 }
@@ -177,8 +179,12 @@ func createProvider(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
 		return
 	}
-	if req.BaseURL == "" && req.Channel != "" {
-		if ch, ok := channels.Get(req.Channel); ok {
+	channel := ""
+	if req.Channel != nil {
+		channel = *req.Channel
+	}
+	if req.BaseURL == "" && channel != "" {
+		if ch, ok := channels.Get(channel); ok {
 			req.BaseURL = ch.BaseURL()
 		}
 	}
@@ -187,7 +193,7 @@ func createProvider(c *gin.Context, db *sql.DB) {
 		return
 	}
 	// 渠道型上游的 key 是同步的刚需:无 key 创建必然同步失败(审计修复 L4)
-	if req.Channel != "" && req.APIKey == "" {
+	if channel != "" && req.APIKey == "" {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "渠道型上游必须填写 API Key")
 		return
 	}
@@ -196,7 +202,11 @@ func createProvider(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "密钥加密失败")
 		return
 	}
-	p := &serverstore.GatewayProvider{Name: req.Name, BaseURL: req.BaseURL, APIKeyEnc: enc, Models: req.Models, Channel: req.Channel, Enabled: 1}
+	// 渠道型上游的模型由同步维护,不落手动模型清单(审计修复 M3 附带)
+	p := &serverstore.GatewayProvider{Name: req.Name, BaseURL: req.BaseURL, APIKeyEnc: enc, Channel: channel, Enabled: 1}
+	if channel == "" {
+		p.Models = req.Models
+	}
 	if req.Enabled != nil && !*req.Enabled {
 		p.Enabled = 0
 	}
@@ -250,16 +260,17 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 	if req.Name != "" {
 		p.Name = req.Name
 	}
-	if req.BaseURL == "" && p.BaseURL == "" && req.Channel != "" {
-		if ch, ok := channels.Get(req.Channel); ok {
+	if req.BaseURL == "" && p.BaseURL == "" && req.Channel != nil && *req.Channel != "" {
+		if ch, ok := channels.Get(*req.Channel); ok {
 			p.BaseURL = ch.BaseURL()
 		}
 	}
 	if req.BaseURL != "" {
 		p.BaseURL = req.BaseURL
 	}
-	if req.Channel != "" {
-		p.Channel = req.Channel
+	if req.Channel != nil {
+		// 指针语义:"" = 清空渠道(切回手动型)(审计修复 M3 附带)
+		p.Channel = *req.Channel
 	}
 	if req.APIKey != "" {
 		enc, err := encryptSecret(req.APIKey)
