@@ -57,3 +57,20 @@ func TestApplyMigrationsFailure(t *testing.T) {
 		t.Fatal("expected error for broken migration, got nil")
 	}
 }
+
+// 0027:user_groups(group_id) 索引(审计 L3:N+1/全表扫治理)——迁移后索引必须存在。
+func TestMigration0027UserGroupsGroupIndex(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master
+		WHERE type = 'index' AND name = 'idx_user_groups_group'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("idx_user_groups_group index missing (n=%d)", n)
+	}
+}
