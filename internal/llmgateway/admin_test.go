@@ -562,3 +562,301 @@ func TestAdminModelsListIncludesPricing(t *testing.T) {
 		t.Fatalf("offpeak_discount = %v (present=%v), want 0.5", v, ok)
 	}
 }
+
+// 审计修复 H1:peak_windows 显式空串 = 清空(移除高峰窗口),保持 UI
+// 「留空 = 无峰谷价」承诺成立。此前空串被跳过,已配置的窗口无法关闭。
+func TestAdminGatewayPeakWindowsClear(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	body := `{"peak_windows":"[{\"start\":\"09:00\",\"end\":\"12:00\"}]"}`
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", body, hdr); w.Code != http.StatusOK {
+		t.Fatalf("set peak_windows: %d", w.Code)
+	}
+	v, ok, _ := serverstore.GetSetting(db, serverstore.PeakWindowsSetting)
+	if !ok || v == "" {
+		t.Fatalf("peak_windows not persisted: %q ok=%v", v, ok)
+	}
+	// 显式空串清空
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"peak_windows":""}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("clear peak_windows: %d", w.Code)
+	}
+	w, out := adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	if w.Code != http.StatusOK || out["peak_windows"] != "" {
+		t.Fatalf("peak_windows after clear = %v (%d), want empty", out["peak_windows"], w.Code)
+	}
+}
+
+// 审计修复 M1:PUT /gateway 部分更新语义——未传字段不覆盖,显式空串清空。
+// 此前 allow_private/search_endpoint 被部分提交意外重置,server_base_url
+// /default_model 又永远无法清空。
+func TestAdminGatewayPartialUpdate(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	// 先全量设置
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{
+		"default_model":"","rate_limit":"60","monthly_quota":"0","monthly_quota_money":"0",
+		"peak_windows":"","allow_private":true,"search_endpoint":"https://s/q","server_base_url":"https://picoaide.example.com"
+	}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("full set: %d", w.Code)
+	}
+	// 只提交 rate_limit:其它字段必须保持原值
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"rate_limit":"120"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("partial update: %d", w.Code)
+	}
+	w, out := adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get: %d", w.Code)
+	}
+	if out["rate_limit"] != "120" || out["allow_private"] != true || out["search_endpoint"] != "https://s/q" ||
+		out["server_base_url"] != "https://picoaide.example.com" {
+		t.Fatalf("partial update clobbered fields: %v", out)
+	}
+	// 显式空串清空 server_base_url / search_endpoint / default_model
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"server_base_url":"","search_endpoint":""}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("clear fields: %d", w.Code)
+	}
+	w, out = adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	if w.Code != http.StatusOK || out["server_base_url"] != "" || out["search_endpoint"] != "" {
+		t.Fatalf("clear not applied: %v", out)
+	}
+	// 显式 false 关闭 allow_private
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"allow_private":false}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("disable allow_private: %d", w.Code)
+	}
+	w, out = adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	if w.Code != http.StatusOK || out["allow_private"] != false {
+		t.Fatalf("allow_private not disabled: %v", out)
+	}
+}
+
+// 审计修复 M2:删除不存在的上游/模型 → 404 NOT_FOUND(此前 500)。
+func TestAdminDeleteNotFound(t *testing.T) {
+	r, _, hdr := adminTestSetup(t)
+	if w, out := adminReq(t, r, "DELETE", "/api/admin/providers/999", "", hdr); w.Code != http.StatusNotFound {
+		t.Fatalf("delete missing provider = %d %v, want 404", w.Code, out)
+	}
+	if w, out := adminReq(t, r, "DELETE", "/api/admin/models/999", "", hdr); w.Code != http.StatusNotFound {
+		t.Fatalf("delete missing model = %d %v, want 404", w.Code, out)
+	}
+}
+
+// 审计修复 M2:createModel 指向不存在的上游 → VALIDATION(此前 FK 冲突落 500)。
+func TestAdminCreateModelBadProvider(t *testing.T) {
+	r, _, hdr := adminTestSetup(t)
+	if w, out := adminReq(t, r, "POST", "/api/admin/models",
+		`{"name":"m","provider_id":999}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("create model with bad provider = %d %v, want 400", w.Code, out)
+	}
+}
+
+// 审计修复 M7:改名防护——渠道同步模型与有用量记录的手动模型拒绝改名。
+func TestAdminModelRenameProtection(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	// 渠道型上游(adminTestSetup 的 syncFetchFn 返回 deepseek-chat/reasoner)
+	if w, _ := adminReq(t, r, "POST", "/api/admin/providers",
+		`{"name":"deepseek","api_key":"sk","channel":"deepseek"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("create channel provider: %d", w.Code)
+	}
+	// 渠道同步模型拒绝改名
+	if w, out := adminReq(t, r, "PUT", "/api/admin/models/1", `{"name":"renamed-chat"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("rename channel model = %d %v, want 400", w.Code, out)
+	}
+	// 手动型上游:无用量可改名
+	if w, _ := adminReq(t, r, "POST", "/api/admin/providers",
+		`{"name":"manual","base_url":"https://x.example","api_key":"sk","models":["m1"]}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("create manual provider: %d", w.Code)
+	}
+	var mid int64
+	if err := db.QueryRow("SELECT id FROM models WHERE name = 'm1'").Scan(&mid); err != nil {
+		t.Fatal(err)
+	}
+	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/models/%d", mid), `{"name":"m1-renamed"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("rename manual model without usage = %d", w.Code)
+	}
+	// 有用量记录后拒绝改名
+	if _, err := serverstore.RecordUsage(db, 1, "m1-renamed", 10, 10); err != nil {
+		t.Fatal(err)
+	}
+	if w, out := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/models/%d", mid), `{"name":"m1-again"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("rename model with usage = %d %v, want 400", w.Code, out)
+	}
+	// 改名撞已存在模型名 → VALIDATION(此前 UNIQUE 冲突落 500)
+	if w, out := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/models/%d", mid), `{"name":"deepseek-reasoner"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("rename to existing name = %d %v, want 400", w.Code, out)
+	}
+}
+
+// 审计修复 L6:显式 null 清空价格为未定价(此前 null 与缺省同义,无法回退)。
+func TestAdminModelPriceNullClears(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	if w, _ := adminReq(t, r, "POST", "/api/admin/providers",
+		`{"name":"p","base_url":"https://x.example","api_key":"k","models":[]}`, hdr); w.Code != http.StatusOK {
+		t.Fatal("create provider failed")
+	}
+	if w, _ := adminReq(t, r, "POST", "/api/admin/models",
+		`{"name":"m","provider_id":1,"input_price_per_1m":2,"output_price_per_1m":8}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("create model: %d", w.Code)
+	}
+	// 显式 null 清空输入价
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/models/1", `{"input_price_per_1m":null}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("null clear: %d", w.Code)
+	}
+	m, err := serverstore.GetModel(db, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.InputPricePer1M != nil {
+		t.Fatalf("input price = %v, want nil (cleared)", *m.InputPricePer1M)
+	}
+	if m.OutputPricePer1M == nil || *m.OutputPricePer1M != 8 {
+		t.Fatalf("output price = %v, want 8 (untouched)", m.OutputPricePer1M)
+	}
+}
+
+// 审计修复 L4:渠道型上游无 API Key 创建 → VALIDATION。
+func TestAdminCreateChannelProviderRequiresKey(t *testing.T) {
+	r, _, hdr := adminTestSetup(t)
+	if w, out := adminReq(t, r, "POST", "/api/admin/providers",
+		`{"name":"nokey","channel":"deepseek"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("channel provider without key = %d %v, want 400", w.Code, out)
+	}
+}
+
+// 审计修复 M3:渠道型上游更新时清理其手动模型清单(防旧模型继续路由)。
+func TestAdminProviderUpdateChannelClearsManualModels(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+	// 手动型上游带模型清单
+	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+		`{"name":"p","base_url":"https://x.example","api_key":"k","models":["m1"]}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create manual provider: %d", w.Code)
+	}
+	id := int64(out["provider"].(map[string]any)["id"].(float64))
+	// 切到渠道型
+	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/providers/%d", id), `{"channel":"deepseek"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("switch to channel: %d", w.Code)
+	}
+	p, err := serverstore.GetGatewayProvider(db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Models) != 0 {
+		t.Fatalf("manual models not cleared after channel switch: %+v", p.Models)
+	}
+}
+
+// 审计修复 M3:管理端模型列表展示已停用上游的模型(此前被 enabled 过滤隐藏,
+// 禁用上游的模型变成不可管理的"幽灵")。客户端列表仍只显示启用上游。
+func TestAdminModelsListIncludesDisabledProvider(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+		`{"name":"p","base_url":"https://x.example","api_key":"k","models":["m1"]}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create provider: %d", w.Code)
+	}
+	id := int64(out["provider"].(map[string]any)["id"].(float64))
+	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/providers/%d", id), `{"enabled":false}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("disable provider: %d", w.Code)
+	}
+	w, out = adminReq(t, r, "GET", "/api/admin/models", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list models: %d", w.Code)
+	}
+	ms := out["models"].([]any)
+	if len(ms) != 1 {
+		t.Fatalf("admin models = %d, want 1 (disabled provider's model still listed)", len(ms))
+	}
+	m := ms[0].(map[string]any)
+	if m["provider_name"] != "p" || m["provider_enabled"] != false {
+		t.Fatalf("provider fields = %v/%v, want p/false", m["provider_name"], m["provider_enabled"])
+	}
+	// 客户端列表过滤禁用上游
+	pub, err := ListModels(db)
+	if err != nil || len(pub) != 0 {
+		t.Fatalf("public models = %+v, want empty", pub)
+	}
+}
+
+// 审计修复 H2:DELETE 渠道同步模型 → 记入排除名单,再次同步不复活。
+func TestAdminDeleteChannelModelNotResurrected(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+	// 渠道型上游创建即同步 2 个模型(adminTestSetup 的 syncFetchFn)
+	if w, _ := adminReq(t, r, "POST", "/api/admin/providers",
+		`{"name":"deepseek","api_key":"sk","channel":"deepseek"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("create channel provider: %d", w.Code)
+	}
+	w, out := adminReq(t, r, "GET", "/api/admin/models", "", hdr)
+	if w.Code != http.StatusOK || len(out["models"].([]any)) != 2 {
+		t.Fatalf("models after channel sync = %v", out)
+	}
+	// 删除 deepseek-chat(id=1)
+	if w, _ := adminReq(t, r, "DELETE", "/api/admin/models/1", "", hdr); w.Code != http.StatusOK {
+		t.Fatalf("delete channel model: %d", w.Code)
+	}
+	// 再次同步同一目录:排除名单中的模型不复活
+	fetch := func(url string) ([]byte, error) {
+		return []byte(`{"data":[{"id":"deepseek-chat"},{"id":"deepseek-reasoner"}]}`), nil
+	}
+	if _, err := SyncOnce(db, fetch); err != nil {
+		t.Fatal(err)
+	}
+	w, out = adminReq(t, r, "GET", "/api/admin/models", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list models: %d", w.Code)
+	}
+	ms := out["models"].([]any)
+	if len(ms) != 1 {
+		t.Fatalf("models after resync = %d, want 1 (excluded model not resurrected): %v", len(ms), out)
+	}
+	if ms[0].(map[string]any)["name"] != "deepseek-reasoner" {
+		t.Fatalf("unexpected model: %v", ms[0])
+	}
+}
+
+// 审计修复 M3 附带:渠道型上游可切回手动型(此前 channel 空串被跳过,
+// 一旦选了渠道永远无法取消);创建渠道型上游时不落手动模型清单。
+func TestAdminProviderChannelClearToManual(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	// 创建渠道型上游并携带 models:清单必须被丢弃(模型由同步维护)
+	w, out := adminReq(t, r, "POST", "/api/admin/providers",
+		`{"name":"ch","api_key":"sk","channel":"deepseek","models":["stale-model"]}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create channel provider: %d %s", w.Code, w.Body.String())
+	}
+	id := int64(out["provider"].(map[string]any)["id"].(float64))
+	p, err := serverstore.GetGatewayProvider(db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Models) != 0 {
+		t.Fatalf("channel provider stored manual models: %+v", p.Models)
+	}
+
+	// 切回手动型:channel 显式空串
+	if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/admin/providers/%d", id), `{"channel":""}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("clear channel: %d %s", w.Code, w.Body.String())
+	}
+	p, err = serverstore.GetGatewayProvider(db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Channel != "" {
+		t.Fatalf("channel not cleared: %q", p.Channel)
+	}
+	// 渠道型 provider 更新的 models 表行由同步删除(切手动型后手动清单为空)
+	models, _ := ListModels(db)
+	if len(models) != 0 {
+		t.Fatalf("models after clear-to-manual = %+v, want empty", models)
+	}
+}

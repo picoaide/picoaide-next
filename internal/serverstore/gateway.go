@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 )
 
@@ -27,9 +28,74 @@ type Model struct {
 	// 费用按 0 计,页面标注「未定价」。embedding 复用 input 价。
 	InputPricePer1M  *float64 `json:"input_price_per_1m"`
 	OutputPricePer1M *float64 `json:"output_price_per_1m"`
-	// OffpeakDiscount 低谷折扣率(0023):nil/0/1 = 无峰谷价;0<d<1 = 低谷窗口
-	// (每日 UTC 08:30-16:30,即北京 16:30-00:30)内费用 × d(DeepSeek 官方 0.5)。
+	// OffpeakDiscount 低谷折扣率(0023):nil/0/1 = 无峰谷价;0<d<1 = 空闲时段
+	// (高峰窗口外;窗口配置见 settings usage.peak_windows,北京时间)费用 × d。
 	OffpeakDiscount *float64 `json:"offpeak_discount"`
+	// ProviderName / ProviderChannel / ProviderEnabled:上游信息(审计修复 M3)。
+	// 管理端模型列表展示全部模型(含已停用上游的),仅客户端 /v1/models 过滤 enabled。
+	ProviderName    string `json:"provider_name"`
+	ProviderChannel string `json:"provider_channel"`
+	ProviderEnabled bool   `json:"provider_enabled"`
+}
+
+// scanProvider 扫描 gateway_providers 一行。
+// ---- 渠道同步模型排除名单(审计修复 H2)----
+// 管理员在管理端删除的渠道同步模型记入该名单,定时同步不再自动恢复
+// (否则被 SyncLoop 复活,且复活后价格被清空)。键:settings 中
+// "gateway.excluded_models.<providerID>",值:JSON 数组。
+const excludedModelsKeyPrefix = "gateway.excluded_models."
+
+func excludedModelsKey(providerID int64) string {
+	return excludedModelsKeyPrefix + strconv.FormatInt(providerID, 10)
+}
+
+// GetExcludedModels 返回某上游被排除同步的模型名(未配置时返回空,nil 错误)。
+func GetExcludedModels(db *sql.DB, providerID int64) ([]string, error) {
+	v, ok, err := GetSetting(db, excludedModelsKey(providerID))
+	if err != nil || !ok || v == "" {
+		return nil, err
+	}
+	var names []string
+	if err := json.Unmarshal([]byte(v), &names); err != nil {
+		return nil, err
+	}
+	return names, nil
+}
+
+// AddExcludedModel 把模型名加入排除名单(幂等)。
+func AddExcludedModel(db *sql.DB, providerID int64, name string) error {
+	names, err := GetExcludedModels(db, providerID)
+	if err != nil {
+		return err
+	}
+	for _, n := range names {
+		if n == name {
+			return nil
+		}
+	}
+	names = append(names, name)
+	b, _ := json.Marshal(names)
+	return SetSetting(db, excludedModelsKey(providerID), string(b))
+}
+
+// RemoveExcludedModel 从排除名单移除模型名(幂等;名单清空后删除 setting)。
+func RemoveExcludedModel(db *sql.DB, providerID int64, name string) error {
+	names, err := GetExcludedModels(db, providerID)
+	if err != nil {
+		return err
+	}
+	out := names[:0]
+	for _, n := range names {
+		if n != name {
+			out = append(out, n)
+		}
+	}
+	if len(out) == 0 {
+		_, err := db.Exec("DELETE FROM settings WHERE key = ?", excludedModelsKey(providerID))
+		return err
+	}
+	b, _ := json.Marshal(out)
+	return SetSetting(db, excludedModelsKey(providerID), string(b))
 }
 
 func scanProvider(scan interface{ Scan(...any) error }) (*GatewayProvider, error) {
@@ -93,6 +159,9 @@ func UpdateGatewayProvider(db *sql.DB, p *GatewayProvider) error {
 	res, err := db.Exec(`UPDATE gateway_providers SET name=?, base_url=?, api_key_enc=?, models=?, enabled=?, channel=?
 		WHERE id=?`, p.Name, p.BaseURL, p.APIKeyEnc, string(modelsJSON), p.Enabled, p.Channel, p.ID)
 	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			return ErrDuplicate
+		}
 		return err
 	}
 	n, _ := res.RowsAffected()
@@ -134,6 +203,10 @@ func DeleteGatewayProvider(db *sql.DB, id int64) error {
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return ErrNotFound
+	}
+	// 清理该上游的渠道同步排除名单(审计修复 H2)
+	if _, err := tx.Exec("DELETE FROM settings WHERE key = ?", excludedModelsKey(id)); err != nil {
+		return err
 	}
 	for _, name := range names {
 		if err := clearDefaultModelIf(tx, name); err != nil {
@@ -241,9 +314,12 @@ func RemoveMissingProviderModels(db *sql.DB, providerID int64, keep []string) (i
 func scanModel(scan interface{ Scan(...any) error }) (*Model, error) {
 	var m Model
 	var in, out, off sql.NullFloat64
-	if err := scan.Scan(&m.ID, &m.Name, &m.ProviderID, &m.DisplayName, &m.DefaultParams, &in, &out, &off); err != nil {
+	var pEnabled int
+	if err := scan.Scan(&m.ID, &m.Name, &m.ProviderID, &m.DisplayName, &m.DefaultParams,
+		&in, &out, &off, &m.ProviderName, &m.ProviderChannel, &pEnabled); err != nil {
 		return nil, err
 	}
+	m.ProviderEnabled = pEnabled == 1
 	if in.Valid {
 		m.InputPricePer1M = &in.Float64
 	}
@@ -258,8 +334,10 @@ func scanModel(scan interface{ Scan(...any) error }) (*Model, error) {
 
 // GetModel loads a model by id.
 func GetModel(db *sql.DB, id int64) (*Model, error) {
-	row := db.QueryRow(`SELECT id, name, provider_id, display_name, default_params, input_price_per_1m, output_price_per_1m, offpeak_discount
-		FROM models WHERE id = ?`, id)
+	row := db.QueryRow(`SELECT m.id, m.name, m.provider_id, COALESCE(m.display_name, m.name),
+		COALESCE(m.default_params, '{}'), m.input_price_per_1m, m.output_price_per_1m, m.offpeak_discount,
+		p.name, p.channel, p.enabled
+		FROM models m JOIN gateway_providers p ON p.id = m.provider_id WHERE m.id = ?`, id)
 	m, err := scanModel(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -322,6 +400,9 @@ func UpdateModel(db *sql.DB, m *Model) error {
 		WHERE id=?`, m.Name, m.ProviderID, m.DisplayName, m.DefaultParams,
 		nilIfNilFloat64(m.InputPricePer1M), nilIfNilFloat64(m.OutputPricePer1M), nilIfNilFloat64(m.OffpeakDiscount), m.ID)
 	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			return ErrDuplicate
+		}
 		return err
 	}
 	n, _ := res.RowsAffected()
@@ -329,6 +410,14 @@ func UpdateModel(db *sql.DB, m *Model) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// ModelHasUsage reports whether the model name has recorded usage rows.
+// 改名防护(审计修复 M7):有用量记录的模型改名会破坏历史费用口径。
+func ModelHasUsage(db *sql.DB, name string) (bool, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM usage WHERE model = ?`, name).Scan(&n)
+	return n > 0, err
 }
 
 // DeleteModel removes a model;若被删模型是 gateway.default_model,重置为空串
@@ -379,11 +468,14 @@ func clearDefaultModelIf(tx *sql.Tx, name string) error {
 // ListAdminModels returns all models with pricing/off-peak fields for the
 // admin UI (webadmin 价格列/编辑弹窗数据源,0022/0023)。与公开 ListModels
 // (仅基础字段)区分:价格/折扣属管理配置,不应从客户端可见端点泄露。
+// 展示全部模型(含已停用上游的,审计修复 M3):管理页需能管理禁用上游的模型,
+// 客户端可见性由 ListModels 的 WHERE p.enabled = 1 单独控制。
 func ListAdminModels(db *sql.DB) ([]Model, error) {
 	rows, err := db.Query(`SELECT m.id, m.name, m.provider_id, COALESCE(m.display_name, m.name),
-		COALESCE(m.default_params, '{}'), m.input_price_per_1m, m.output_price_per_1m, m.offpeak_discount
+		COALESCE(m.default_params, '{}'), m.input_price_per_1m, m.output_price_per_1m, m.offpeak_discount,
+		p.name, p.channel, p.enabled
 		FROM models m JOIN gateway_providers p ON p.id = m.provider_id
-		WHERE p.enabled = 1 ORDER BY m.id`)
+		ORDER BY m.id`)
 	if err != nil {
 		return nil, err
 	}

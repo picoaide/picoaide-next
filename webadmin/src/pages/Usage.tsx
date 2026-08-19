@@ -17,7 +17,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../components/ui/dialog'
 import {
   fmtTokens, fmtFull, fmtMoney, fmtMoneyFull, usageRate, quotaPercent, quotaOver,
-  moneyRate, moneyPercent, moneyOver, rangePreset, monthRange, ymd,
+  moneyRate, moneyPercent, moneyOver, rangePreset, monthRange, ymd, isModelPriced,
 } from '../lib/format'
 
 interface UsageRow {
@@ -122,11 +122,9 @@ export default function Usage() {
       setDefaultQuota(q === undefined || q === null || q === '' ? null : Number(q))
       const mq = gw?.monthly_quota_money
       setDefaultMoneyQuota(mq === undefined || mq === null || mq === '' ? null : Number(mq))
-      // 未定价模型 = 价格缺省或为 0 → 金额配额可能被低估,显式提示
-      const unpriced = (models?.models ?? []).some(
-        (m: any) => m?.input_price_per_1m === null || m?.input_price_per_1m === undefined || Number(m.input_price_per_1m) <= 0
-          || m?.output_price_per_1m === null || m?.output_price_per_1m === undefined || Number(m.output_price_per_1m) <= 0
-      )
+      // 未定价模型 = 输入价与输出价均未配置(审计修复 M6:口径与网关页统一,
+      // 纯 embedding 模型只配输入价不算未定价)→ 金额配额可能被低估,显式提示
+      const unpriced = (models?.models ?? []).some((m: any) => !isModelPriced(m))
       setHasUnpricedModels(unpriced)
       // 部门预算:只展示配置了预算(budget_money > 0)的部门(审计低7)
       const budgets = (depts?.departments ?? [])
