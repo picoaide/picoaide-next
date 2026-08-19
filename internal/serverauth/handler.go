@@ -96,6 +96,7 @@ func (a *API) RegisterRoutes(r *gin.Engine) {
 	g.POST("/login", a.handleLogin)
 	g.POST("/logout", BearerAuth(a.DB), a.handleLogout)
 	g.GET("/me", BearerAuth(a.DB), a.handleMe)
+	g.GET("/usage", BearerAuth(a.DB), a.handleUsageSummary)
 	if a.oidc != nil {
 		g.GET("/oidc/login", a.handleOIDCLogin)
 		g.GET("/oidc/callback", a.handleOIDCCallback)
@@ -248,6 +249,73 @@ func (a *API) handleMe(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"user": userJSON(u)})
+}
+
+// handleUsageSummary 返回员工用量概览(客户端余额/统计展示):
+// 有效配额(个人覆盖→全局默认)、剩余(配额-本月已用,0/不限→null)、
+// 今日/昨日/本月/历史总 tokens 与费用、部门预算链、admin 豁免。
+func (a *API) handleUsageSummary(c *gin.Context) {
+	u := CurrentUser(c)
+	if u == nil {
+		writeError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+		return
+	}
+	s, err := serverstore.UserUsageSummary(a.DB, u.ID)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "统计失败")
+		return
+	}
+	// 有效配额(admin 恒 0 = 豁免/不限)
+	quotaTokens, err := serverstore.EffectiveQuota(a.DB, u)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "配额查询失败")
+		return
+	}
+	quotaMoney, err := serverstore.EffectiveMoneyQuota(a.DB, u)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "配额查询失败")
+		return
+	}
+	// 剩余:配额-本月已用;0/不限 → null(前端显示「不限」)
+	var remainingTokens any
+	if quotaTokens > 0 {
+		remainingTokens = quotaTokens - s.MonthlyUsage
+	}
+	var remainingMoney any
+	if quotaMoney > 0 {
+		remainingMoney = quotaMoney - s.MonthlyCost
+	}
+	// 部门预算链(归属部门+祖先,含预算与树费用)
+	budgets, err := serverstore.EffectiveDeptBudget(a.DB, u.ID)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "部门预算查询失败")
+		return
+	}
+	deptBudgets := make([]gin.H, 0, len(budgets))
+	for _, b := range budgets {
+		used, err := serverstore.DeptMonthlyCost(a.DB, b.GroupID)
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "部门预算查询失败")
+			return
+		}
+		deptBudgets = append(deptBudgets, gin.H{"name": b.Name, "budget": b.Budget, "used": used})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"is_admin":         u.IsAdmin,
+		"quota_tokens":     quotaTokens,
+		"quota_money":      quotaMoney,
+		"monthly_usage":    s.MonthlyUsage,
+		"monthly_cost":     s.MonthlyCost,
+		"remaining_tokens": remainingTokens,
+		"remaining_money":  remainingMoney,
+		"today_usage":      s.TodayUsage,
+		"today_cost":       s.TodayCost,
+		"yesterday_usage":  s.YesterdayUsage,
+		"yesterday_cost":   s.YesterdayCost,
+		"total_usage":      s.TotalUsage,
+		"total_cost":       s.TotalCost,
+		"dept_budgets":     deptBudgets,
+	})
 }
 
 func userJSON(u *serverstore.User) gin.H {
