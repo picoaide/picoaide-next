@@ -134,6 +134,46 @@ func ClaimPendingKBDocument(db *sql.DB) (*KBDocument, error) {
 	return &d, nil
 }
 
+// ListPendingKBDocuments returns every pending row (oldest first) so the
+// upload queue can detect orphans (missing raw files) and claim by id
+// without letting one bad row block the head forever (审计 H2).
+func ListPendingKBDocuments(db *sql.DB) ([]KBDocument, error) {
+	rows, err := db.Query(`SELECT id, folder_id, title, content, content_type, size, source, created_by, created_at, status, error
+		FROM kb_documents WHERE status = 'pending' ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []KBDocument
+	for rows.Next() {
+		var d KBDocument
+		var created string
+		if err := rows.Scan(&d.ID, &d.FolderID, &d.Title, &d.Content, &d.ContentType, &d.Size, &d.Source, &d.CreatedBy, &created, &d.Status, &d.Error); err != nil {
+			return nil, err
+		}
+		d.CreatedAt = parseSQLTime(created)
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// ClaimPendingKBDocumentByID claims one specific pending row (CAS), the
+// per-row variant of ClaimPendingKBDocument: the queue first verifies the
+// raw file exists, then claims by id so a stale list entry (already claimed
+// by another worker) fails with ErrNotFound instead of being stolen.
+func ClaimPendingKBDocumentByID(db *sql.DB, id int64) (*KBDocument, error) {
+	claimMu.Lock()
+	defer claimMu.Unlock()
+	res, err := db.Exec("UPDATE kb_documents SET status = 'processing' WHERE id = ? AND status = 'pending'", id)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrNotFound
+	}
+	return GetKBDocument(db, id)
+}
+
 // ReleaseClaim returns a claimed-but-unprocessable row to the queue
 // (pending) so another worker can pick it up; no-op when the row was
 // already completed by its owner.
