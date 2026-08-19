@@ -911,3 +911,74 @@ func TestQuotaMoneyGlobalDefault(t *testing.T) {
 		t.Fatalf("global default status = %d, want 429", w.Code)
 	}
 }
+
+// setDeptBudgetForUser 创建部门并挂用户,设置部门预算与已用费用。
+func setDeptBudgetForUser(t *testing.T, db *sql.DB, budget float64, used float64) {
+	t.Helper()
+	gid, err := serverstore.CreateDepartment(db, "研发部", 0, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.SetDeptBudget(db, gid, budget); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.AddUserGroup(db, 1, gid); err != nil {
+		t.Fatal(err)
+	}
+	if used > 0 {
+		if _, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, kind, cost)
+			VALUES (1, 'deepseek-chat', ?, 0, 'chat', ?)`, int64(used*1e6), used); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestQuotaDeptBudgetBlocksOverLimit(t *testing.T) {
+	f := newFakeUpstream(t)
+	r, db, token := newGateway(t, f)
+	setDeptBudgetForUser(t, db, 100, 100) // 部门树已用 == 预算 → 拦截
+
+	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", w.Code)
+	}
+	var out map[string]any
+	json.Unmarshal(w.Body.Bytes(), &out)
+	if code := out["error"].(map[string]any)["code"]; code != "QUOTA_EXCEEDED" {
+		t.Fatalf("code = %v", code)
+	}
+	if n := f.requests.Load(); n != 0 {
+		t.Fatalf("upstream calls = %d, want 0", n)
+	}
+}
+
+func TestQuotaDeptBudgetUnderLimit(t *testing.T) {
+	f := newFakeUpstream(t)
+	r, db, token := newGateway(t, f)
+	setDeptBudgetForUser(t, db, 100, 50) // 50 < 100 → 放行
+
+	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+}
+
+func TestQuotaDeptBudgetAdminExempt(t *testing.T) {
+	f := newFakeUpstream(t)
+	r, db, token := newGateway(t, f)
+	setDeptBudgetForUser(t, db, 1, 100000) // 部门预算 1,已用 10 万;admin 豁免
+
+	u, err := serverstore.GetUserByID(db, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.IsAdmin = true
+	if err := serverstore.UpdateUser(db, u); err != nil {
+		t.Fatal(err)
+	}
+
+	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (admin exempt)", w.Code)
+	}
+}

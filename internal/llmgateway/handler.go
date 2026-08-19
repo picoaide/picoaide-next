@@ -478,10 +478,13 @@ func (a *API) rateLimitPerMinute() int {
 }
 
 // quotaBlocked reports whether the user has exhausted their calendar-month
-// token or money quota (429 QUOTA_EXCEEDED at the caller). Admins are always
-// exempt; 0 quota means unlimited. Lookup failures degrade open (fail-open),
-// matching the rate-limiter's fail-open behaviour.
+// token, money, or department budget quota (429 QUOTA_EXCEEDED at the caller).
+// Admins are always exempt; 0 quota means unlimited. Lookup failures degrade
+// open (fail-open), matching the rate-limiter's fail-open behaviour.
 func (a *API) quotaBlocked(user *serverstore.User) (bool, string) {
+	if blocked, msg := a.deptBudgetBlocked(user); blocked {
+		return true, msg
+	}
 	if blocked, msg := a.moneyQuotaBlocked(user); blocked {
 		return true, msg
 	}
@@ -500,6 +503,35 @@ func (a *API) quotaBlocked(user *serverstore.User) (bool, string) {
 	}
 	if used >= quota {
 		return true, "本月流量配额已用尽"
+	}
+	return false, ""
+}
+
+// deptBudgetBlocked reports whether any department budget on the user's
+// inheritance chain (归属部门 + 祖先链) has been exhausted. A department
+// budget caps the whole subtree's monthly cost, so every member of the tree
+// is blocked once it is exceeded. Admins are exempt. Fail-open on errors.
+func (a *API) deptBudgetBlocked(user *serverstore.User) (bool, string) {
+	if user.IsAdmin {
+		return false, ""
+	}
+	budgets, err := serverstore.EffectiveDeptBudget(a.DB, user.ID)
+	if err != nil {
+		log.Printf("gateway: dept budget lookup: %v", err)
+		return false, ""
+	}
+	if len(budgets) == 0 {
+		return false, ""
+	}
+	for _, b := range budgets {
+		used, err := serverstore.DeptMonthlyCost(a.DB, b.GroupID)
+		if err != nil {
+			log.Printf("gateway: dept cost lookup: %v", err)
+			return false, ""
+		}
+		if used >= b.Budget {
+			return true, "部门「" + b.Name + "」本月费用预算已用尽"
+		}
 	}
 	return false, ""
 }
