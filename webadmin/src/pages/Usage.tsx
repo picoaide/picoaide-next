@@ -17,7 +17,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../components/ui/dialog'
 import {
   fmtTokens, fmtFull, usageRate, quotaPercent, quotaOver,
-  rangePreset, monthRange, ymdFmt,
+  rangePreset, monthRange, ymd,
 } from '../lib/format'
 
 interface UsageRow {
@@ -115,8 +115,8 @@ export default function Usage() {
         const prevTo = new Date(from.getTime() - 86400000)
         const prevFrom = new Date(from.getTime() - span * 86400000)
         const pv = new URLSearchParams({ group })
-        pv.set('from', ymdFmt(prevFrom))
-        pv.set('to', ymdFmt(prevTo))
+        pv.set('from', ymd(prevFrom))
+        pv.set('to', ymd(prevTo))
         try {
           const prev = await request(`/api/admin/usage?${pv}`)
           const prevRows: UsageRow[] = prev.rows ?? []
@@ -303,7 +303,7 @@ export default function Usage() {
   }, [compareTotal, totals.total])
 
   const statCards = [
-    { title: '请求数', value: totals.requests, icon: Activity, desc: 'chat ' + fmtTokens(totals.chatReq) + ' · embedding ' + fmtTokens(totals.embedReq) },
+    { title: '请求数', value: totals.requests, icon: Activity, desc: `chat ${totals.chatReq.toLocaleString()} · embedding ${totals.embedReq.toLocaleString()}` },
     {
       title: '总 tokens', value: totals.total, icon: Coins,
       desc: compareDelta === null ? '输入 + 输出(不含 embedding)'

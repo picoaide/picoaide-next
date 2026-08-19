@@ -405,6 +405,34 @@ func TestUsageAggregateKindSplit(t *testing.T) {
 	}
 }
 
+// TestUsageAggregateMonthOverflow: from 为月末(8/31)时月桶不得跳过 9 月
+// (审计2026-E3 P1-2 回归)。
+func TestUsageAggregateMonthOverflow(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	id, _ := RecordUsage(db, uid, "m", 10, 5)
+	setCreatedAt(t, db, id, "2026-08-31 09:00:00")
+	id, _ = RecordUsage(db, uid, "m", 20, 5)
+	setCreatedAt(t, db, id, "2026-09-15 09:00:00")
+
+	from := time.Date(2026, 8, 31, 0, 0, 0, 0, time.Local)
+	to := time.Date(2026, 9, 15, 0, 0, 0, 0, time.Local)
+	rows, err := UsageAggregate(db, from, to, "month")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("month rows = %d, want 2 (2026-08, 2026-09)", len(rows))
+	}
+	if rows[0].Label != "2026-08" || rows[1].Label != "2026-09" {
+		t.Fatalf("month labels wrong: %+v", rows)
+	}
+	if rows[0].Requests != 1 || rows[1].Requests != 1 {
+		t.Fatalf("month requests wrong: %+v", rows)
+	}
+}
+
 // TestUsageAggregateUserFilter: username 过滤仅返回该用户。
 func TestUsageAggregateUserFilter(t *testing.T) {
 	db, cleanup := newUsageDB(t)
@@ -426,5 +454,14 @@ func TestUsageAggregateUserFilter(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].PromptTokens != 10 {
 		t.Fatalf("filtered rows = %+v, want alice 10", rows)
+	}
+
+	// username 过滤 + group=user 组合:相关子查询不产生双 JOIN(审计2026-E3 P1-1)
+	rows, err = UsageAggregate(db, time.Time{}, time.Time{}, "user", WithUsername("alice"))
+	if err != nil {
+		t.Fatalf("user group + username filter: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Label != "alice" {
+		t.Fatalf("user+filter rows = %+v, want [alice]", rows)
 	}
 }

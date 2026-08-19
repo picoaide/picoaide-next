@@ -179,14 +179,15 @@ func weekMonday(d time.Time) string {
 
 func monthFill(from, to time.Time) []string {
 	out := []string{}
-	for d := from; d.Before(to) || sameMonth(d, to); d = d.AddDate(0, 1, 0) {
-		out = append(out, d.Format("2006-01"))
+	// 先归一到月初再 +1 月:避免 from=9/30 时 AddDate(0,1,0)→10/30 越过
+	// to=10/15 导致 10 月桶被跳过(审计2026-E3 P1-2)
+	cur := time.Date(from.Year(), from.Month(), 1, 0, 0, 0, 0, from.Location())
+	end := time.Date(to.Year(), to.Month(), 1, 0, 0, 0, 0, to.Location())
+	for cur.Before(end) || cur.Equal(end) {
+		out = append(out, cur.Format("2006-01"))
+		cur = cur.AddDate(0, 1, 0)
 	}
 	return out
-}
-
-func sameMonth(a, b time.Time) bool {
-	return a.Year() == b.Year() && a.Month() == b.Month()
 }
 
 // UsageAggregate aggregates usage by day | week | month | model | user | kind
@@ -200,10 +201,13 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 	}
 	var selectExpr, groupExpr string
 	join := ""
-	if q.Username != "" {
-		join = " JOIN users u ON u.id = usage.user_id"
-	}
 	fill := zeroFiller(nil)
+	// username 过滤用相关子查询:避免与 group=user 的 LEFT JOIN users 双 JOIN
+	// 同别名冲突(审计2026-E3 P1-1)
+	var usernameFilter string
+	if q.Username != "" {
+		usernameFilter = " AND usage.user_id = (SELECT id FROM users WHERE username = ?)"
+	}
 	switch group {
 	case "day":
 		selectExpr, groupExpr = "date(usage.created_at)", "date(usage.created_at)"
@@ -233,11 +237,13 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 		args = append(args, from.Format("2006-01-02"))
 	}
 	if !to.IsZero() {
+		// AddDate(0,0,1) 日历下一天,避免 Add(24h) 在 DST 切换日跳到后天
+		// (审计2026-E3 P1-3)
 		qstr += " AND usage.created_at < ?"
-		args = append(args, to.Add(24*time.Hour).Format("2006-01-02"))
+		args = append(args, to.AddDate(0, 0, 1).Format("2006-01-02"))
 	}
 	if q.Username != "" {
-		qstr += " AND u.username = ?"
+		qstr += usernameFilter
 		args = append(args, q.Username)
 	}
 	qstr += " GROUP BY " + groupExpr + " ORDER BY label"
