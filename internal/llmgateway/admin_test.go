@@ -526,3 +526,39 @@ func TestAdminGatewayPeakWindows(t *testing.T) {
 		t.Fatalf("bad peak_windows accepted: %d", w.Code)
 	}
 }
+
+// TestAdminModelsListIncludesPricing: admin 模型列表必须返回价格与峰谷折扣
+// 字段(webadmin 价格列/编辑弹窗的数据源;此前误用公开 ListModels 导致字段缺失)。
+func TestAdminModelsListIncludesPricing(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	if w, _ := adminReq(t, r, "POST", "/api/admin/providers",
+		`{"name":"deepseek","base_url":"https://api.deepseek.com","api_key":"k","models":[]}`, hdr); w.Code != http.StatusOK {
+		t.Fatal("create provider failed")
+	}
+	w, _ := adminReq(t, r, "POST", "/api/admin/models",
+		`{"name":"deepseek-chat","provider_id":1,"display_name":"聊天","input_price_per_1m":2,"output_price_per_1m":8,"offpeak_discount":0.5}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create model: %d %s", w.Code, w.Body.String())
+	}
+
+	w, out := adminReq(t, r, "GET", "/api/admin/models", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list models: %d", w.Code)
+	}
+	ms := out["models"].([]any)
+	if len(ms) != 1 {
+		t.Fatalf("models = %d, want 1", len(ms))
+	}
+	m := ms[0].(map[string]any)
+	if v, ok := m["input_price_per_1m"]; !ok || v != float64(2) {
+		t.Fatalf("input_price_per_1m = %v (present=%v), want 2", v, ok)
+	}
+	if v, ok := m["output_price_per_1m"]; !ok || v != float64(8) {
+		t.Fatalf("output_price_per_1m = %v (present=%v), want 8", v, ok)
+	}
+	if v, ok := m["offpeak_discount"]; !ok || v != float64(0.5) {
+		t.Fatalf("offpeak_discount = %v (present=%v), want 0.5", v, ok)
+	}
+}

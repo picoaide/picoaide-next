@@ -332,7 +332,9 @@ func validateModelPrices(c *gin.Context, in, out, offpeak *float64) bool {
 }
 
 func listModelsAdmin(c *gin.Context, db *sql.DB) {
-	models, err := ListModels(db)
+	// 管理端用完整字段(含价格/峰谷折扣,0022/0023);客户端 /v1/models 仍走
+	// 公开 ListModels(基础字段,不泄露定价配置)。
+	models, err := serverstore.ListAdminModels(db)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return

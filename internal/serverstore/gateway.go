@@ -375,3 +375,26 @@ func clearDefaultModelIf(tx *sql.Tx, name string) error {
 	}
 	return nil
 }
+
+// ListAdminModels returns all models with pricing/off-peak fields for the
+// admin UI (webadmin 价格列/编辑弹窗数据源,0022/0023)。与公开 ListModels
+// (仅基础字段)区分:价格/折扣属管理配置,不应从客户端可见端点泄露。
+func ListAdminModels(db *sql.DB) ([]Model, error) {
+	rows, err := db.Query(`SELECT m.id, m.name, m.provider_id, COALESCE(m.display_name, m.name),
+		COALESCE(m.default_params, '{}'), m.input_price_per_1m, m.output_price_per_1m, m.offpeak_discount
+		FROM models m JOIN gateway_providers p ON p.id = m.provider_id
+		WHERE p.enabled = 1 ORDER BY m.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Model
+	for rows.Next() {
+		m, err := scanModel(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *m)
+	}
+	return out, rows.Err()
+}
