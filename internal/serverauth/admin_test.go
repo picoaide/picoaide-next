@@ -1029,6 +1029,47 @@ func TestAdminCreateDeptWithBudget(t *testing.T) {
 	t.Fatal("财务部 missing from list")
 }
 
+// 删除保留部门「全员」→ 400 VALIDATION(审计 L1:此前落入 500 INTERNAL)
+func TestAdminDeleteEveryoneDept(t *testing.T) {
+	r, db := adminRouter(t)
+	defer db.Close()
+	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d", w.Code)
+	}
+	csrf := out["csrf_token"].(string)
+	var sess string
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == sessionCookieName {
+			sess = ck.Value
+		}
+	}
+	hdr := func() map[string]string {
+		return map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
+	}
+	w, out = doJSON(t, r, "GET", "/api/admin/departments", "", hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("list depts: %d", w.Code)
+	}
+	var everyoneID int64
+	for _, d := range out["departments"].([]any) {
+		dm := d.(map[string]any)
+		if dm["name"] == "全员" {
+			everyoneID = int64(dm["id"].(float64))
+		}
+	}
+	if everyoneID == 0 {
+		t.Fatal("everyone dept missing from list")
+	}
+	w, out = doJSON(t, r, "DELETE", fmt.Sprintf("/api/admin/departments/%d", everyoneID), "", hdr())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("delete everyone dept: %d %s, want 400", w.Code, w.Body.String())
+	}
+	if code, _ := out["error"].(map[string]any)["code"].(string); code != "VALIDATION" {
+		t.Fatalf("error code = %v, want VALIDATION", code)
+	}
+}
+
 // 创建部门带负预算 → 400
 func TestAdminCreateDeptNegativeBudget(t *testing.T) {
 	r, db := adminRouter(t)

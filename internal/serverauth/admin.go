@@ -708,6 +708,8 @@ func (a *AdminAPI) updateDepartment(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+// 错误码口径(审计 L2):URL 主资源不存在 → 404 NOT_FOUND;
+// 依赖资源(上级/主管/部门归属目标)不存在 → 400 VALIDATION。
 func (a *AdminAPI) deleteDepartment(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
@@ -722,6 +724,11 @@ func (a *AdminAPI) deleteDepartment(c *gin.Context) {
 	if err := serverstore.DeleteDepartment(a.DB, id); err != nil {
 		if errors.Is(err, serverstore.ErrDepartmentInUse) {
 			writeError(c, http.StatusBadRequest, "VALIDATION", "部门仍有关联(成员/子部门/授权),请先转移或清理")
+			return
+		}
+		// 保留部门(全员)删除:此前落入 INTERNAL 500(审计 L1),应返回 400 VALIDATION
+		if errors.Is(err, serverstore.ErrValidation) {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "保留部门不可删除")
 			return
 		}
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
