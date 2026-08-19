@@ -50,6 +50,32 @@ describe('Departments 部门管理页', () => {
     )
   })
 
+  it('新建部门:父级下拉可选已有部门(高1:新建时不得排除整棵树)', async () => {
+    render(<Departments />)
+    await screen.findByText('部门管理')
+    fireEvent.click(screen.getByRole('button', { name: '新建部门' }))
+    const dialog = within(await screen.findByRole('dialog'))
+    fireEvent.click(dialog.getByRole('combobox', { name: '上级部门' }))
+    // 新建时父级候选必须包含已有顶层部门 研发部 与 前端组
+    expect(await screen.findByRole('option', { name: '研发部' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /前端组/ })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('option', { name: '研发部' }))
+    expect(dialog.getByRole('combobox', { name: '上级部门' })).toHaveTextContent('研发部')
+  })
+
+  it('编辑部门:父级下拉排除自身及其子树', async () => {
+    render(<Departments />)
+    await screen.findByText('部门管理')
+    fireEvent.click(screen.getAllByRole('button', { name: '编辑' })[0]) // 研发部
+    const dialog = within(await screen.findByRole('dialog'))
+    fireEvent.click(dialog.getByRole('combobox', { name: '上级部门' }))
+    // 自身(研发部)与子部门(前端组)都不能作为自己的父级
+    expect(screen.queryByRole('option', { name: '研发部' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /前端组/ })).not.toBeInTheDocument()
+    // 但同层其他部门(人事部不存在于 mock,此处验证顶层「无」选项仍在)
+    expect(screen.getByRole('option', { name: '无(顶层部门)' })).toBeInTheDocument()
+  })
+
   it('编辑部门:主管下拉列出用户,保存调用 PUT', async () => {
     render(<Departments />)
     await screen.findByText('部门管理')

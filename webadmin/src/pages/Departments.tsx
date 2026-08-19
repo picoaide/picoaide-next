@@ -182,17 +182,18 @@ export default function Departments() {
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-1">
-              <Label>部门名称</Label>
-              <Input placeholder="如 研发部" value={deptForm.name} onChange={(e) => setDeptForm({ ...deptForm, name: e.target.value })} />
+              <Label htmlFor="dept-name">部门名称</Label>
+              <Input id="dept-name" placeholder="如 研发部" value={deptForm.name} onChange={(e) => setDeptForm({ ...deptForm, name: e.target.value })} />
             </div>
             <div className="space-y-1">
               <Label>上级部门</Label>
               <Select value={deptForm.parent_id} onValueChange={(v) => setDeptForm({ ...deptForm, parent_id: v })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label="上级部门"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="0">无(顶层部门)</SelectItem>
                   {deptTreeOptions(
-                    depts.filter((d) => !deptSubtreeIds(depts, deptForm.id).has(d.id)),
+                    // 高1:新建时(id=0)父级候选是整棵部门树;编辑时排除自身及其子树防环
+                    depts.filter((d) => deptForm.id <= 0 || !deptSubtreeIds(depts, deptForm.id).has(d.id)),
                     0,
                     0,
                   ).map((o) => (
@@ -202,9 +203,9 @@ export default function Departments() {
               </Select>
             </div>
             <div className="space-y-1">
-              <Label>部门主管</Label>
+              <Label htmlFor="dept-leader">部门主管</Label>
               <Select value={deptForm.leader_id} onValueChange={(v) => setDeptForm({ ...deptForm, leader_id: v })}>
-                <SelectTrigger><SelectValue placeholder="选择主管" /></SelectTrigger>
+                <SelectTrigger aria-label="部门主管" id="dept-leader"><SelectValue placeholder="选择主管" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="0">未设置</SelectItem>
                   {users.map((u) => (
@@ -214,8 +215,8 @@ export default function Departments() {
               </Select>
             </div>
             <div className="space-y-1">
-              <Label>描述(可选)</Label>
-              <Input value={deptForm.description} onChange={(e) => setDeptForm({ ...deptForm, description: e.target.value })} />
+              <Label htmlFor="dept-desc">描述(可选)</Label>
+              <Input id="dept-desc" value={deptForm.description} onChange={(e) => setDeptForm({ ...deptForm, description: e.target.value })} />
             </div>
             <div className="space-y-1">
               <Label htmlFor="dept-budget">月度金额预算(元,可选)</Label>
