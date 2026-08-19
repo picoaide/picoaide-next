@@ -217,3 +217,15 @@
 8. `45489c9` webadmin 部门页:预算列(进度条 80% 琥珀/超额红)+ 编辑弹窗预算字段
 
 **验证**:go test ./internal/... 全绿(serverstore 17+ 新增用例);webadmin 40 passed + typecheck 0 + build;已 commit。
+
+## Round 13(2026-08-19):客户端用量余额接口 + 统计数据展示
+
+**需求**:给客户端新增接口,返回员工剩余使用量(余额 + 剩余 token),并显示统计数据(今日/昨日/总使用量)。
+
+**实施**(TDD 红-绿-commit):
+1. `bedc7d8` serverstore:`UserDayUsageCost`/`UserTotalUsageCost`/`UserUsageSummary`(今日/昨日/本月/累计 tokens+费用,走 idx_usage_user_time)
+2. `e753da5` 新接口 `GET /api/auth/usage`(BearerAuth):有效配额(个人覆盖→全局默认)、剩余(配额-本月已用,不限→null)、今日/昨日/本月/累计、部门预算链、admin 豁免
+3. `87b823a` 客户端 main:gateway/usage.ts 连接器(结构校验垃圾兜底)+ `usage:summary` IPC + preload 暴露
+4. `7946680` renderer:stores/usage.ts(登录/设置页打开时加载,登出重置);Settings「用量与配额」卡(余额 ¥+token、双进度条、今日/昨日/本月/累计、部门预算、刷新);Main 侧栏余额徽标(点击进设置)
+
+**验证**:客户端 644 passed | 2 skipped + typecheck 0;服务端 8 包全绿;已 commit。
