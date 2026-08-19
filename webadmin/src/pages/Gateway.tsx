@@ -32,6 +32,7 @@ interface Model {
   default_params: string
   input_price_per_1m?: number | null // 0022:元/百万 token,nil = 未定价
   output_price_per_1m?: number | null
+  offpeak_discount?: number | null // 0023:0<d<1 低谷折扣;nil/1 = 无峰谷价
 }
 
 function formatCaps(defaultParams: string): string {
@@ -64,7 +65,7 @@ export default function Gateway() {
   const [provDialog, setProvDialog] = useState(false)
   const [provForm, setProvForm] = useState({ name: '', channel: '', base_url: '', api_key: '', models: '' })
   const [modelDialog, setModelDialog] = useState(false)
-  const [modelForm, setModelForm] = useState({ name: '', provider_id: '', display_name: '', input_price_per_1m: '', output_price_per_1m: '' })
+  const [modelForm, setModelForm] = useState({ name: '', provider_id: '', display_name: '', input_price_per_1m: '', output_price_per_1m: '', offpeak_discount: '' })
 
   const load = useCallback(async () => {
     try {
@@ -140,12 +141,14 @@ export default function Gateway() {
       // 价格留空 = 未定价(NULL);输入 0 = 定价 0(等价未定价);正数 = 元/百万 token
       if (modelForm.input_price_per_1m.trim() !== '') body.input_price_per_1m = Number(modelForm.input_price_per_1m)
       if (modelForm.output_price_per_1m.trim() !== '') body.output_price_per_1m = Number(modelForm.output_price_per_1m)
+      // 低谷折扣(0023):留空 = 无峰谷价;0<d<1 = 低谷窗口内 ×d
+      if (modelForm.offpeak_discount.trim() !== '') body.offpeak_discount = Number(modelForm.offpeak_discount)
       await request('/api/admin/models', {
         method: 'POST',
         body: JSON.stringify(body),
       })
       setModelDialog(false)
-      setModelForm({ name: '', provider_id: '', display_name: '', input_price_per_1m: '', output_price_per_1m: '' })
+      setModelForm({ name: '', provider_id: '', display_name: '', input_price_per_1m: '', output_price_per_1m: '', offpeak_discount: '' })
       load()
     } catch (err: any) {
       setError(err.message)
@@ -172,14 +175,15 @@ export default function Gateway() {
     }
   }
 
-  // 模型编辑:价格补录/修改(0022 金额计费前提);其余字段留空不覆盖
+  // 模型编辑:价格补录/修改(0022 金额计费前提 + 0023 峰谷折扣);其余字段留空不覆盖
   const [editModel, setEditModel] = useState<Model | null>(null)
-  const [editPriceForm, setEditPriceForm] = useState({ input: '', output: '' })
+  const [editPriceForm, setEditPriceForm] = useState({ input: '', output: '', offpeak: '' })
   function openModelPricing(m: Model) {
     setEditModel(m)
     setEditPriceForm({
       input: m.input_price_per_1m === null || m.input_price_per_1m === undefined ? '' : String(m.input_price_per_1m),
       output: m.output_price_per_1m === null || m.output_price_per_1m === undefined ? '' : String(m.output_price_per_1m),
+      offpeak: m.offpeak_discount === null || m.offpeak_discount === undefined ? '' : String(m.offpeak_discount),
     })
   }
   async function saveModelPricing() {
@@ -189,6 +193,7 @@ export default function Gateway() {
       // 留空 = 保持现值(服务端对缺省字段不覆盖);输入 0 = 定价 0(计费为 0)
       if (editPriceForm.input.trim() !== '') body.input_price_per_1m = Number(editPriceForm.input)
       if (editPriceForm.output.trim() !== '') body.output_price_per_1m = Number(editPriceForm.output)
+      if (editPriceForm.offpeak.trim() !== '') body.offpeak_discount = Number(editPriceForm.offpeak)
       await request(`/api/admin/models/${editModel.id}`, { method: 'PUT', body: JSON.stringify(body) })
       setEditModel(null)
       load()
@@ -340,6 +345,7 @@ export default function Gateway() {
             <TableBody>
               {models.map((m) => {
                 const priced = (m.input_price_per_1m ?? 0) > 0 || (m.output_price_per_1m ?? 0) > 0
+                const offpeak = m.offpeak_discount !== null && m.offpeak_discount !== undefined && m.offpeak_discount > 0 && m.offpeak_discount < 1
                 return (
                   <TableRow key={m.id}>
                     <TableCell className="font-mono">{m.name}</TableCell>
@@ -349,6 +355,7 @@ export default function Gateway() {
                       {priced ? (
                         <span className="font-mono text-xs">
                           入 {m.input_price_per_1m} / 出 {m.output_price_per_1m}
+                          {offpeak && <span className="text-amber-600"> · 谷 {Number(m.offpeak_discount) * 10}折</span>}
                         </span>
                       ) : (
                         <Badge variant="outline" className="text-[10px]">未定价</Badge>
@@ -439,7 +446,15 @@ export default function Gateway() {
             </div>
             <div className="space-y-1">
               <Label>所属上游</Label>
-              <Select value={modelForm.provider_id} onValueChange={(v) => setModelForm({ ...modelForm, provider_id: v })}>
+              <Select value={modelForm.provider_id} onValueChange={(v) => {
+                const p = providers.find((x) => String(x.id) === v)
+                setModelForm((prev) => ({
+                  ...prev,
+                  provider_id: v,
+                  // deepseek 渠道预填官方错峰折扣 0.5(未手填时);其它渠道留空 = 无峰谷
+                  offpeak_discount: prev.offpeak_discount === '' && p?.channel === 'deepseek' ? '0.5' : prev.offpeak_discount,
+                }))
+              }}>
                 <SelectTrigger><SelectValue placeholder="选择上游" /></SelectTrigger>
                 <SelectContent>
                   {providers.map((p) => (
@@ -474,8 +489,22 @@ export default function Gateway() {
                 />
               </div>
             </div>
+            <div className="space-y-1">
+              <Label htmlFor="model-offpeak">低谷折扣率(0-1,留空 = 无峰谷价)</Label>
+              <Input
+                id="model-offpeak"
+                type="number"
+                min={0}
+                max={1}
+                step="0.05"
+                placeholder="DeepSeek 官方错峰五折 = 0.5"
+                value={modelForm.offpeak_discount}
+                onChange={(e) => setModelForm({ ...modelForm, offpeak_discount: e.target.value })}
+              />
+            </div>
             <p className="text-xs text-muted-foreground">
               配置价格后,用量页按 输入token×输入价 + 输出token×输出价 折算费用;未定价模型费用按 0 计。
+              低谷折扣(DeepSeek 错峰):每日 16:30-00:30(北京时间,UTC 08:30-16:30)内费用 × 折扣率,其余时段按标准价。
             </p>
             <Button className="w-full" onClick={createModel}>新增</Button>
           </div>
@@ -513,8 +542,22 @@ export default function Gateway() {
                 />
               </div>
             </div>
+            <div className="space-y-1">
+              <Label htmlFor="edit-offpeak">低谷折扣率(0-1,留空 = 保持现值;1 = 取消峰谷)</Label>
+              <Input
+                id="edit-offpeak"
+                type="number"
+                min={0}
+                max={1}
+                step="0.05"
+                placeholder="DeepSeek 官方错峰五折 = 0.5"
+                value={editPriceForm.offpeak}
+                onChange={(e) => setEditPriceForm({ ...editPriceForm, offpeak: e.target.value })}
+              />
+            </div>
             <p className="text-xs text-muted-foreground">
-              修改价格只影响之后产生的用量费用(历史费用按记录时定价留存)。
+              修改价格/折扣只影响之后产生的用量费用(历史费用按记录时定价留存)。
+              低谷时段 = 每日 16:30-00:30(北京时间,UTC 08:30-16:30),DeepSeek 官方优惠五折。
             </p>
             <Button className="w-full" onClick={saveModelPricing}>保存</Button>
           </div>

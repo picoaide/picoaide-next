@@ -125,3 +125,40 @@ describe('Gateway 网关配置页', () => {
       }),
     )
   })
+
+  it('模型价格编辑:提交含低谷折扣率', async () => {
+    render(<Gateway />)
+    await screen.findByText('全局设置')
+    fireEvent.click(screen.getAllByRole('button', { name: '价格' })[0])
+    const dialog = within(await screen.findByRole('dialog'))
+    fireEvent.change(dialog.getByLabelText('输入价格(元/百万 token)'), { target: { value: '2' } })
+    fireEvent.change(dialog.getByLabelText('输出价格(元/百万 token)'), { target: { value: '8' } })
+    fireEvent.change(dialog.getByLabelText('低谷折扣率(0-1,留空 = 保持现值;1 = 取消峰谷)'), { target: { value: '0.5' } })
+    fireEvent.click(dialog.getByRole('button', { name: '保存' }))
+    expect(mockRequest).toHaveBeenCalledWith(
+      '/api/admin/models/1',
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({ name: 'deepseek-chat', input_price_per_1m: 2, output_price_per_1m: 8, offpeak_discount: 0.5 }),
+      }),
+    )
+  })
+
+  it('模型表格价格列:有低谷折扣时显示谷 N折', async () => {
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/admin/models') {
+        return {
+          models: [
+            { id: 1, name: 'deepseek-chat', display_name: 'DeepSeek Chat', default_params: '{}', input_price_per_1m: 2, output_price_per_1m: 8, offpeak_discount: 0.5 },
+            { id: 2, name: 'plain-model', display_name: 'Plain', default_params: '{}', input_price_per_1m: 1, output_price_per_1m: 3, offpeak_discount: null },
+          ],
+        }
+      }
+      return baseImpl(path, init)
+    })
+    render(<Gateway />)
+    expect(await screen.findByText(/谷 5折/)).toBeInTheDocument()
+    // 无峰谷的模型不显示谷折扣
+    const cells = screen.getAllByRole('cell')
+    expect(cells.some((c) => c.textContent?.includes('谷'))).toBe(true)
+  })
