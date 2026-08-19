@@ -536,11 +536,15 @@ func (a *AdminAPI) usage(c *gin.Context) {
 		}
 	}
 	group := c.DefaultQuery("group", "day")
-	if group != "day" && group != "model" && group != "user" {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "group 必须是 day|model|user")
+	if group != "day" && group != "week" && group != "month" && group != "model" && group != "user" {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "group 必须是 day|week|month|model|user")
 		return
 	}
-	rows, err := serverstore.UsageAggregate(a.DB, from, to, group)
+	var opts []serverstore.UsageAggregateOption
+	if username := c.Query("username"); username != "" {
+		opts = append(opts, serverstore.WithUsername(username))
+	}
+	rows, err := serverstore.UsageAggregate(a.DB, from, to, group, opts...)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "统计失败")
 		return

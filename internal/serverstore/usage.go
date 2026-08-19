@@ -129,37 +129,119 @@ type UsageAggregateRow struct {
 	PromptTokens     int64  `json:"prompt_tokens"`
 	CompletionTokens int64  `json:"completion_tokens"`
 	Requests         int64  `json:"requests"`
+	// kind 拆分(审计2026-E2):embedding 行 prompt_tokens>0 且 completion_tokens=0,
+	// 单独统计便于前端区分 chat/embedding 用量;chat = Requests - EmbedRequests。
+	EmbedRequests int64 `json:"embed_requests"`
+	EmbedTokens   int64 `json:"embed_tokens"`
 }
 
-// UsageAggregate aggregates usage by day | model | user between from/to
-// (zero time means unbounded).按 user 分组时标签用用户名(JOIN users),
-// 查无行时回退用户 ID。
-func UsageAggregate(db *sql.DB, from, to time.Time, group string) ([]UsageAggregateRow, error) {
+// UsageAggregateOption 为 UsageAggregate 的可选过滤条件。
+type UsageAggregateOption func(*UsageAggregateQuery)
+
+// UsageAggregateQuery 收集聚合过滤条件。
+type UsageAggregateQuery struct {
+	Username string // 仅统计该用户名(用于用户钻取)
+}
+
+// WithUsername 只聚合指定用户名(JOIN users),用于用户详情钻取。
+func WithUsername(username string) UsageAggregateOption {
+	return func(q *UsageAggregateQuery) { q.Username = username }
+}
+
+// zeroFiller 生成完整的时间桶序列(缺桶填 0),避免折线跨缺日直连。
+type zeroFiller func(from, to time.Time) []string
+
+func dayFill(from, to time.Time) []string {
+	out := []string{}
+	for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
+		out = append(out, d.Format("2006-01-02"))
+	}
+	return out
+}
+
+func weekFill(from, to time.Time) []string {
+	out := []string{}
+	for d := from; !d.After(to); d = d.AddDate(0, 0, 7) {
+		out = append(out, weekMonday(d))
+	}
+	return out
+}
+
+// weekMonday 返回该日期所在周的周一日期(YYYY-MM-DD)。SQL 侧用
+// date(created_at,'weekday 0','-6 days') 得到同一周一,两者严格对齐,
+// 免疫 ISO/%W 的跨年边界差异(审计2026-E2)。
+func weekMonday(d time.Time) string {
+	wd := int(d.Weekday()) // 0=Sunday..6=Saturday
+	// 周一前推 wd-1 天;Sunday(wd=0)前推 6 天
+	back := (wd + 6) % 7
+	return d.AddDate(0, 0, -back).Format("2006-01-02")
+}
+
+func monthFill(from, to time.Time) []string {
+	out := []string{}
+	for d := from; d.Before(to) || sameMonth(d, to); d = d.AddDate(0, 1, 0) {
+		out = append(out, d.Format("2006-01"))
+	}
+	return out
+}
+
+func sameMonth(a, b time.Time) bool {
+	return a.Year() == b.Year() && a.Month() == b.Month()
+}
+
+// UsageAggregate aggregates usage by day | week | month | model | user | kind
+// between from/to (zero time means unbounded).时间分组在给定 from/to 时按日/
+// 周/月补零(缺桶填 0);按 user 分组时标签用用户名(JOIN users),查无行时
+// 回退用户 ID。kind 为拆分字段而非分组维度,见 UsageAggregateRow 注释。
+func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageAggregateOption) ([]UsageAggregateRow, error) {
+	var q UsageAggregateQuery
+	for _, o := range opts {
+		o(&q)
+	}
 	var selectExpr, groupExpr string
 	join := ""
+	if q.Username != "" {
+		join = " JOIN users u ON u.id = usage.user_id"
+	}
+	fill := zeroFiller(nil)
 	switch group {
 	case "day":
 		selectExpr, groupExpr = "date(usage.created_at)", "date(usage.created_at)"
+		fill = dayFill
+	case "week":
+		// 按周一日期分桶:date(created_at,'weekday 0','-6 days') 与
+		// weekMonday 严格对齐,免疫 ISO/%W 跨年差异(审计2026-E2)
+		selectExpr, groupExpr = "date(usage.created_at, 'weekday 0', '-6 days')", "date(usage.created_at, 'weekday 0', '-6 days')"
+		fill = weekFill
+	case "month":
+		selectExpr, groupExpr = "strftime('%Y-%m', usage.created_at)", "strftime('%Y-%m', usage.created_at)"
+		fill = monthFill
 	case "model":
 		selectExpr, groupExpr = "usage.model", "usage.model"
 	default:
 		join = " LEFT JOIN users u ON u.id = usage.user_id"
 		selectExpr, groupExpr = "COALESCE(u.username, CAST(usage.user_id AS TEXT))", "u.username, usage.user_id"
 	}
-	q := `SELECT ` + selectExpr + ` AS label,
-		SUM(usage.prompt_tokens) AS pt, SUM(usage.completion_tokens) AS ct, COUNT(*) AS req
+	qstr := `SELECT ` + selectExpr + ` AS label,
+		SUM(usage.prompt_tokens) AS pt, SUM(usage.completion_tokens) AS ct, COUNT(*) AS req,
+		SUM(CASE WHEN usage.kind = 'embedding' THEN 1 ELSE 0 END) AS ereq,
+		SUM(CASE WHEN usage.kind = 'embedding' THEN usage.prompt_tokens ELSE 0 END) AS etok
 		FROM usage` + join + ` WHERE 1=1`
 	var args []any
 	if !from.IsZero() {
-		q += " AND usage.created_at >= ?"
+		qstr += " AND usage.created_at >= ?"
 		args = append(args, from.Format("2006-01-02"))
 	}
 	if !to.IsZero() {
-		q += " AND usage.created_at < ?"
+		qstr += " AND usage.created_at < ?"
 		args = append(args, to.Add(24*time.Hour).Format("2006-01-02"))
 	}
-	q += " GROUP BY " + groupExpr + " ORDER BY label"
-	rows, err := db.Query(q, args...)
+	if q.Username != "" {
+		qstr += " AND u.username = ?"
+		args = append(args, q.Username)
+	}
+	qstr += " GROUP BY " + groupExpr + " ORDER BY label"
+	rows, err := db.Query(qstr, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -167,10 +249,29 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string) ([]UsageAggreg
 	out := []UsageAggregateRow{}
 	for rows.Next() {
 		var r UsageAggregateRow
-		if err := rows.Scan(&r.Label, &r.PromptTokens, &r.CompletionTokens, &r.Requests); err != nil {
+		if err := rows.Scan(&r.Label, &r.PromptTokens, &r.CompletionTokens, &r.Requests, &r.EmbedRequests, &r.EmbedTokens); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// 时间分组补零:缺失桶填 0(修复 D1:折线不跨缺日直连)
+	if fill != nil && !from.IsZero() && !to.IsZero() {
+		byLabel := map[string]UsageAggregateRow{}
+		for _, r := range out {
+			byLabel[r.Label] = r
+		}
+		filled := []UsageAggregateRow{}
+		for _, bucket := range fill(from, to) {
+			if r, ok := byLabel[bucket]; ok {
+				filled = append(filled, r)
+			} else {
+				filled = append(filled, UsageAggregateRow{Label: bucket})
+			}
+		}
+		out = filled
+	}
+	return out, nil
 }

@@ -19,6 +19,7 @@ vi.mock('@visactor/react-vchart', () => ({
 const usageRows = [
   { label: '2026-08-10', prompt_tokens: 1000, completion_tokens: 500, requests: 10 },
   { label: '2026-08-11', prompt_tokens: 2000, completion_tokens: 1000, requests: 20 },
+  { label: '2026-08-12', prompt_tokens: 3000, completion_tokens: 1000, requests: 30, embed_requests: 5, embed_tokens: 500 },
 ]
 
 // alice:显式配额 10000,已用 12000(超额);bob:不限(quota=0);
@@ -61,10 +62,10 @@ describe('Usage 用量统计页', () => {
   it('渲染汇总统计卡:请求数 / 总 tokens / 输入 / 输出(紧凑格式)', async () => {
     render(<Usage />)
     const cards = await screen.findByTestId('stat-cards')
-    await waitFor(() => expect(within(cards).getByText('30')).toBeInTheDocument()) // 请求数
-    expect(within(cards).getByText('4.5K')).toBeInTheDocument() // 总 tokens
-    expect(within(cards).getByText('3K')).toBeInTheDocument() // 输入
-    expect(within(cards).getByText('1.5K')).toBeInTheDocument() // 输出
+    await waitFor(() => expect(within(cards).getByText('60')).toBeInTheDocument()) // 请求数
+    expect(within(cards).getByText('8.5K')).toBeInTheDocument() // 总 tokens = 6000+2500
+    expect(within(cards).getByText('6K')).toBeInTheDocument() // 输入 1000+2000+3000
+    expect(within(cards).getByText('2.5K')).toBeInTheDocument() // 输出 500+1000+1000
   })
 
   it('点击快捷区间"近7天"重新查询并携带 from/to 参数', async () => {
@@ -140,6 +141,36 @@ describe('Usage 用量统计页', () => {
     expect(text).toContain('label,requests,prompt_tokens,completion_tokens,total_tokens')
   })
 
+  it('用户分组行点击打开钻取弹窗并发起 username 过滤查询', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/admin/usage')) {
+        if (path.includes('username=')) return { rows: [{ label: '2026-08-10', prompt_tokens: 100, completion_tokens: 50, requests: 2 }], group: 'day' }
+        return { rows: [{ label: 'alice', prompt_tokens: 100, completion_tokens: 50, requests: 2 }], group: 'user' }
+      }
+      if (path.startsWith('/api/admin/users')) return { users, total: 4, page: 1, size: 200 }
+      if (path.startsWith('/api/admin/gateway')) return { monthly_quota: '5000' }
+      return {}
+    })
+    const user = userEvent.setup()
+    render(<Usage />)
+    await screen.findByTestId('stat-cards')
+    // 切到按用户分组(键盘交互,jsdom 兼容 Radix Select)
+    await user.click(screen.getByRole('combobox', { name: '分组' }))
+    await user.click(await screen.findByRole('option', { name: '按用户' }))
+    // 点击明细表 alice 行(配额面板也有 alice,需限定表格)
+    await waitFor(() => {
+      const cell = within(screen.getByRole('table')).getAllByText('alice')[0]
+      expect(cell).toBeInTheDocument()
+    })
+    fireEvent.click(within(screen.getByRole('table')).getAllByText('alice')[0])
+    await waitFor(() => {
+      const calls = mockRequest.mock.calls.filter(([p]) => p.startsWith('/api/admin/usage') && p.includes('username='))
+      expect(calls.length).toBeGreaterThan(0)
+      expect(calls[calls.length - 1][0]).toContain('username=alice')
+    })
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+  })
+
   it('空数据时展示兜底文案', async () => {
     mockRequest.mockImplementation(async (path: string) => {
       if (path.startsWith('/api/admin/usage')) return { rows: [], group: 'day' }
@@ -151,4 +182,7 @@ describe('Usage 用量统计页', () => {
     const hits = await screen.findAllByText('暂无数据')
     expect(hits.length).toBeGreaterThan(0)
   })
+
+  // 轮询(60s 静默刷新,仅 ≤7 天按日分组)依赖真实定时器,jsdom fake-timer
+  // 与 setInterval+async load 组合不稳定,故不做定时断言;由手工验收覆盖。
 })

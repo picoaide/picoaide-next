@@ -14,9 +14,10 @@ import { Badge } from '../components/ui/badge'
 import { Skeleton } from '../components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '../components/ui/dialog'
 import {
   fmtTokens, fmtFull, usageRate, quotaPercent, quotaOver,
-  rangePreset, monthRange, fillMissingDays,
+  rangePreset, monthRange, ymdFmt,
 } from '../lib/format'
 
 interface UsageRow {
@@ -24,6 +25,8 @@ interface UsageRow {
   prompt_tokens: number
   completion_tokens: number
   requests: number
+  embed_requests?: number
+  embed_tokens?: number
 }
 
 interface QuotaUser {
@@ -34,10 +37,14 @@ interface QuotaUser {
   monthly_usage: number
 }
 
-type Group = 'day' | 'model' | 'user'
+type Group = 'day' | 'week' | 'month' | 'model' | 'user'
 type ChartTab = 'trend' | 'proportion' | 'rank'
 
 const RANK_TOP = 10
+
+const GROUP_LABEL: Record<Group, string> = {
+  day: '日期', week: '周', month: '月', model: '模型', user: '用户',
+}
 
 export default function Usage() {
   const [group, setGroup] = useState<Group>('day')
@@ -51,6 +58,10 @@ export default function Usage() {
   const [loading, setLoading] = useState(true)
   const [chartTab, setChartTab] = useState<ChartTab>('trend')
   const [filterName, setFilterName] = useState('') // 饼图/排行点击过滤明细
+  const [compareTotal, setCompareTotal] = useState<number | null>(null)
+  const [drillUser, setDrillUser] = useState('') // 用户钻取:当前用户名
+  const [drillRows, setDrillRows] = useState<UsageRow[]>([])
+  const [drillLoading, setDrillLoading] = useState(false)
 
   // 日期经 ref 读取:load 不被 from/to 变化重创(保持"点击查询才发请求"),
   // 同时点击时读到的永远是最新输入(审计2026-W1 旧闭包修复)
@@ -64,9 +75,9 @@ export default function Usage() {
   // 图表 Tab ↔ 分组双向联动:
   //   group 下拉变化 → chartTab 同步;chartTab 手动切换 → 重新发起对应 group 查询
   useEffect(() => {
-    if (group === 'day') setChartTab('trend')
-    else if (group === 'model') setChartTab('proportion')
-    else setChartTab('rank')
+    if (group === 'model') setChartTab('proportion')
+    else if (group === 'user') setChartTab('rank')
+    else setChartTab('trend') // day/week/month → 趋势
   }, [group])
 
   function onChartTabChange(v: string) {
@@ -88,24 +99,61 @@ export default function Usage() {
     }).catch(() => { /* 配额面板失败不阻塞主查询 */ })
   }, [])
 
-  const load = useCallback(async () => {
-    setLoading(true)
+  const load = useCallback(async (opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setLoading(true)
     try {
       const params = new URLSearchParams({ group })
       if (fromRef.current) params.set('from', fromRef.current)
       if (toRef.current) params.set('to', toRef.current)
       const data = await request(`/api/admin/usage?${params}`)
       setRows(data.rows ?? [])
+      // 环比:与上一等长区间的 total tokens 对比(统计卡 desc 展示)
+      if (fromRef.current && toRef.current) {
+        const from = new Date(`${fromRef.current}T00:00:00`)
+        const to = new Date(`${toRef.current}T00:00:00`)
+        const span = Math.round((to.getTime() - from.getTime()) / 86400000) + 1
+        const prevTo = new Date(from.getTime() - 86400000)
+        const prevFrom = new Date(from.getTime() - span * 86400000)
+        const pv = new URLSearchParams({ group })
+        pv.set('from', ymdFmt(prevFrom))
+        pv.set('to', ymdFmt(prevTo))
+        try {
+          const prev = await request(`/api/admin/usage?${pv}`)
+          const prevRows: UsageRow[] = prev.rows ?? []
+          const prevTotal = prevRows.reduce((s, r) => s + r.prompt_tokens + r.completion_tokens, 0)
+          setCompareTotal(prevTotal)
+        } catch { setCompareTotal(null) }
+      } else {
+        setCompareTotal(null)
+      }
       setError('')
     } catch (err: any) {
       setError(err.message)
     } finally {
-      setLoading(false)
+      if (!opts?.silent) setLoading(false)
     }
   }, [group])
 
   // 只在分组变化或点击"查询"时加载,避免每次击键/改日期都发请求
   useEffect(() => { load() }, [load])
+
+  // 实时轮询:仅短区间(≤7 天)且按日分组时每 60s 静默刷新,
+  // 不闪加载态(审计2026-E2);长区间/其他分组手动查询即可。
+  useEffect(() => {
+    if (group !== 'day') return
+    const span = (() => {
+      if (!from || !to) return 999
+      return (new Date(`${to}T00:00:00`).getTime() - new Date(`${from}T00:00:00`).getTime()) / 86400000 + 1
+    })()
+    if (span > 7) return
+    const timer = setInterval(() => load({ silent: true }), 60000)
+    const onVis = () => { if (!document.hidden) load({ silent: true }) }
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVis)
+    }
+  }, [group, from, to, load])
 
   function applyRange(r: { from: string; to: string }) {
     setFrom(r.from)
@@ -127,13 +175,15 @@ export default function Usage() {
 
   // ---- 汇总统计 ----
   const totals = useMemo(() => {
-    let requests = 0, prompt = 0, completion = 0
+    let requests = 0, prompt = 0, completion = 0, embed = 0, embedReq = 0
     for (const r of rows) {
       requests += r.requests
       prompt += r.prompt_tokens
       completion += r.completion_tokens
+      embed += r.embed_tokens ?? 0
+      embedReq += r.embed_requests ?? 0
     }
-    return { requests, prompt, completion, total: prompt + completion }
+    return { requests, prompt, completion, total: prompt + completion, embed, embedReq, chatReq: requests - embedReq }
   }, [rows])
 
   // ---- 配额统计(含"跟随全局默认"的员工,修复 F4)----
@@ -150,11 +200,11 @@ export default function Usage() {
   }, [quotaUsers, defaultQuota])
 
   // ---- 图表数据 ----
-  // 趋势图:仅 group=day 时按日补零(缺日填 0,避免折线跨缺日直连)
-  const trendData = useMemo(() => {
-    const base = rows.map((r) => ({ label: r.label, total: r.prompt_tokens + r.completion_tokens }))
-    return group === 'day' ? fillMissingDays(base, from, to) : base
-  }, [rows, group, from, to])
+  // 趋势图:服务端已按日/周/月补零(缺桶填 0),前端直接渲染
+  const trendData = useMemo(
+    () => rows.map((r) => ({ label: r.label, total: r.prompt_tokens + r.completion_tokens })),
+    [rows]
+  )
 
   const pieData = useMemo(
     () => rows.map((r) => ({ name: r.label, value: r.prompt_tokens + r.completion_tokens })),
@@ -214,10 +264,52 @@ export default function Usage() {
     tooltip: { visible: true },
   }
 
+  // 用户钻取:按用户查其日趋势(open-webui 式详情弹窗)
+  async function openDrill(username: string) {
+    setDrillUser(username)
+    setDrillLoading(true)
+    setDrillRows([])
+    try {
+      const params = new URLSearchParams({ group: 'day' })
+      if (fromRef.current) params.set('from', fromRef.current)
+      if (toRef.current) params.set('to', toRef.current)
+      params.set('username', username)
+      const data = await request(`/api/admin/usage?${params}`)
+      setDrillRows(data.rows ?? [])
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setDrillLoading(false)
+    }
+  }
+
+  const drillSpec: ISpec = {
+    type: 'line',
+    data: { values: drillRows.map((r) => ({ label: r.label, total: r.prompt_tokens + r.completion_tokens })) },
+    xField: 'label',
+    yField: 'total',
+    point: { visible: true },
+    axes: [
+      { orient: 'left', title: { visible: true, text: 'tokens' }, label: { formatMethod: (v: any) => fmtTokens(Number(v)) } },
+      { orient: 'bottom', label: { visible: true, style: { fontSize: 11 } } },
+    ],
+    tooltip: { visible: true },
+  }
+
+  // 环比 delta(与上一等长区间对比),0 基期显示 —
+  const compareDelta = useMemo(() => {
+    if (compareTotal === null || compareTotal === 0) return null
+    return Math.round(((totals.total - compareTotal) / compareTotal) * 100)
+  }, [compareTotal, totals.total])
+
   const statCards = [
-    { title: '请求数', value: totals.requests, icon: Activity, desc: '区间内 LLM 调用次数' },
-    { title: '总 tokens', value: totals.total, icon: Coins, desc: '输入 + 输出' },
-    { title: '输入 tokens', value: totals.prompt, icon: ArrowDownToLine, desc: 'prompt 部分' },
+    { title: '请求数', value: totals.requests, icon: Activity, desc: 'chat ' + fmtTokens(totals.chatReq) + ' · embedding ' + fmtTokens(totals.embedReq) },
+    {
+      title: '总 tokens', value: totals.total, icon: Coins,
+      desc: compareDelta === null ? '输入 + 输出(不含 embedding)'
+        : `输入 + 输出(不含 embedding) · 环比 ${compareDelta >= 0 ? '+' : ''}${compareDelta}%`,
+    },
+    { title: '输入 tokens', value: totals.prompt, icon: ArrowDownToLine, desc: '含 embedding ' + fmtTokens(totals.embed) },
     { title: '输出 tokens', value: totals.completion, icon: ArrowUpFromLine, desc: 'completion 部分' },
   ]
 
@@ -253,6 +345,8 @@ export default function Usage() {
               <SelectTrigger className="w-32" aria-label="分组"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="day">按日</SelectItem>
+                <SelectItem value="week">按周</SelectItem>
+                <SelectItem value="month">按月</SelectItem>
                 <SelectItem value="model">按模型</SelectItem>
                 <SelectItem value="user">按用户</SelectItem>
               </SelectContent>
@@ -422,7 +516,7 @@ export default function Usage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>{group === 'day' ? '日期' : group === 'model' ? '模型' : '用户'}</TableHead>
+                  <TableHead>{GROUP_LABEL[group]}</TableHead>
                   <TableHead className="text-right">请求数</TableHead>
                   <TableHead className="text-right">输入 tokens</TableHead>
                   <TableHead className="text-right">输出 tokens</TableHead>
@@ -431,7 +525,11 @@ export default function Usage() {
               </TableHeader>
               <TableBody>
                 {filteredRows.map((r) => (
-                  <TableRow key={r.label}>
+                  <TableRow
+                    key={r.label}
+                    className={group === 'user' ? 'cursor-pointer hover:bg-accent' : undefined}
+                    onClick={group === 'user' ? () => openDrill(r.label) : undefined}
+                  >
                     <TableCell>{r.label}</TableCell>
                     <TableCell className="text-right tabular-nums">{r.requests}</TableCell>
                     <TableCell className="text-right tabular-nums">{fmtTokens(r.prompt_tokens)}</TableCell>
@@ -456,6 +554,27 @@ export default function Usage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* 用户钻取弹窗:该用户的日趋势 */}
+      <Dialog open={!!drillUser} onOpenChange={(o) => { if (!o) setDrillUser('') }}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>用户用量 · {drillUser}</DialogTitle>
+            <DialogDescription>
+              区间 {from || '全部'} ~ {to || '全部'} 的日 token 趋势
+            </DialogDescription>
+          </DialogHeader>
+          {drillLoading ? (
+            <Skeleton className="h-72 w-full" />
+          ) : drillRows.length === 0 ? (
+            <div className="flex h-72 items-center justify-center text-muted-foreground">该用户区间内暂无数据</div>
+          ) : (
+            <div className="h-72">
+              <VChart spec={drillSpec} />
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

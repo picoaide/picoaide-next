@@ -296,3 +296,135 @@ func TestUsageAggregateUserJoinsUsername(t *testing.T) {
 		t.Fatalf("deleted user still labelled by username: %+v", rows)
 	}
 }
+
+// TestUsageAggregateZeroFill: group=day with from/to 区间内缺日填 0,
+// 保证折线不跨缺日直连。
+func TestUsageAggregateZeroFill(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+
+	for _, ts := range []string{"2026-08-10 09:00:00", "2026-08-12 09:00:00"} {
+		id, _ := RecordUsage(db, uid, "m", 10, 5)
+		setCreatedAt(t, db, id, ts)
+	}
+	from := time.Date(2026, 8, 10, 0, 0, 0, 0, time.Local)
+	to := time.Date(2026, 8, 12, 0, 0, 0, 0, time.Local)
+	rows, err := UsageAggregate(db, from, to, "day")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 { // 8-10, 8-11(填0), 8-12
+		t.Fatalf("zero-fill rows = %d, want 3 (8-10/8-11/8-12)", len(rows))
+	}
+	wantLabels := []string{"2026-08-10", "2026-08-11", "2026-08-12"}
+	for i, w := range wantLabels {
+		if rows[i].Label != w {
+			t.Fatalf("row[%d].Label = %q, want %q", i, rows[i].Label, w)
+		}
+	}
+	if rows[1].Requests != 0 {
+		t.Fatalf("gap day requests = %d, want 0", rows[1].Requests)
+	}
+	if rows[0].Requests != 1 || rows[2].Requests != 1 {
+		t.Fatalf("non-gap requests wrong: %+v", rows)
+	}
+}
+
+// TestUsageAggregateWeekMonth: group=week/month 正确聚合并按期补齐。
+func TestUsageAggregateWeekMonth(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+
+	// 2026-08-10(周一)与 2026-08-17(下周一)分属两个周桶
+	for _, ts := range []string{"2026-08-10 09:00:00", "2026-08-17 09:00:00", "2026-08-18 09:00:00"} {
+		id, _ := RecordUsage(db, uid, "m", 10, 5)
+		setCreatedAt(t, db, id, ts)
+	}
+	from := time.Date(2026, 8, 10, 0, 0, 0, 0, time.Local)
+	to := time.Date(2026, 8, 20, 0, 0, 0, 0, time.Local)
+
+	rows, err := UsageAggregate(db, from, to, "week")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 { // 周桶 2026-08-10(8-10), 2026-08-17(8-17+8-18)
+		t.Fatalf("week rows = %d, want 2", len(rows))
+	}
+	if rows[0].Label != "2026-08-10" || rows[1].Label != "2026-08-17" {
+		t.Fatalf("week labels wrong: %+v", rows)
+	}
+	if rows[0].Requests != 1 || rows[1].Requests != 2 {
+		t.Fatalf("week aggregation wrong: %+v", rows)
+	}
+
+	fromM := time.Date(2026, 7, 1, 0, 0, 0, 0, time.Local)
+	toM := time.Date(2026, 9, 15, 0, 0, 0, 0, time.Local)
+	rows, err = UsageAggregate(db, fromM, toM, "month")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 7/8/9 三个月,7 月填 0
+	if len(rows) != 3 {
+		t.Fatalf("month rows = %d, want 3", len(rows))
+	}
+	if rows[0].Label != "2026-07" || rows[0].Requests != 0 {
+		t.Fatalf("july should be zero-filled: %+v", rows[0])
+	}
+	if rows[1].Label != "2026-08" || rows[1].Requests != 3 {
+		t.Fatalf("august rows = %+v", rows[1])
+	}
+}
+
+// TestUsageAggregateKindSplit: embedding 行单独计入 embed_requests/embed_tokens。
+func TestUsageAggregateKindSplit(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+
+	if _, err := RecordUsage(db, uid, "m", 10, 5); err != nil { // chat
+		t.Fatal(err)
+	}
+	if _, err := RecordUsageKind(db, uid, "embed-m", 30, 0, "embedding"); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := UsageAggregate(db, time.Time{}, time.Time{}, "day")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d", len(rows))
+	}
+	r := rows[0]
+	if r.Requests != 2 || r.EmbedRequests != 1 {
+		t.Fatalf("requests=%d embed_requests=%d, want 2/1", r.Requests, r.EmbedRequests)
+	}
+	if r.EmbedTokens != 30 || r.PromptTokens != 40 {
+		t.Fatalf("embed_tokens=%d prompt_tokens=%d, want 30/40", r.EmbedTokens, r.PromptTokens)
+	}
+}
+
+// TestUsageAggregateUserFilter: username 过滤仅返回该用户。
+func TestUsageAggregateUserFilter(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	a, err := CreateUser(db, &User{Username: "alice", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := CreateUser(db, &User{Username: "bob", Source: "local", Status: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = RecordUsage(db, a, "m", 10, 5)
+	_, _ = RecordUsage(db, b, "m", 99, 1)
+
+	rows, err := UsageAggregate(db, time.Time{}, time.Time{}, "day", WithUsername("alice"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].PromptTokens != 10 {
+		t.Fatalf("filtered rows = %+v, want alice 10", rows)
+	}
+}

@@ -15,6 +15,14 @@ if (!(globalThis as any).ResizeObserver) {
   ;(globalThis as any).ResizeObserver = RO
 }
 
+// Radix Select 依赖 pointer capture;jsdom 未实现(审计2026-E2)
+if (typeof Element !== 'undefined' && !Element.prototype.hasPointerCapture) {
+  Element.prototype.hasPointerCapture = () => false
+  Element.prototype.setPointerCapture = () => {}
+  Element.prototype.releasePointerCapture = () => {}
+  Element.prototype.scrollIntoView = () => {}
+}
+
 // 页面级测试统一 mock 网络层(src/api.ts request):接口行为已由 Go 侧
 // 测试与 E2E 覆盖,组件测试只验证 UI 渲染与交互驱动。
 vi.mock('../api', () => ({

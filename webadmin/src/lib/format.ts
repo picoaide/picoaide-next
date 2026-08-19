@@ -35,6 +35,9 @@ export function ymd(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
+// ymdFmt 是 ymd 的别名(供 Usage 环比区间计算调用)
+export const ymdFmt = ymd
+
 // 快捷区间:相对 today 的起止日期(含 today)
 export function rangePreset(days: number): { from: string; to: string } {
   const now = new Date()
