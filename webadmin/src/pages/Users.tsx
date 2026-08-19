@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { request } from '../api'
-import { fmtTokens, usageRate } from '../lib/format'
+import { fmtTokens, fmtMoney, usageRate, moneyRate } from '../lib/format'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
@@ -18,6 +18,8 @@ interface User {
   groups?: string[]
   quota_tokens?: number | null // null = follow global default, 0 = unlimited, >0 = monthly cap
   monthly_usage?: number // tokens used this calendar month
+  quota_money?: number | null // 0022:null = follow global default, 0 = unlimited, >0 = monthly yuan cap
+  monthly_cost?: number // 0022:yuan spent this calendar month
 }
 
 interface Department {
@@ -50,6 +52,13 @@ function quotaLabel(q: number | null | undefined): string {
   if (q === null || q === undefined) return '跟随默认'
   if (q === 0) return '不限'
   return `${fmtTokens(q)} / 月`
+}
+
+// moneyQuotaLabel renders the effective monthly money quota (yuan, 0022).
+function moneyQuotaLabel(q: number | null | undefined): string {
+  if (q === null || q === undefined) return '跟随默认'
+  if (q === 0) return '不限'
+  return `¥${fmtMoney(q)} / 月`
 }
 
 // 部门树选项(缩进层级显示):平铺 → "研发部"、"研发部 / 前端组"
@@ -194,20 +203,29 @@ export default function Users() {
     }
   }
 
-  // ---- 员工流量配额(跟随全局 / 不限 / 按月限额) ----
+  // ---- 员工流量配额(token + 金额,跟随全局 / 不限 / 按月限额) ----
+  const [quotaMoneyInput, setQuotaMoneyInput] = useState('')
   function openQuota(u: User) {
     setQuotaUser(u)
     setQuotaInput(u.quota_tokens === null || u.quota_tokens === undefined ? '' : String(u.quota_tokens))
+    setQuotaMoneyInput(u.quota_money === null || u.quota_money === undefined ? '' : String(u.quota_money))
   }
 
   async function saveQuota() {
     if (!quotaUser) return
     const v = quotaInput.trim()
+    const mv = quotaMoneyInput.trim()
     try {
-      // 空 = 跟随全局默认(清空覆盖);"0" = 不限;正数 = 月配额
+      const body: Record<string, any> = {}
+      // token:空 = 跟随全局默认(清空覆盖);"0" = 不限;正数 = 月配额
+      if (v === '') body.quota_clear = true
+      else body.quota_tokens = Number(v)
+      // 金额(0022):空 = 跟随全局默认;0 = 不限;正数 = 月金额上限
+      if (mv === '') body.quota_money_clear = true
+      else body.quota_money = Number(mv)
       await request(`/api/admin/users/${quotaUser.id}`, {
         method: 'PUT',
-        body: JSON.stringify(v === '' ? { quota_clear: true } : { quota_tokens: Number(v) }),
+        body: JSON.stringify(body),
       })
       setQuotaUser(null)
       load(page, q)
@@ -269,12 +287,15 @@ export default function Users() {
                       <span className="font-medium">{fmtTokens(u.monthly_usage ?? 0)}</span>
                       <span className="text-muted-foreground"> / {quotaLabel(u.quota_tokens)}</span>
                     </div>
-                    {u.quota_tokens && u.quota_tokens > 0 && (
+                    <div className="text-xs text-muted-foreground">
+                      ¥{fmtMoney(u.monthly_cost ?? 0)} / {moneyQuotaLabel(u.quota_money)}
+                    </div>
+                    {((u.quota_tokens && u.quota_tokens > 0) || (u.quota_money && u.quota_money > 0)) && (
                       <Badge
-                        variant={usageRate(u.monthly_usage ?? 0, u.quota_tokens) >= 90 ? 'destructive' : 'secondary'}
+                        variant={Math.max(usageRate(u.monthly_usage ?? 0, u.quota_tokens), moneyRate(u.monthly_cost ?? 0, u.quota_money)) >= 90 ? 'destructive' : 'secondary'}
                         className="h-4 px-1.5 text-[10px]"
                       >
-                        {usageRate(u.monthly_usage ?? 0, u.quota_tokens)}%
+                        {Math.max(usageRate(u.monthly_usage ?? 0, u.quota_tokens), moneyRate(u.monthly_cost ?? 0, u.quota_money))}%
                       </Badge>
                     )}
                   </div>
@@ -348,19 +369,21 @@ export default function Users() {
         </DialogContent>
       </Dialog>
 
-      {/* 员工流量配额(跟随默认 / 不限 / 按月限额) */}
+      {/* 员工流量配额(token + 金额双维度) */}
       <Dialog open={!!quotaUser} onOpenChange={(open) => { if (!open) setQuotaUser(null) }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>流量配额 · {quotaUser?.username}</DialogTitle>
             <DialogDescription>
-              本月已用 {fmtTokens(quotaUser?.monthly_usage ?? 0)} tokens。配额按月统计,每月 1 日重置。
+              本月已用 {fmtTokens(quotaUser?.monthly_usage ?? 0)} tokens · ¥{fmtMoney(quotaUser?.monthly_cost ?? 0)}。
+              配额按月统计,每月 1 日重置。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-1">
-              <Label>月度配额(token 数)</Label>
+              <Label htmlFor="quota-tokens">月度 token 配额</Label>
               <Input
+                id="quota-tokens"
                 type="number"
                 min={0}
                 placeholder="留空 = 跟随全局默认;0 = 不限"
@@ -368,8 +391,21 @@ export default function Users() {
                 onChange={(e) => setQuotaInput(e.target.value)}
               />
             </div>
+            <div className="space-y-1">
+              <Label htmlFor="quota-money">月度金额配额(元)</Label>
+              <Input
+                id="quota-money"
+                type="number"
+                min={0}
+                step="0.01"
+                placeholder="留空 = 跟随全局默认;0 = 不限"
+                value={quotaMoneyInput}
+                onChange={(e) => setQuotaMoneyInput(e.target.value)}
+              />
+            </div>
             <p className="text-xs text-muted-foreground">
-              留空:跟随网关「全局设置」中的默认月配额;输入 0:该员工不限流量;输入正数:按月限额。管理员(admin)不受配额限制。
+              留空:跟随网关「全局设置」中的默认配额;输入 0:该员工不限;输入正数:按月限额。
+              金额配额按模型定价折算费用统计,任一维度超限即拦截。管理员(admin)不受配额限制。
             </p>
             <Button className="w-full" onClick={saveQuota}>保存</Button>
           </div>

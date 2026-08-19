@@ -30,6 +30,8 @@ interface Model {
   name: string
   display_name: string
   default_params: string
+  input_price_per_1m?: number | null // 0022:元/百万 token,nil = 未定价
+  output_price_per_1m?: number | null
 }
 
 function formatCaps(defaultParams: string): string {
@@ -54,7 +56,7 @@ export default function Gateway() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [models, setModels] = useState<Model[]>([])
   const [channels, setChannels] = useState<Channel[]>([])
-  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', monthly_quota: '0', allow_private: false, search_endpoint: '', server_base_url: '' })
+  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '60', monthly_quota: '0', monthly_quota_money: '0', allow_private: false, search_endpoint: '', server_base_url: '' })
   const [error, setError] = useState('')
   const [okMsg, setOkMsg] = useState('')
   const [syncMsg, setSyncMsg] = useState('')
@@ -62,7 +64,7 @@ export default function Gateway() {
   const [provDialog, setProvDialog] = useState(false)
   const [provForm, setProvForm] = useState({ name: '', channel: '', base_url: '', api_key: '', models: '' })
   const [modelDialog, setModelDialog] = useState(false)
-  const [modelForm, setModelForm] = useState({ name: '', provider_id: '', display_name: '' })
+  const [modelForm, setModelForm] = useState({ name: '', provider_id: '', display_name: '', input_price_per_1m: '', output_price_per_1m: '' })
 
   const load = useCallback(async () => {
     try {
@@ -130,12 +132,20 @@ export default function Gateway() {
       return
     }
     try {
+      const body: Record<string, any> = {
+        name: modelForm.name,
+        provider_id: Number(modelForm.provider_id),
+        display_name: modelForm.display_name,
+      }
+      // 价格留空 = 未定价(NULL);输入 0 = 定价 0(等价未定价);正数 = 元/百万 token
+      if (modelForm.input_price_per_1m.trim() !== '') body.input_price_per_1m = Number(modelForm.input_price_per_1m)
+      if (modelForm.output_price_per_1m.trim() !== '') body.output_price_per_1m = Number(modelForm.output_price_per_1m)
       await request('/api/admin/models', {
         method: 'POST',
-        body: JSON.stringify({ ...modelForm, provider_id: Number(modelForm.provider_id) }),
+        body: JSON.stringify(body),
       })
       setModelDialog(false)
-      setModelForm({ name: '', provider_id: '', display_name: '' })
+      setModelForm({ name: '', provider_id: '', display_name: '', input_price_per_1m: '', output_price_per_1m: '' })
       load()
     } catch (err: any) {
       setError(err.message)
@@ -156,6 +166,31 @@ export default function Gateway() {
     if (!window.confirm('删除该模型?客户端建议清单将移除。')) return
     try {
       await request(`/api/admin/models/${id}`, { method: 'DELETE' })
+      load()
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
+  // 模型编辑:价格补录/修改(0022 金额计费前提);其余字段留空不覆盖
+  const [editModel, setEditModel] = useState<Model | null>(null)
+  const [editPriceForm, setEditPriceForm] = useState({ input: '', output: '' })
+  function openModelPricing(m: Model) {
+    setEditModel(m)
+    setEditPriceForm({
+      input: m.input_price_per_1m === null || m.input_price_per_1m === undefined ? '' : String(m.input_price_per_1m),
+      output: m.output_price_per_1m === null || m.output_price_per_1m === undefined ? '' : String(m.output_price_per_1m),
+    })
+  }
+  async function saveModelPricing() {
+    if (!editModel) return
+    try {
+      const body: Record<string, any> = { name: editModel.name }
+      // 留空 = 保持现值(服务端对缺省字段不覆盖);输入 0 = 定价 0(计费为 0)
+      if (editPriceForm.input.trim() !== '') body.input_price_per_1m = Number(editPriceForm.input)
+      if (editPriceForm.output.trim() !== '') body.output_price_per_1m = Number(editPriceForm.output)
+      await request(`/api/admin/models/${editModel.id}`, { method: 'PUT', body: JSON.stringify(body) })
+      setEditModel(null)
       load()
     } catch (err: any) {
       setError(err.message)
@@ -210,6 +245,13 @@ export default function Gateway() {
               <Label>每用户默认月配额(token)</Label>
               <Input value={cfg.monthly_quota} onChange={(e) => setCfg({ ...cfg, monthly_quota: e.target.value })} />
               <p className="text-xs text-muted-foreground">0 = 不限;员工默认按月统计,可在用户页单独覆盖</p>
+            </div>
+            <div className="space-y-1">
+              <Label>每用户默认月金额配额(元)</Label>
+              <Input value={cfg.monthly_quota_money} onChange={(e) => setCfg({ ...cfg, monthly_quota_money: e.target.value })} />
+              <p className="text-xs text-muted-foreground">
+                0 = 不限;按模型定价折算费用统计,可在用户页单独覆盖
+              </p>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-4">
@@ -291,20 +333,34 @@ export default function Gateway() {
                 <TableHead>模型名</TableHead>
                 <TableHead>显示名</TableHead>
                 <TableHead>能力</TableHead>
+                <TableHead>价格(元/百万 token)</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {models.map((m) => (
-                <TableRow key={m.id}>
-                  <TableCell className="font-mono">{m.name}</TableCell>
-                  <TableCell>{m.display_name}</TableCell>
-                  <TableCell className="font-mono text-xs text-muted-foreground">{formatCaps(m.default_params)}</TableCell>
-                  <TableCell className="text-right">
-                    <Button size="sm" variant="destructive" onClick={() => deleteModel(m.id)}>删除</Button>
-                  </TableCell>
-                </TableRow>
-              ))}
+              {models.map((m) => {
+                const priced = (m.input_price_per_1m ?? 0) > 0 || (m.output_price_per_1m ?? 0) > 0
+                return (
+                  <TableRow key={m.id}>
+                    <TableCell className="font-mono">{m.name}</TableCell>
+                    <TableCell>{m.display_name}</TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground">{formatCaps(m.default_params)}</TableCell>
+                    <TableCell>
+                      {priced ? (
+                        <span className="font-mono text-xs">
+                          入 {m.input_price_per_1m} / 出 {m.output_price_per_1m}
+                        </span>
+                      ) : (
+                        <Badge variant="outline" className="text-[10px]">未定价</Badge>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-right space-x-2">
+                      <Button size="sm" variant="outline" onClick={() => openModelPricing(m)}>价格</Button>
+                      <Button size="sm" variant="destructive" onClick={() => deleteModel(m.id)}>删除</Button>
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
             </TableBody>
           </Table>
         </CardContent>
@@ -392,7 +448,75 @@ export default function Gateway() {
                 </SelectContent>
               </Select>
             </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label htmlFor="model-price-in">输入价格(元/百万 token)</Label>
+                <Input
+                  id="model-price-in"
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  placeholder="留空 = 未定价"
+                  value={modelForm.input_price_per_1m}
+                  onChange={(e) => setModelForm({ ...modelForm, input_price_per_1m: e.target.value })}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="model-price-out">输出价格(元/百万 token)</Label>
+                <Input
+                  id="model-price-out"
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  placeholder="留空 = 未定价"
+                  value={modelForm.output_price_per_1m}
+                  onChange={(e) => setModelForm({ ...modelForm, output_price_per_1m: e.target.value })}
+                />
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              配置价格后,用量页按 输入token×输入价 + 输出token×输出价 折算费用;未定价模型费用按 0 计。
+            </p>
             <Button className="w-full" onClick={createModel}>新增</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 模型价格编辑(0022) */}
+      <Dialog open={!!editModel} onOpenChange={(open) => { if (!open) setEditModel(null) }}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>模型价格 · {editModel?.name}</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label htmlFor="edit-price-in">输入价格(元/百万 token)</Label>
+                <Input
+                  id="edit-price-in"
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  placeholder="留空 = 保持现值"
+                  value={editPriceForm.input}
+                  onChange={(e) => setEditPriceForm({ ...editPriceForm, input: e.target.value })}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="edit-price-out">输出价格(元/百万 token)</Label>
+                <Input
+                  id="edit-price-out"
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  placeholder="留空 = 保持现值"
+                  value={editPriceForm.output}
+                  onChange={(e) => setEditPriceForm({ ...editPriceForm, output: e.target.value })}
+                />
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              修改价格只影响之后产生的用量费用(历史费用按记录时定价留存)。
+            </p>
+            <Button className="w-full" onClick={saveModelPricing}>保存</Button>
           </div>
         </DialogContent>
       </Dialog>

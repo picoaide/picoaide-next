@@ -59,3 +59,38 @@ describe('Users 用户管理页', () => {
     expect(screen.getByText('—')).toBeInTheDocument()
   })
 })
+
+  it('员工金额配额:打开对话框设置 token+金额并保存', async () => {
+    render(<Users />)
+    await screen.findByText('alice')
+    fireEvent.click(screen.getAllByRole('button', { name: '配额' })[0])
+    const dialog = within(await screen.findByRole('dialog'))
+    expect(dialog.getByText(/流量配额/)).toBeInTheDocument()
+    const tokenInput = dialog.getByLabelText('月度 token 配额')
+    const moneyInput = dialog.getByLabelText('月度金额配额(元)')
+    fireEvent.change(tokenInput, { target: { value: '50000' } })
+    fireEvent.change(moneyInput, { target: { value: '100' } })
+    fireEvent.click(dialog.getByRole('button', { name: '保存' }))
+    expect(mockRequest).toHaveBeenCalledWith(
+      '/api/admin/users/1',
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({ quota_tokens: 50000, quota_money: 100 }),
+      }),
+    )
+  })
+
+  it('员工金额配额:留空清空金额(quota_money_clear)', async () => {
+    render(<Users />)
+    await screen.findByText('alice')
+    fireEvent.click(screen.getAllByRole('button', { name: '配额' })[0])
+    const dialog = within(await screen.findByRole('dialog'))
+    fireEvent.click(dialog.getByRole('button', { name: '保存' }))
+    expect(mockRequest).toHaveBeenCalledWith(
+      '/api/admin/users/1',
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({ quota_clear: true, quota_money_clear: true }),
+      }),
+    )
+  })
