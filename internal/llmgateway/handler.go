@@ -478,10 +478,13 @@ func (a *API) rateLimitPerMinute() int {
 }
 
 // quotaBlocked reports whether the user has exhausted their calendar-month
-// token quota (429 QUOTA_EXCEEDED at the caller). Admins are always exempt;
-// 0 quota means unlimited. Lookup failures degrade open (fail-open), matching
-// the rate-limiter's fail-open behaviour.
+// token or money quota (429 QUOTA_EXCEEDED at the caller). Admins are always
+// exempt; 0 quota means unlimited. Lookup failures degrade open (fail-open),
+// matching the rate-limiter's fail-open behaviour.
 func (a *API) quotaBlocked(user *serverstore.User) (bool, string) {
+	if blocked, msg := a.moneyQuotaBlocked(user); blocked {
+		return true, msg
+	}
 	quota, err := serverstore.EffectiveQuota(a.DB, user)
 	if err != nil {
 		log.Printf("gateway: quota lookup: %v", err)
@@ -497,6 +500,28 @@ func (a *API) quotaBlocked(user *serverstore.User) (bool, string) {
 	}
 	if used >= quota {
 		return true, "本月流量配额已用尽"
+	}
+	return false, ""
+}
+
+// moneyQuotaBlocked reports whether the user has exhausted their
+// calendar-month money quota (yuan, 0022). Fail-open on lookup errors.
+func (a *API) moneyQuotaBlocked(user *serverstore.User) (bool, string) {
+	quota, err := serverstore.EffectiveMoneyQuota(a.DB, user)
+	if err != nil {
+		log.Printf("gateway: money quota lookup: %v", err)
+		return false, ""
+	}
+	if quota <= 0 {
+		return false, ""
+	}
+	used, err := serverstore.UserMonthlyCost(a.DB, user.ID)
+	if err != nil {
+		log.Printf("gateway: money usage lookup: %v", err)
+		return false, ""
+	}
+	if used >= quota {
+		return true, "本月费用配额已用尽"
 	}
 	return false, ""
 }

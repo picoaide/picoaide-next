@@ -818,3 +818,96 @@ func (r *stepReader) Read(p []byte) (int, error) {
 	r.idx++
 	return copy(p, s), nil
 }
+
+// setUserMoneyQuota 设置 alice(用户 1)的金额配额与本月已用金额
+// (直接插 usage.cost 行,模拟已发生的费用)。
+func setUserMoneyQuota(t *testing.T, db *sql.DB, quota float64, admin bool, used float64) {
+	t.Helper()
+	u, err := serverstore.GetUserByID(db, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := quota
+	u.QuotaMoney = &q
+	u.IsAdmin = admin
+	if err := serverstore.UpdateUser(db, u); err != nil {
+		t.Fatal(err)
+	}
+	if used > 0 {
+		if _, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, kind, cost)
+			VALUES (1, 'deepseek-chat', ?, 0, 'chat', ?)`, int64(used*1e6), used); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestQuotaMoneyBlocksOverLimit(t *testing.T) {
+	f := newFakeUpstream(t)
+	r, db, token := newGateway(t, f)
+	setUserMoneyQuota(t, db, 100, false, 100) // used == quota → blocked
+
+	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", w.Code)
+	}
+	var out map[string]any
+	json.Unmarshal(w.Body.Bytes(), &out)
+	if code := out["error"].(map[string]any)["code"]; code != "QUOTA_EXCEEDED" {
+		t.Fatalf("code = %v", code)
+	}
+	if n := f.requests.Load(); n != 0 {
+		t.Fatalf("upstream calls = %d, want 0", n)
+	}
+}
+
+func TestQuotaMoneyUnderLimit(t *testing.T) {
+	f := newFakeUpstream(t)
+	r, db, token := newGateway(t, f)
+	setUserMoneyQuota(t, db, 100, false, 50) // 50 < 100 → passes
+
+	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+}
+
+func TestQuotaMoneyAdminExempt(t *testing.T) {
+	f := newFakeUpstream(t)
+	r, db, token := newGateway(t, f)
+	setUserMoneyQuota(t, db, 1, true, 100000) // admin, tiny quota, huge usage
+
+	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (admin exempt)", w.Code)
+	}
+}
+
+func TestQuotaMoneyGlobalDefault(t *testing.T) {
+	f := newFakeUpstream(t)
+	r, db, token := newGateway(t, f)
+	if err := serverstore.SetSetting(db, serverstore.MonthlyMoneyQuotaSetting, "100"); err != nil {
+		t.Fatal(err)
+	}
+	setUserMoneyQuota(t, db, 0, false, 0) // 个人无值? 这里显式 0 = 不限,先验证默认不拦截
+	w := doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("override unlimited status = %d, want 200", w.Code)
+	}
+	// 无个人覆盖(NULL)→ 走全局默认 100,已用 100 → 拦截
+	u, err := serverstore.GetUserByID(db, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.QuotaMoney = nil
+	if err := serverstore.UpdateUser(db, u); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, kind, cost)
+		VALUES (1, 'deepseek-chat', 0, 0, 'chat', 100)`); err != nil {
+		t.Fatal(err)
+	}
+	w = doPost(t, r, "/v1/chat/completions", `{"model":"deepseek-chat","messages":[]}`, token, nil)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("global default status = %d, want 429", w.Code)
+	}
+}
