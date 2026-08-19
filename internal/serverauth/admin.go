@@ -625,6 +625,11 @@ func (a *AdminAPI) createDepartment(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "部门名称必填")
 		return
 	}
+	// 预算负值先于创建校验,避免创建成功后再失败留下无预算部门
+	if req.BudgetMoney != nil && *req.BudgetMoney < 0 {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "budget_money 不能为负数")
+		return
+	}
 	id, err := serverstore.CreateDepartment(a.DB, strings.TrimSpace(req.Name), req.ParentID, req.LeaderID, req.Description)
 	if err != nil {
 		if errors.Is(err, serverstore.ErrDuplicate) {
@@ -637,6 +642,13 @@ func (a *AdminAPI) createDepartment(c *gin.Context) {
 		}
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 		return
+	}
+	// 消费 budget_money(审计 H4:创建对话框提交的预算此前被静默丢弃)
+	if req.BudgetMoney != nil {
+		if err := serverstore.SetDeptBudget(a.DB, id, *req.BudgetMoney); err != nil {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "保存预算失败")
+			return
+		}
 	}
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "dept_create", req.Name)
 	c.JSON(http.StatusOK, gin.H{"department": gin.H{"id": id, "name": req.Name}})

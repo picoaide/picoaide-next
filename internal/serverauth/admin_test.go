@@ -905,6 +905,71 @@ func TestAdminUsageCost(t *testing.T) {
 	}
 }
 
+// createDepartment 必须消费 budget_money(审计 H4:此前静默丢弃,
+// 新建部门带预算保存后预算不生效)。
+func TestAdminCreateDeptWithBudget(t *testing.T) {
+	r, db := adminRouter(t)
+	defer db.Close()
+	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", w.Code, w.Body.String())
+	}
+	csrf := out["csrf_token"].(string)
+	var sess string
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == sessionCookieName {
+			sess = ck.Value
+		}
+	}
+	hdr := func() map[string]string {
+		return map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
+	}
+	// 创建带预算部门
+	w, out = doJSON(t, r, "POST", "/api/admin/departments", `{"name":"财务部","budget_money":500}`, hdr())
+	if w.Code != http.StatusOK && w.Code != http.StatusCreated {
+		t.Fatalf("create dept with budget: %d %s", w.Code, w.Body.String())
+	}
+	// 列表必须带 budget_money=500
+	w, out = doJSON(t, r, "GET", "/api/admin/departments", "", hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("list depts: %d", w.Code)
+	}
+	for _, d := range out["departments"].([]any) {
+		dm := d.(map[string]any)
+		if dm["name"] == "财务部" {
+			if b, _ := dm["budget_money"].(float64); b != 500 {
+				t.Fatalf("create dept budget_money = %v, want 500", b)
+			}
+			return
+		}
+	}
+	t.Fatal("财务部 missing from list")
+}
+
+// 创建部门带负预算 → 400
+func TestAdminCreateDeptNegativeBudget(t *testing.T) {
+	r, db := adminRouter(t)
+	defer db.Close()
+	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d", w.Code)
+	}
+	csrf := out["csrf_token"].(string)
+	var sess string
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == sessionCookieName {
+			sess = ck.Value
+		}
+	}
+	hdr := func() map[string]string {
+		return map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
+	}
+	w, _ = doJSON(t, r, "POST", "/api/admin/departments", `{"name":"坏预算","budget_money":-1}`, hdr())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("negative budget create accepted: %d", w.Code)
+	}
+}
+
 // TestAdminDeptBudget: 部门预算设置/清除,列表附 budget_money 与 monthly_cost。
 func TestAdminDeptBudget(t *testing.T) {
 	r, db := adminRouter(t)
