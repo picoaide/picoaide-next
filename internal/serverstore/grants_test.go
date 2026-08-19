@@ -269,3 +269,38 @@ func TestReplaceGroupGrants(t *testing.T) {
 		t.Fatalf("folder multi-grant: %v %v", ids, err)
 	}
 }
+
+// 审计 A5-L9: 整组替换校验与写入同事务 —— 部门不存在时失败且既有授权不被清空
+// (无 TOCTOU 窗口,不留孤儿授权行)。
+func TestReplaceGroupGrantsRollbackOnUnknownDept(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateDepartment(db, "研发部", 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := GrantSkill(db, "data-extract", "alice", GranteeUser); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReplaceSkillGroupGrants(db, "data-extract", []string{"研发部"}); err != nil {
+		t.Fatal(err)
+	}
+	// 替换为「研发部 + 不存在的部门」:整组失败,研发部授权必须原样保留
+	err := ReplaceSkillGroupGrants(db, "data-extract", []string{"研发部", "幽灵部门"})
+	if err != ErrNotFound {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	groups, _ := ListSkillGrants(db, "data-extract")
+	if len(groups) != 2 { // 研发部 + alice
+		t.Fatalf("grants after failed replace = %+v, want intact", groups)
+	}
+	// 重复/空名同样被拒(事务内校验)
+	if err := ReplaceSkillGroupGrants(db, "data-extract", []string{"研发部", "研发部"}); err != ErrValidation {
+		t.Fatalf("duplicate dept err = %v, want ErrValidation", err)
+	}
+	if err := ReplaceSkillGroupGrants(db, "data-extract", []string{""}); err != ErrValidation {
+		t.Fatalf("empty dept err = %v, want ErrValidation", err)
+	}
+}
