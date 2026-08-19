@@ -452,8 +452,9 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 	c.JSON(http.StatusOK, gin.H{
 		"default_model":       settings["gateway.default_model"],
 		"rate_limit":          rateLimit,
-		"monthly_quota":       monthlyQuota,      // default per-user monthly tokens (0 = unlimited)
-		"monthly_quota_money": monthlyQuotaMoney, // default per-user monthly yuan (0 = unlimited)
+		"monthly_quota":       monthlyQuota,                             // default per-user monthly tokens (0 = unlimited)
+		"monthly_quota_money": monthlyQuotaMoney,                        // default per-user monthly yuan (0 = unlimited)
+		"peak_windows":        settings[serverstore.PeakWindowsSetting], // 高峰时段 JSON;空 = 无峰谷价
 		"allow_private":       allowPrivate,
 		"search_endpoint":     settings["web.search_endpoint"],
 		"server_base_url":     settings["server.base_url"],
@@ -467,6 +468,7 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		RateLimit         string `json:"rate_limit"`
 		MonthlyQuota      string `json:"monthly_quota"`
 		MonthlyQuotaMoney string `json:"monthly_quota_money"`
+		PeakWindows       string `json:"peak_windows"`
 		AllowPrivate      bool   `json:"allow_private"`
 		SearchEndpoint    string `json:"search_endpoint"`
 		ServerBaseURL     string `json:"server_base_url"`
@@ -474,6 +476,13 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
 		return
+	}
+	if req.PeakWindows != "" {
+		// 非法高峰时段 JSON 直接拒绝:宁可保持现状也不写坏计费口径
+		if serverstore.ParsePeakWindows(req.PeakWindows) == nil {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "peak_windows 必须是合法高峰时段 JSON,如 [{\"start\":\"09:00\",\"end\":\"12:00\"}]")
+			return
+		}
 	}
 	if req.DefaultModel != "" && !modelEnabledByDB(db, req.DefaultModel) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "默认模型必须属于已启用的模型")
@@ -517,6 +526,12 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	}
 	if req.MonthlyQuotaMoney != "" {
 		if err := serverstore.SetSetting(db, serverstore.MonthlyMoneyQuotaSetting, req.MonthlyQuotaMoney); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+	}
+	if req.PeakWindows != "" {
+		if err := serverstore.SetSetting(db, serverstore.PeakWindowsSetting, req.PeakWindows); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}

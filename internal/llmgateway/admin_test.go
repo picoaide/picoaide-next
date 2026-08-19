@@ -492,3 +492,37 @@ func TestAdminModelOffpeakDiscount(t *testing.T) {
 		t.Fatalf("offpeak -0.5 accepted: %d", w.Code)
 	}
 }
+
+// TestAdminGatewayPeakWindows: 高峰时段配置读写 + 非法值拒绝。
+func TestAdminGatewayPeakWindows(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	// 缺省返回空(无峰谷)
+	w, out := adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("gateway get: %d", w.Code)
+	}
+	if out["peak_windows"] != "" {
+		t.Fatalf("default peak_windows = %v, want empty", out["peak_windows"])
+	}
+
+	// 写入 DeepSeek 当前政策窗口
+	body := `{"peak_windows":"[{\"start\":\"09:00\",\"end\":\"12:00\"},{\"start\":\"14:00\",\"end\":\"18:00\"}]"}`
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", body, hdr); w.Code != http.StatusOK {
+		t.Fatalf("set peak_windows: %d %s", w.Code, w.Body.String())
+	}
+	v, ok, _ := serverstore.GetSetting(db, serverstore.PeakWindowsSetting)
+	if !ok || v == "" {
+		t.Fatalf("peak_windows not persisted: %q ok=%v", v, ok)
+	}
+	w, out = adminReq(t, r, "GET", "/api/admin/gateway", "", hdr)
+	if w.Code != http.StatusOK || out["peak_windows"] != v {
+		t.Fatalf("peak_windows readback: %d %v", w.Code, out)
+	}
+
+	// 非法 JSON 拒绝(不写库,防计费口径混乱)
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/gateway", `{"peak_windows":"not-json"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("bad peak_windows accepted: %d", w.Code)
+	}
+}
