@@ -489,3 +489,60 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 	}
 	return out, nil
 }
+
+// UserDayUsageCost 返回指定日(按服务器本地时区,day 所在日 00:00 起)
+// 的 tokens 与费用(SUM(cost))。与 monthStart 同口径:日期边界按本地时区。
+func UserDayUsageCost(db *sql.DB, userID int64, day time.Time) (usage int64, cost float64, err error) {
+	start := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, day.Location())
+	end := start.AddDate(0, 0, 1)
+	err = db.QueryRow(`SELECT COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0),
+		COALESCE(SUM(cost),0)
+		FROM usage WHERE user_id = ? AND created_at >= ? AND created_at < ?`,
+		userID, start.Format(sqliteTimeFmt), end.Format(sqliteTimeFmt)).Scan(&usage, &cost)
+	return usage, cost, err
+}
+
+// UserTotalUsageCost 返回用户全历史 tokens 与费用(SUM(cost),无日期过滤)。
+func UserTotalUsageCost(db *sql.DB, userID int64) (usage int64, cost float64, err error) {
+	err = db.QueryRow(`SELECT COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0),
+		COALESCE(SUM(cost),0)
+		FROM usage WHERE user_id = ?`, userID).Scan(&usage, &cost)
+	return usage, cost, err
+}
+
+// UsageSummary 员工用量概览(客户端余额/统计展示的数据源)。
+type UsageSummary struct {
+	MonthlyUsage   int64   `json:"monthly_usage"`   // 本月 tokens
+	MonthlyCost    float64 `json:"monthly_cost"`    // 本月费用(元)
+	TodayUsage     int64   `json:"today_usage"`     // 今日 tokens
+	TodayCost      float64 `json:"today_cost"`      // 今日费用(元)
+	YesterdayUsage int64   `json:"yesterday_usage"` // 昨日 tokens
+	YesterdayCost  float64 `json:"yesterday_cost"`  // 昨日费用(元)
+	TotalUsage     int64   `json:"total_usage"`     // 历史总 tokens
+	TotalCost      float64 `json:"total_cost"`      // 历史总费用(元)
+}
+
+// UserUsageSummary 一次取齐员工用量概览(月度/今日/昨日/总计)。
+// 月度复用 UserMonthlyUsage/UserMonthlyCost(与配额判定同一口径);
+// 今日/昨日/总计各一条聚合 SQL,量级为 O(user 行数,走 idx_usage_user_time)。
+func UserUsageSummary(db *sql.DB, userID int64) (*UsageSummary, error) {
+	now := time.Now()
+	s := &UsageSummary{}
+	var err error
+	if s.MonthlyUsage, err = UserMonthlyUsage(db, userID); err != nil {
+		return nil, err
+	}
+	if s.MonthlyCost, err = UserMonthlyCost(db, userID); err != nil {
+		return nil, err
+	}
+	if s.TodayUsage, s.TodayCost, err = UserDayUsageCost(db, userID, now); err != nil {
+		return nil, err
+	}
+	if s.YesterdayUsage, s.YesterdayCost, err = UserDayUsageCost(db, userID, now.AddDate(0, 0, -1)); err != nil {
+		return nil, err
+	}
+	if s.TotalUsage, s.TotalCost, err = UserTotalUsageCost(db, userID); err != nil {
+		return nil, err
+	}
+	return s, nil
+}

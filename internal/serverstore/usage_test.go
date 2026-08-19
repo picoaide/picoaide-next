@@ -1025,3 +1025,95 @@ func TestDeptBudgetCostBatch(t *testing.T) {
 		t.Fatalf("missing dept cost = %v, want 0", costs[9999])
 	}
 }
+
+// ---- 员工用量概览(日/昨日/总计) ----
+
+// TestUserDayUsageCost: 指定日用量/费用(边界 [day00, 次日00))。
+func TestUserDayUsageCost(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	mustPricedModel(t, db, "priced-model", 2.0, 8.0)
+
+	// 今天 09:00:1M prompt → cost 2
+	id, err := RecordUsage(db, uid, "priced-model", 1_000_000, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setCreatedAt(t, db, id, time.Now().Format("2006-01-02")+" 09:00:00")
+	// 昨天 23:00:500K prompt → cost 1
+	id2, err := RecordUsage(db, uid, "priced-model", 500_000, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setCreatedAt(t, db, id2, time.Now().AddDate(0, 0, -1).Format("2006-01-02")+" 23:00:00")
+
+	now := time.Now()
+	usage, cost, err := UserDayUsageCost(db, uid, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage != 1_000_000 || cost != 2.0 {
+		t.Fatalf("today usage=%d cost=%v, want 1000000/2.0", usage, cost)
+	}
+	u2, c2, err := UserDayUsageCost(db, uid, now.AddDate(0, 0, -1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u2 != 500_000 || c2 != 1.0 {
+		t.Fatalf("yesterday usage=%d cost=%v, want 500000/1.0", u2, c2)
+	}
+}
+
+// TestUserTotalUsageCost: 全历史累计(不含 pending 零行影响,含任意日期)。
+func TestUserTotalUsageCost(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	mustPricedModel(t, db, "priced-model", 2.0, 8.0)
+
+	id, _ := RecordUsage(db, uid, "priced-model", 1_000_000, 0)
+	setCreatedAt(t, db, id, "2020-01-01 10:00:00") // 历史
+	id2, _ := RecordUsage(db, uid, "priced-model", 500_000, 0)
+	setCreatedAt(t, db, id2, "2020-06-15 10:00:00")
+
+	usage, cost, err := UserTotalUsageCost(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage != 1_500_000 || cost != 3.0 {
+		t.Fatalf("total usage=%d cost=%v, want 1500000/3.0", usage, cost)
+	}
+}
+
+// TestUserUsageSummary: 汇总结构(本月+今日+昨日+总计)一次取齐。
+func TestUserUsageSummary(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	mustPricedModel(t, db, "priced-model", 2.0, 8.0)
+
+	// 今天
+	id, _ := RecordUsage(db, uid, "priced-model", 1_000_000, 0)
+	setCreatedAt(t, db, id, time.Now().Format("2006-01-02")+" 09:00:00")
+	// 昨天(若月初则跨月,仅检查字段存在与 cost 口径)
+	id2, _ := RecordUsage(db, uid, "priced-model", 500_000, 0)
+	setCreatedAt(t, db, id2, time.Now().AddDate(0, 0, -1).Format("2006-01-02")+" 23:00:00")
+
+	s, err := UserUsageSummary(db, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.TodayUsage != 1_000_000 || s.TodayCost != 2.0 {
+		t.Fatalf("today = %d/%v", s.TodayUsage, s.TodayCost)
+	}
+	if s.YesterdayUsage != 500_000 || s.YesterdayCost != 1.0 {
+		t.Fatalf("yesterday = %d/%v", s.YesterdayUsage, s.YesterdayCost)
+	}
+	if s.TotalUsage != 1_500_000 || s.TotalCost != 3.0 {
+		t.Fatalf("total = %d/%v", s.TotalUsage, s.TotalCost)
+	}
+	if s.MonthlyUsage != s.TotalUsage || s.MonthlyCost != s.TotalCost {
+		t.Fatalf("monthly=%d/%v vs total=%d/%v(同日应一致)", s.MonthlyUsage, s.MonthlyCost, s.TotalUsage, s.TotalCost)
+	}
+}
