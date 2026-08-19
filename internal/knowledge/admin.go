@@ -35,7 +35,7 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, uploadsDir string) {
 	g.GET("/folders", func(c *gin.Context) { listFolders(c, db) })
 	g.GET("/documents", func(c *gin.Context) { listDocuments(c, db) })
 	g.DELETE("/documents/:id", func(c *gin.Context) { deleteDoc(c, db, uploadsDir) })
-	g.PUT("/documents/:id", func(c *gin.Context) { updateDoc(c, db) })
+	g.PUT("/documents/:id", func(c *gin.Context) { updateDoc(c, db, uploadsDir) })
 	g.GET("/documents/:id", func(c *gin.Context) { getDoc(c, db) })
 	g.POST("/documents/:id/retry", func(c *gin.Context) { retryDoc(c, db) })
 	g.PUT("/folders/:id/grant", func(c *gin.Context) { grantFolder(c, db) })
@@ -421,7 +421,7 @@ type kbUpdateReq struct {
 	Content string `json:"content"`
 }
 
-func updateDoc(c *gin.Context, db *sql.DB) {
+func updateDoc(c *gin.Context, db *sql.DB, uploadsDir string) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
@@ -432,7 +432,8 @@ func updateDoc(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "标题必填")
 		return
 	}
-	if _, err := serverstore.GetKBDocument(db, id); errors.Is(err, serverstore.ErrNotFound) {
+	doc, err := serverstore.GetKBDocument(db, id)
+	if errors.Is(err, serverstore.ErrNotFound) {
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "文档不存在")
 		return
 	}
@@ -440,15 +441,30 @@ func updateDoc(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
-	if err := UpdateDocument(db, id, req.Title, req.Content); err != nil {
-		if errors.Is(err, serverstore.ErrNotFound) {
-			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "文档不存在")
-		} else if strings.Contains(err.Error(), "上限") {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", err.Error())
-		} else {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
-		}
+	// H3: pending/processing rows are owned by the async extraction queue —
+	// editing them would be silently overwritten when the worker lands.
+	if doc.Status == "pending" || doc.Status == "processing" {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "文档处理中,暂不可编辑")
 		return
+	}
+	if len(req.Content) > maxKBContent {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", fmt.Sprintf("文档内容超过上限 %d 字节", maxKBContent))
+		return
+	}
+	if doc.Status == "error" {
+		// H3: editing an error document adopts it — the edit takes over, the
+		// row becomes ready and the stale raw file is removed so a later retry
+		// can never clobber the edited content.
+		if err := serverstore.AdoptKBDocumentEdit(db, id, req.Title, req.Content, doc.ContentType, ChunkText(req.Content)); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+			return
+		}
+		os.Remove(filepath.Join(uploadsDir, strconv.FormatInt(id, 10)))
+	} else {
+		if err := UpdateDocument(db, id, req.Title, req.Content); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+			return
+		}
 	}
 	_ = serverstore.AuditLog(db, adminUsername(c), "kb_update", "doc#"+strconv.FormatInt(id, 10)+" "+req.Title)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "doc": gin.H{"id": id, "title": req.Title}})

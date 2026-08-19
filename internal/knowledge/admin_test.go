@@ -563,3 +563,59 @@ func TestAdminDeleteFolder(t *testing.T) {
 		t.Fatalf("delete missing = %d, want 404", w.Code)
 	}
 }
+
+// H3: editing a pending/processing document must be rejected — the async
+// worker would later overwrite the edit with the raw file extraction.
+func TestUpdateDocRejectsPending(t *testing.T) {
+	r, db, hdr, _ := kbAdminSetup(t)
+	defer db.Close()
+	id, err := serverstore.CreatePendingKBDocument(db, 0, "处理中", "text", 5, "upload", "admin")
+	if err != nil || id == 0 {
+		t.Fatal(err)
+	}
+	w, out := kbReq(t, r, "PUT", fmt.Sprintf("/api/admin/kb/documents/%d", id),
+		`{"title":"改标题","content":"改内容"}`, hdr)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("edit pending = %d %s, want 400", w.Code, w.Body.String())
+	}
+	if code := out["error"].(map[string]any)["code"]; code != "VALIDATION" {
+		t.Fatalf("error code = %v, want VALIDATION", code)
+	}
+}
+
+// H3: editing an error document adopts it — the edit takes over, the row
+// becomes ready, and the raw file is removed so a later retry can never
+// clobber the edited content.
+func TestUpdateDocAdoptsError(t *testing.T) {
+	r, db, hdr, uploadsDir := kbAdminSetup(t)
+	defer db.Close()
+	id, err := serverstore.CreatePendingKBDocument(db, 0, "坏文档", "text", 5, "upload", "admin")
+	if err != nil || id == 0 {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE kb_documents SET status='error', error='提取失败' WHERE id=?", id); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(uploadsDir, fmt.Sprint(id)), []byte("原始内容"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	w, _ := kbReq(t, r, "PUT", fmt.Sprintf("/api/admin/kb/documents/%d", id),
+		`{"title":"修复后标题","content":"修复后内容"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("edit error doc = %d %s, want 200", w.Code, w.Body.String())
+	}
+	doc, err := serverstore.GetKBDocument(db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Status != "ready" || doc.Error != "" || doc.Content != "修复后内容" || doc.Title != "修复后标题" {
+		t.Fatalf("doc after adopt = %+v", doc)
+	}
+	if _, err := os.Stat(filepath.Join(uploadsDir, fmt.Sprint(id))); !os.IsNotExist(err) {
+		t.Fatalf("raw file must be removed after edit adopts the doc")
+	}
+	// a retry after the edit is a no-op (already ready) — the edit survives
+	if w, _ := kbReq(t, r, "POST", fmt.Sprintf("/api/admin/kb/documents/%d/retry", id), "", hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("retry after adopt = %d, want 400 (already ready)", w.Code)
+	}
+}
