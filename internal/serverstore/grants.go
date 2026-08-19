@@ -198,7 +198,14 @@ func DeleteMCPGrants(db queryer, mcpID int64) error {
 // names become the full group-grant set (user grants untouched).
 // Every name must reference an existing department (typos fail fast).
 func replaceGroupGrants(db *sql.DB, deleteSQL string, deleteArgs []any, insert func(tx *sql.Tx, name string) error, groups []string) error {
-	// 校验部门存在(整组替换只接受已存在部门,防拼错隐式建组)
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// 部门存在性校验放事务内(审计 A5-L9):与写入同事务,消除
+	// 「校验通过后、写事务前部门被删」的 TOCTOU 窗口,不留孤儿授权行。
+	// 只接受已存在部门,防拼错隐式建组;重复/空名直接拒绝。
 	seen := map[string]bool{}
 	for _, g := range groups {
 		if g == "" || seen[g] {
@@ -206,18 +213,13 @@ func replaceGroupGrants(db *sql.DB, deleteSQL string, deleteArgs []any, insert f
 		}
 		seen[g] = true
 		var n int
-		if err := db.QueryRow("SELECT COUNT(*) FROM groups WHERE name = ? COLLATE NOCASE", g).Scan(&n); err != nil {
+		if err := tx.QueryRow("SELECT COUNT(*) FROM groups WHERE name = ? COLLATE NOCASE", g).Scan(&n); err != nil {
 			return err
 		}
 		if n == 0 {
 			return ErrNotFound
 		}
 	}
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 	if _, err := tx.Exec(deleteSQL, deleteArgs...); err != nil {
 		return err
 	}
