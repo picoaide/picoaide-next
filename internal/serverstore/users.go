@@ -295,6 +295,11 @@ func DeleteUser(db *sql.DB, id int64) error {
 	if _, err := tx.Exec("DELETE FROM mcp_grants WHERE grantee_type = 'user' AND grantee = ?", username); err != nil {
 		return err
 	}
+	// 删除担任部门主管的用户:清空其主管身份(审计 M1),否则悬空
+	// leader_id 会卡死该部门的后续更新(UpdateDepartment 校验主管存在)。
+	if _, err := tx.Exec("UPDATE groups SET leader_id = 0 WHERE leader_id = ?", id); err != nil {
+		return err
+	}
 	res, err := tx.Exec("DELETE FROM users WHERE id = ?", id)
 	if err != nil {
 		return err

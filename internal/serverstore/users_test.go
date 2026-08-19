@@ -358,3 +358,36 @@ func TestSettings(t *testing.T) {
 		t.Fatalf("all: %v", all)
 	}
 }
+
+// 删除担任部门主管的用户:groups.leader_id 必须清零(审计 M1),
+// 否则残留悬空主管 → 该部门后续任何 UpdateDepartment 都报「主管不存在」。
+func TestDeleteUserClearsDeptLeadership(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	leadID, err := CreateUserWithPassword(db, "lead", "pw123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deptID, err := CreateDepartment(db, "研发部", 0, leadID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 删除主管
+	if err := DeleteUser(db, leadID); err != nil {
+		t.Fatalf("delete leader user: %v", err)
+	}
+	var leaderID int64
+	if err := db.QueryRow("SELECT leader_id FROM groups WHERE id = ?", deptID).Scan(&leaderID); err != nil {
+		t.Fatal(err)
+	}
+	if leaderID != 0 {
+		t.Fatalf("groups.leader_id = %d after leader delete, want 0", leaderID)
+	}
+	// 部门仍可正常更新(不再被悬空主管卡死)
+	if err := UpdateDepartment(db, deptID, "技术中心", 0, 0, ""); err != nil {
+		t.Fatalf("update dept after leader delete: %v", err)
+	}
+}
