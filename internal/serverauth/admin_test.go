@@ -905,6 +905,89 @@ func TestAdminUsageCost(t *testing.T) {
 	}
 }
 
+// listUsers 必须附带生效配额(effective_quota_tokens/money,审计 M7):
+// 员工无个人配额时 = 全局默认,设个人配额后 = 个人值,admin 恒 0(不限)。
+func TestAdminListUsersEffectiveQuota(t *testing.T) {
+	r, db := adminRouter(t)
+	defer db.Close()
+	w, out := doJSON(t, r, "POST", "/api/admin/login", `{"username":"boss","password":"pw123456"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d", w.Code)
+	}
+	csrf := out["csrf_token"].(string)
+	var sess string
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == sessionCookieName {
+			sess = ck.Value
+		}
+	}
+	hdr := func() map[string]string {
+		return map[string]string{"Cookie": "picoaide_session=" + sess, "X-CSRF-Token": csrf}
+	}
+	// 全局默认配额
+	if err := serverstore.SetSetting(db, serverstore.MonthlyQuotaSetting, "100000"); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverstore.SetSetting(db, serverstore.MonthlyMoneyQuotaSetting, "50"); err != nil {
+		t.Fatal(err)
+	}
+	// 员工(无个人配额)
+	w, out = doJSON(t, r, "POST", "/api/admin/users", `{"username":"alice","password":"alicepw123","is_admin":false}`, hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("create user: %d", w.Code)
+	}
+	uid := int64(out["user"].(map[string]any)["id"].(float64))
+	// 列表:alice 的生效配额 = 全局默认
+	w, out = doJSON(t, r, "GET", "/api/admin/users?size=200", "", hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("list users: %d", w.Code)
+	}
+	alice := findUser(out, "alice")
+	if alice == nil {
+		t.Fatal("alice missing")
+	}
+	if eq, _ := alice["effective_quota_tokens"].(float64); eq != 100000 {
+		t.Fatalf("alice effective_quota_tokens = %v, want 100000", eq)
+	}
+	if em, _ := alice["effective_quota_money"].(float64); em != 50 {
+		t.Fatalf("alice effective_quota_money = %v, want 50", em)
+	}
+	// admin 恒 0(不限)
+	boss := findUser(out, "boss")
+	if boss == nil {
+		t.Fatal("boss missing")
+	}
+	if eq, _ := boss["effective_quota_tokens"].(float64); eq != 0 {
+		t.Fatalf("boss effective_quota_tokens = %v, want 0", eq)
+	}
+	// 设个人配额后生效值 = 个人值
+	w, _ = doJSON(t, r, "PUT", fmt.Sprintf("/api/admin/users/%d", uid), `{"quota_tokens":5000,"quota_money":10}`, hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("set quota: %d", w.Code)
+	}
+	w, out = doJSON(t, r, "GET", "/api/admin/users?size=200", "", hdr())
+	if w.Code != http.StatusOK {
+		t.Fatalf("list users: %d", w.Code)
+	}
+	alice = findUser(out, "alice")
+	if eq, _ := alice["effective_quota_tokens"].(float64); eq != 5000 {
+		t.Fatalf("alice effective_quota_tokens after override = %v, want 5000", eq)
+	}
+	if em, _ := alice["effective_quota_money"].(float64); em != 10 {
+		t.Fatalf("alice effective_quota_money after override = %v, want 10", em)
+	}
+}
+
+func findUser(out map[string]any, name string) map[string]any {
+	for _, u := range out["users"].([]any) {
+		um := u.(map[string]any)
+		if um["username"] == name {
+			return um
+		}
+	}
+	return nil
+}
+
 // createDepartment 必须消费 budget_money(审计 H4:此前静默丢弃,
 // 新建部门带预算保存后预算不生效)。
 func TestAdminCreateDeptWithBudget(t *testing.T) {

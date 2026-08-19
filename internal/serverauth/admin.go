@@ -257,6 +257,14 @@ func (a *AdminAPI) listUsers(c *gin.Context) {
 		}
 		uj["monthly_usage"] = usageByUser[u.ID] // tokens used this calendar month (0 when none)
 		uj["monthly_cost"] = costByUser[u.ID]   // yuan spent this calendar month (0 when none)
+		// 生效配额(审计 M7):跟随默认时展示全局值,0 = 不限,admin 恒 0。
+		// 与员工侧 GET /api/auth/usage 同口径(EffectiveQuota/EffectiveMoneyQuota)。
+		if eq, err := serverstore.EffectiveQuota(a.DB, &u); err == nil {
+			uj["effective_quota_tokens"] = eq
+		}
+		if em, err := serverstore.EffectiveMoneyQuota(a.DB, &u); err == nil {
+			uj["effective_quota_money"] = em
+		}
 		out = append(out, uj)
 	}
 	c.JSON(http.StatusOK, gin.H{"users": out, "total": total, "page": page, "size": size})
