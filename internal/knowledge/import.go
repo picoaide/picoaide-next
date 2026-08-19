@@ -132,10 +132,12 @@ func importStatus(c *gin.Context, db *sql.DB) {
 		return
 	}
 	status := gin.H{}
-	for _, s := range []string{"pending", "ready", "error"} {
+	// H1: enumerate processing too — the front-end poll stops when nothing
+	// is pending or in flight, so a mid-extraction row must be visible.
+	for _, s := range []string{"pending", "processing", "ready", "error"} {
 		status[s] = counts[s] // int64, 0 when absent
 	}
-	total := status["pending"].(int64) + status["ready"].(int64) + status["error"].(int64)
+	total := status["pending"].(int64) + status["processing"].(int64) + status["ready"].(int64) + status["error"].(int64)
 	status["total"] = total
 	missing, err := serverstore.CountChunksMissingEmbeddings(db)
 	if err != nil {
