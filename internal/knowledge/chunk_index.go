@@ -97,6 +97,12 @@ func SearchChunksAll(db *sql.DB, query string, page, pageSize int) ([]ChunkResul
 	return searchChunksInFolders(db, ids, query, page, pageSize)
 }
 
+// SearchChunksInFolder searches one folder (admin hit-test narrowed to a
+// single folder, 审计 M2).
+func SearchChunksInFolder(db *sql.DB, folderID int64, query string, page, pageSize int) ([]ChunkResult, int64, error) {
+	return searchChunksInFolders(db, []int64{folderID}, query, page, pageSize)
+}
+
 // SearchMode reports whether the vector path is currently active ("hybrid")
 // or the search is pure lexical ("lexical") — admin visibility for tuning.
 func SearchMode(db *sql.DB) string {

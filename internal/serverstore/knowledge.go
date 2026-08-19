@@ -503,3 +503,76 @@ func ListKBDocumentsPaged(db *sql.DB, folderID int64, offset, limit int) ([]KBDo
 	}
 	return out, total, rows.Err()
 }
+
+// ListAllKBDocumentsPaged returns one page of documents across every folder
+// (folder_id=-1 admin view, 审计 M4), newest first.
+func ListAllKBDocumentsPaged(db *sql.DB, offset, limit int) ([]KBDocument, int64, error) {
+	var total int64
+	if err := db.QueryRow("SELECT COUNT(*) FROM kb_documents").Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := db.Query(`SELECT id, folder_id, title, content, content_type, size, source, created_by, created_at, status, error
+		FROM kb_documents ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []KBDocument
+	for rows.Next() {
+		var d KBDocument
+		var createdAt string
+		if err := rows.Scan(&d.ID, &d.FolderID, &d.Title, &d.Content, &d.ContentType, &d.Size, &d.Source, &d.CreatedBy, &createdAt, &d.Status, &d.Error); err != nil {
+			return nil, 0, err
+		}
+		d.CreatedAt = parseSQLTime(createdAt)
+		out = append(out, d)
+	}
+	return out, total, rows.Err()
+}
+
+// ListAuditLogsPagedFiltered returns one page of audit entries (newest
+// first) optionally filtered by action/username (审计 M8), plus the total
+// for the filtered set.
+func ListAuditLogsPagedFiltered(db *sql.DB, offset, limit int, action, username string) ([]KBAuditLog, int64, error) {
+	where := ""
+	args := []any{}
+	if action != "" {
+		where += " AND action = ?"
+		args = append(args, action)
+	}
+	if username != "" {
+		where += " AND username = ?"
+		args = append(args, username)
+	}
+	where = strings.TrimPrefix(where, " AND ")
+	var total int64
+	countQ := "SELECT COUNT(*) FROM kb_audit_logs"
+	if where != "" {
+		countQ += " WHERE " + where
+	}
+	if err := db.QueryRow(countQ, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	q := "SELECT id, username, action, detail, created_at FROM kb_audit_logs"
+	if where != "" {
+		q += " WHERE " + where
+	}
+	q += " ORDER BY id DESC LIMIT ? OFFSET ?"
+	args = append(args, limit, offset)
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []KBAuditLog
+	for rows.Next() {
+		var l KBAuditLog
+		var created string
+		if err := rows.Scan(&l.ID, &l.Username, &l.Action, &l.Detail, &created); err != nil {
+			return nil, 0, err
+		}
+		l.CreatedAt = parseSQLTime(created)
+		out = append(out, l)
+	}
+	return out, total, rows.Err()
+}

@@ -64,7 +64,9 @@ func getEmbeddingModel(c *gin.Context, db *sql.DB) {
 
 // setEmbeddingModel stores the embedding model name; chunks already
 // indexed keep old vectors until a reindex (dims mismatch is skipped by
-// the vector scan automatically).
+// the vector scan automatically). The model must exist in the gateway
+// model list (when any model is known) so a typo surfaces immediately
+// instead of silently idling the embedding loop (审计 M6).
 func setEmbeddingModel(c *gin.Context, db *sql.DB) {
 	var req struct {
 		Model string `json:"model"`
@@ -74,6 +76,19 @@ func setEmbeddingModel(c *gin.Context, db *sql.DB) {
 		return
 	}
 	req.Model = strings.TrimSpace(req.Model)
+	if req.Model != "" {
+		var known int
+		if err := db.QueryRow("SELECT COUNT(*) FROM models").Scan(&known); err != nil {
+			known = 0
+		}
+		if known > 0 {
+			var n int
+			if err := db.QueryRow("SELECT COUNT(*) FROM models WHERE name = ?", req.Model).Scan(&n); err != nil || n == 0 {
+				serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "模型不在网关模型列表中: "+req.Model)
+				return
+			}
+		}
+	}
 	if err := serverstore.SetSetting(db, EmbeddingModelSetting, req.Model); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 		return
@@ -83,8 +98,18 @@ func setEmbeddingModel(c *gin.Context, db *sql.DB) {
 }
 
 // reindexEmbeddings clears all chunk vectors; the background embedding
-// loop rebuilds them (model change / corrupted index recovery).
+// loop rebuilds them (model change / corrupted index recovery). Refuses
+// when no model is configured — clearing would orphan every vector (审计 L8).
 func reindexEmbeddings(c *gin.Context, db *sql.DB) {
+	model, ok, err := GetEmbeddingModel(db)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if !ok || model == "" {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "未配置向量模型,无需重建")
+		return
+	}
 	if err := serverstore.ClearChunkEmbeddings(db); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "重建失败")
 		return
@@ -135,10 +160,17 @@ func uploadDoc(c *gin.Context, db *sql.DB, uploadsDir string) {
 	var err error
 
 	if strings.HasPrefix(c.ContentType(), "multipart/form-data") {
+		// M7: cap the request body before gin buffers the multipart — the
+		// per-file limit must protect bandwidth/disk, not just reject late.
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxUploadBytes+64<<10)
 		// file upload: txt/md/docx/pdf saved to disk, extraction runs in the
 		// async queue; the response is 202 with status=pending
 		var fh *multipart.FileHeader
 		if fh, err = c.FormFile("file"); err != nil {
+			if errors.As(err, new(*http.MaxBytesError)) {
+				serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "文件超过 16MB 上限")
+				return
+			}
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "缺少 file 文件字段")
 			return
 		}
@@ -287,7 +319,15 @@ func listDocuments(c *gin.Context, db *sql.DB) {
 	if size < 1 || size > 200 {
 		size = 20
 	}
-	docs, total, err := serverstore.ListKBDocumentsPaged(db, folderID, (page-1)*size, size)
+	var docs []serverstore.KBDocument
+	var total int64
+	var err error
+	if folderID == -1 {
+		// M4: "全部文档" 视图 — list across every folder
+		docs, total, err = serverstore.ListAllKBDocumentsPaged(db, (page-1)*size, size)
+	} else {
+		docs, total, err = serverstore.ListKBDocumentsPaged(db, folderID, (page-1)*size, size)
+	}
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
@@ -310,7 +350,9 @@ func listAudit(c *gin.Context, db *sql.DB) {
 	if size < 1 || size > 200 {
 		size = 50
 	}
-	logs, total, err := serverstore.ListAuditLogsPaged(db, (page-1)*size, size)
+	// M8: optional action/username filters
+	logs, total, err := serverstore.ListAuditLogsPagedFiltered(db, (page-1)*size, size,
+		c.Query("action"), c.Query("username"))
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
@@ -347,6 +389,16 @@ func deleteDoc(c *gin.Context, db *sql.DB, uploadsDir string) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+// folderExists reports whether a kb folder row exists (grant endpoints'
+// 404 guard, 审计 M9).
+func folderExists(db *sql.DB, id int64) bool {
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM kb_folders WHERE id = ?", id).Scan(&n); err != nil {
+		return false
+	}
+	return n > 0
+}
+
 func grantFolder(c *gin.Context, db *sql.DB) {
 	folderID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
@@ -354,12 +406,7 @@ func grantFolder(c *gin.Context, db *sql.DB) {
 		return
 	}
 	// 校验 folder 存在(防孤儿授权落库)
-	var n int
-	if err := db.QueryRow("SELECT COUNT(*) FROM kb_folders WHERE id = ?", folderID).Scan(&n); err != nil {
-		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-		return
-	}
-	if n == 0 {
+	if !folderExists(db, folderID) {
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "文件夹不存在")
 		return
 	}
@@ -476,6 +523,11 @@ func listGrants(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
 		return
 	}
+	// M9: 与 grant/replace 一致,不存在的文件夹 → 404(防孤儿/防误判)
+	if !folderExists(db, folderID) {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "文件夹不存在")
+		return
+	}
 	users, groups, err := serverstore.ListKBFolderGrants(db, folderID)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
@@ -494,6 +546,11 @@ func revokeGrant(c *gin.Context, db *sql.DB) {
 	folderID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
+		return
+	}
+	// M9: 与 grant/replace 一致,不存在的文件夹 → 404
+	if !folderExists(db, folderID) {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "文件夹不存在")
 		return
 	}
 	var req struct {
@@ -534,8 +591,17 @@ func search(c *gin.Context, db *sql.DB) {
 		size = 20
 	}
 	// hit-test: passage-level results exactly as the LLM would see them,
-	// content truncated to the snippet (full text lives in the doc API)
-	results, total, err := SearchChunksAll(db, q, page, size)
+	// content truncated to the snippet (full text lives in the doc API).
+	// M2: optional folder_id narrows the search to one folder.
+	folderID, _ := strconv.ParseInt(c.DefaultQuery("folder_id", "0"), 10, 64)
+	var results []ChunkResult
+	var total int64
+	var err error
+	if folderID > 0 {
+		results, total, err = SearchChunksInFolder(db, folderID, q, page, size)
+	} else {
+		results, total, err = SearchChunksAll(db, q, page, size)
+	}
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "搜索失败")
 		return
@@ -559,12 +625,7 @@ func replaceFolderGrants(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
 		return
 	}
-	var n int
-	if err := db.QueryRow("SELECT COUNT(*) FROM kb_folders WHERE id = ?", folderID).Scan(&n); err != nil {
-		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-		return
-	}
-	if n == 0 {
+	if !folderExists(db, folderID) {
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "文件夹不存在")
 		return
 	}
