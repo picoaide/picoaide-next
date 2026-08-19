@@ -860,3 +860,33 @@ func TestAdminProviderChannelClearToManual(t *testing.T) {
 		t.Fatalf("models after clear-to-manual = %+v, want empty", models)
 	}
 }
+
+// 回归:手动型上游仅启停(enabled)不得清空其模型清单(审计修复后曾误删)。
+func TestAdminToggleProviderKeepsManualModels(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	if w, _ := adminReq(t, r, "POST", "/api/admin/providers",
+		`{"name":"manual","base_url":"http://x","api_key":"k","models":["keep-a","keep-b"]}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("create provider: %d", w.Code)
+	}
+	// 手动型:models 字段在创建时即入 models 表
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM models WHERE provider_id = 1").Scan(&n); err != nil || n != 2 {
+		t.Fatalf("models after create = %d, want 2", n)
+	}
+	// 仅启停(不带 models 字段)
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/providers/1", `{"enabled":false}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("toggle: %d %s", w.Code, w.Body.String())
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM models WHERE provider_id = 1").Scan(&n); err != nil || n != 2 {
+		t.Fatalf("models after toggle = %d, want 2 (must not be wiped)", n)
+	}
+	// 显式携带 models 才同步
+	if w, _ := adminReq(t, r, "PUT", "/api/admin/providers/1", `{"models":["only-a"]}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("set models: %d", w.Code)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM models WHERE provider_id = 1").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("models after explicit sync = %d, want 1", n)
+	}
+}

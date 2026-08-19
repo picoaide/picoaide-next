@@ -268,6 +268,7 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 	if req.BaseURL != "" {
 		p.BaseURL = req.BaseURL
 	}
+	wasChannel := p.Channel
 	if req.Channel != nil {
 		// 指针语义:"" = 清空渠道(切回手动型)(审计修复 M3 附带)
 		p.Channel = *req.Channel
@@ -302,10 +303,20 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 		return
 	}
-	// 模型清单变更同步到 models 表(单一数据源)。
-	// channel provider 的模型由渠道同步维护,不走 provider.models 列表覆盖
-	if p.Channel == "" {
-		if err := serverstore.SyncProviderModels(db, p.ID, p.Models); err != nil {
+	// 模型清单变更同步到 models 表(单一数据源)。仅两种情形触发:
+	//  1. 请求显式携带 models 字段(手动型清单编辑);
+	//  2. 渠道型切回手动型(wasChannel != "" → p.Channel == ""):清空旧渠道
+	//     同步来的模型,避免残留路由。
+	// 启停/改名等其它更新不得用空清单清空手动型上游的模型(审计修复后回归:
+	// PUT {"enabled":false} 曾把该上游模型全部删除)。
+	// channel provider 的模型由渠道同步维护,不走 provider.models 列表覆盖。
+	clearingChannelModels := wasChannel != "" && p.Channel == ""
+	if (req.Models != nil || clearingChannelModels) && p.Channel == "" {
+		names := p.Models
+		if clearingChannelModels {
+			names = nil
+		}
+		if err := serverstore.SyncProviderModels(db, p.ID, names); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "模型同步失败")
 			return
 		}
