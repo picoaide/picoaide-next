@@ -257,6 +257,14 @@ func (a *AdminAPI) listUsers(c *gin.Context) {
 		}
 		uj["monthly_usage"] = usageByUser[u.ID] // tokens used this calendar month (0 when none)
 		uj["monthly_cost"] = costByUser[u.ID]   // yuan spent this calendar month (0 when none)
+		// 生效配额(审计 M7):跟随默认时展示全局值,0 = 不限,admin 恒 0。
+		// 与员工侧 GET /api/auth/usage 同口径(EffectiveQuota/EffectiveMoneyQuota)。
+		if eq, err := serverstore.EffectiveQuota(a.DB, &u); err == nil {
+			uj["effective_quota_tokens"] = eq
+		}
+		if em, err := serverstore.EffectiveMoneyQuota(a.DB, &u); err == nil {
+			uj["effective_quota_money"] = em
+		}
 		out = append(out, uj)
 	}
 	c.JSON(http.StatusOK, gin.H{"users": out, "total": total, "page": page, "size": size})
@@ -341,7 +349,7 @@ func (a *AdminAPI) createUser(c *gin.Context) {
 		}
 	}
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_create", u.Username)
-	c.JSON(http.StatusOK, gin.H{"user": userJSON(u)})
+	c.JSON(http.StatusCreated, gin.H{"user": userJSON(u)}) // L6:创建返回 201
 }
 
 func (a *AdminAPI) updateUser(c *gin.Context) {
@@ -625,6 +633,11 @@ func (a *AdminAPI) createDepartment(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "部门名称必填")
 		return
 	}
+	// 预算负值先于创建校验,避免创建成功后再失败留下无预算部门
+	if req.BudgetMoney != nil && *req.BudgetMoney < 0 {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "budget_money 不能为负数")
+		return
+	}
 	id, err := serverstore.CreateDepartment(a.DB, strings.TrimSpace(req.Name), req.ParentID, req.LeaderID, req.Description)
 	if err != nil {
 		if errors.Is(err, serverstore.ErrDuplicate) {
@@ -638,8 +651,15 @@ func (a *AdminAPI) createDepartment(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 		return
 	}
+	// 消费 budget_money(审计 H4:创建对话框提交的预算此前被静默丢弃)
+	if req.BudgetMoney != nil {
+		if err := serverstore.SetDeptBudget(a.DB, id, *req.BudgetMoney); err != nil {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "保存预算失败")
+			return
+		}
+	}
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "dept_create", req.Name)
-	c.JSON(http.StatusOK, gin.H{"department": gin.H{"id": id, "name": req.Name}})
+	c.JSON(http.StatusCreated, gin.H{"department": gin.H{"id": id, "name": req.Name}}) // L6:创建返回 201
 }
 
 func (a *AdminAPI) updateDepartment(c *gin.Context) {
@@ -662,9 +682,10 @@ func (a *AdminAPI) updateDepartment(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "budget_money 不能为负数")
 		return
 	}
-	if err := serverstore.UpdateDepartment(a.DB, id, strings.TrimSpace(req.Name), req.ParentID, req.LeaderID, req.Description); err != nil {
+	// 预算与部门更新同一事务(审计 M2):预算失败整体回滚,不留半更新状态
+	if err := serverstore.UpdateDepartmentWithBudget(a.DB, id, strings.TrimSpace(req.Name), req.ParentID, req.LeaderID, req.Description, req.BudgetMoney); err != nil {
 		if errors.Is(err, serverstore.ErrValidation) {
-			writeError(c, http.StatusBadRequest, "VALIDATION", "上级部门不能是自身或子部门")
+			writeError(c, http.StatusBadRequest, "VALIDATION", "上级部门不能是自身或子部门,或预算非法")
 			return
 		}
 		if errors.Is(err, serverstore.ErrDuplicate) {
@@ -678,22 +699,18 @@ func (a *AdminAPI) updateDepartment(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 		return
 	}
-	// 部门预算(0024):与部门更新同事务语义 —— 更新后再设预算,失败不落脏
-	if req.BudgetMoney != nil {
-		if err := serverstore.SetDeptBudget(a.DB, id, *req.BudgetMoney); err != nil {
-			writeError(c, http.StatusInternalServerError, "INTERNAL", "保存预算失败")
-			return
-		}
-	}
 	detail := fmt.Sprintf("%s→%s parent:%d→%d leader:%d→%d",
 		before.Name, req.Name, before.ParentID, req.ParentID, before.LeaderID, req.LeaderID)
 	if req.BudgetMoney != nil {
 		detail += fmt.Sprintf(" budget:%.2f", *req.BudgetMoney)
 	}
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "dept_update", detail)
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	// L6:返回资源对象,与 createDepartment 响应结构一致
+	c.JSON(http.StatusOK, gin.H{"department": gin.H{"id": id, "name": req.Name}})
 }
 
+// 错误码口径(审计 L2):URL 主资源不存在 → 404 NOT_FOUND;
+// 依赖资源(上级/主管/部门归属目标)不存在 → 400 VALIDATION。
 func (a *AdminAPI) deleteDepartment(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
@@ -708,6 +725,11 @@ func (a *AdminAPI) deleteDepartment(c *gin.Context) {
 	if err := serverstore.DeleteDepartment(a.DB, id); err != nil {
 		if errors.Is(err, serverstore.ErrDepartmentInUse) {
 			writeError(c, http.StatusBadRequest, "VALIDATION", "部门仍有关联(成员/子部门/授权),请先转移或清理")
+			return
+		}
+		// 保留部门(全员)删除:此前落入 INTERNAL 500(审计 L1),应返回 400 VALIDATION
+		if errors.Is(err, serverstore.ErrValidation) {
+			writeError(c, http.StatusBadRequest, "VALIDATION", "保留部门不可删除")
 			return
 		}
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")

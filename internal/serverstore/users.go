@@ -174,6 +174,11 @@ func UpdateUserRevokingTokens(db *sql.DB, u *User) error {
 
 // ListUsers returns a page of users and the total count. q filters by
 // username substring (empty q = all users).
+//
+// NOTE(审计 L5):搜索词含 LIKE 通配符(%/_)时不得按通配匹配全部/任意单字符;
+// 而 modernc.org/sqlite 的 LIKE ... ESCAPE 子句实测解析不可靠,故改用
+// instr(lower(username), lower(?)) > 0:纯子串匹配、无通配符语义,
+// 大小写不敏感与 SQLite 默认 LIKE 的 ASCII 折叠一致。
 func ListUsers(db *sql.DB, offset, limit int, q string) ([]User, int64, error) {
 	q = strings.TrimSpace(q)
 	var total int64
@@ -186,12 +191,11 @@ func ListUsers(db *sql.DB, offset, limit int, q string) ([]User, int64, error) {
 		rows, err = db.Query(`SELECT `+userCols+`
 			FROM users ORDER BY id LIMIT ? OFFSET ?`, limit, offset)
 	} else {
-		like := "%" + q + "%"
-		if err = db.QueryRow("SELECT COUNT(*) FROM users WHERE username LIKE ?", like).Scan(&total); err != nil {
+		if err = db.QueryRow("SELECT COUNT(*) FROM users WHERE instr(lower(username), lower(?)) > 0", q).Scan(&total); err != nil {
 			return nil, 0, err
 		}
 		rows, err = db.Query(`SELECT `+userCols+`
-			FROM users WHERE username LIKE ? ORDER BY id LIMIT ? OFFSET ?`, like, limit, offset)
+			FROM users WHERE instr(lower(username), lower(?)) > 0 ORDER BY id LIMIT ? OFFSET ?`, q, limit, offset)
 	}
 	if err != nil {
 		return nil, 0, err
@@ -259,6 +263,11 @@ func nilIfNilFloat64(v *float64) any {
 // constraint. Deleting the last remaining admin rolls back with ErrLastAdmin
 // (C-17: the guard runs inside the transaction, closing the count-then-delete
 // TOCTOU; 审计 S1: kb_folder_users rows keyed by username are cleaned too).
+//
+// 权衡(审计 L4):usage 为计费原始记录,删除用户会物理删除其全部用量/费用,
+// 历史统计与部门预算成本随之减少、不可追溯。当前采用硬删以保证 FK 完整与
+// 「删即消失」的管理语义;如后续需要计费审计留存,应改为软删(users.status
+// 墓碑态 + usage 保留),本函数签名与调用方需同步调整。
 func DeleteUser(db *sql.DB, id int64) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -293,6 +302,11 @@ func DeleteUser(db *sql.DB, id int64) error {
 		return err
 	}
 	if _, err := tx.Exec("DELETE FROM mcp_grants WHERE grantee_type = 'user' AND grantee = ?", username); err != nil {
+		return err
+	}
+	// 删除担任部门主管的用户:清空其主管身份(审计 M1),否则悬空
+	// leader_id 会卡死该部门的后续更新(UpdateDepartment 校验主管存在)。
+	if _, err := tx.Exec("UPDATE groups SET leader_id = 0 WHERE leader_id = ?", id); err != nil {
 		return err
 	}
 	res, err := tx.Exec("DELETE FROM users WHERE id = ?", id)

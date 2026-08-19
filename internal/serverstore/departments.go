@@ -128,6 +128,17 @@ func CreateDepartment(db *sql.DB, name string, parentID, leaderID int64, descrip
 // descendant (cycle); leader must exist. Renames cascade to the grant
 // tables so existing grants keep resolving (授权按组名,改名不得静默失效).
 func UpdateDepartment(db *sql.DB, id int64, name string, parentID, leaderID int64, description string) error {
+	return updateDepartment(db, id, name, parentID, leaderID, description, nil)
+}
+
+// UpdateDepartmentWithBudget 与 UpdateDepartment 同语义,额外在同一事务内
+// 设置部门月度金额预算(budget nil = 不变,0 = 清除,>0 = 设置;负值 = ErrValidation)。
+// 预算与改名/改上级原子生效,失败整体回滚,不留半更新状态(审计 M2)。
+func UpdateDepartmentWithBudget(db *sql.DB, id int64, name string, parentID, leaderID int64, description string, budget *float64) error {
+	return updateDepartment(db, id, name, parentID, leaderID, description, budget)
+}
+
+func updateDepartment(db *sql.DB, id int64, name string, parentID, leaderID int64, description string, budget *float64) error {
 	g, err := GroupByID(db, id)
 	if err != nil {
 		return err
@@ -159,6 +170,11 @@ func UpdateDepartment(db *sql.DB, id int64, name string, parentID, leaderID int6
 		return err
 	}
 	defer tx.Rollback()
+	// 保留名:全员行不可改名(隐式全员授权按名解析,改名会静默失效;
+	// 迁移 0018 一次性 seed,无启动自愈)。
+	if g.Name == EveryoneGroupName {
+		return ErrValidation
+	}
 	if name == EveryoneGroupName {
 		return ErrValidation // 保留名
 	}
@@ -181,6 +197,19 @@ func UpdateDepartment(db *sql.DB, id int64, name string, parentID, leaderID int6
 			return ErrDuplicate
 		}
 		return err
+	}
+	// 预算并入同一事务(审计 M2):预算失败回滚整个部门更新
+	if budget != nil {
+		if *budget < 0 {
+			return ErrValidation
+		}
+		if *budget <= 0 {
+			if _, err := tx.Exec("UPDATE groups SET budget_money = NULL WHERE id = ?", id); err != nil {
+				return err
+			}
+		} else if _, err := tx.Exec("UPDATE groups SET budget_money = ? WHERE id = ?", *budget, id); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
